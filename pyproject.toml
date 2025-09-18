@@ -1,0 +1,42 @@
+[project]
+name = "Snapchat_Auto"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "blackboxprotobuf",
+    "filetype",
+    "opencv-python",
+    "pandas",
+    "pillow",
+    "pyasn1",
+    "pycryptodome",
+    "requests",
+    "freesimplegui",
+    "nuitka",
+    "my-tools",
+]
+
+
+[project.scripts]
+    build = "my_tools.build_wix_installer:main"
+
+[tool.uv]
+    package = true
+
+[tool.uv.sources]
+    nuitka = { url = "https://github.com/Nuitka/Nuitka/archive/main.zip" }
+    my-tools = { path = "../../MyGitHub/Python/my_modules/my_tools", editable = true }
+
+[tool.setuptools.packages.find]
+    where   = ["."]
+    include = ["scripts*"]
+
+[tool.msi]
+    upgrade_code = "E873CA5B-EB6F-4A47-9038-118D37FC1950"
+
+[tool.wix-nuitka]
+    console = false
+    entry_point = "Snapchat_Auto_v1.2.1.py"
+    plugins = ["tk-inter"]

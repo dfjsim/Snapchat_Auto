@@ -6,5 +6,5 @@ blackboxprotobuf
 requests
 opencv-python
 Pillow
-PySimpleGUI
+FreeSimpleGUI
 pycryptodome
