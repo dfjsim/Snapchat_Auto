@@ -1,5 +1,5 @@
 import sys
-import PySimpleGUI as sg
+import FreeSimpleGUI as sg
 from scripts import ParseSnapchat_iOS
 from scripts import getCacheAndroid
 from scripts.data import extract_zip
