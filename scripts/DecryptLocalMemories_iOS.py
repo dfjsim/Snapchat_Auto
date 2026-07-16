@@ -67,7 +67,7 @@ def decrypt_sqlcipher(db, egocipher):
             os.remove(recoveredFile)
         recoveredConn = None
         try:
-            recoveredConn = sqlite3.connect(f"file:{recoveredFile}?mode=ro", uri=True)
+            recoveredConn = sqlite3.connect(f"file:{recoveredFile}?mode=rwc", uri=True)
         except DatabaseError as e:
             logger.error(e)
         with open("recovery.sql", "r", encoding="utf-8") as recoverySql:
@@ -426,7 +426,7 @@ def recoverWithSqlite():
         os.remove(recoveredFile)
     recoveredConn = None
     try:
-        recoveredConn = sqlite3.connect(f"file:{recoveredFile}?mode=ro", uri=True)
+        recoveredConn = sqlite3.connect(f"file:{recoveredFile}?mode=rwc", uri=True)
     except DatabaseError as e:
         logger.error(e)
     with open("recovery.sql", "r", encoding='utf-8') as recoverySql:
