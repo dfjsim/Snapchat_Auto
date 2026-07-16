@@ -152,3 +152,17 @@ cython_debug/
 #.idea/
 
 Application/
+
+# Forensic run artifacts and decrypted output (never commit device data)
+recovery.sql
+gallery_decrypted.sqlite*
+decrypted_keychain.plist
+temp.plist
+temp_meo.plist
+test.plist
+Snapchat_iOS_report_*/
+Snapchat_LocalMemories_report_*/
+Snapchat_Memories_report_*/
+SnapFixedVideos/
+*.encrypteddb
+scdb-27.sqlite3*
