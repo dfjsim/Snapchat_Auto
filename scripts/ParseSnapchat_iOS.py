@@ -113,7 +113,7 @@ th {
 def path_to_image_html(filename):
     global attachmentPath_relative
     global outputDir_name
-    dots_regex = re.compile("^\.+$")
+    dots_regex = re.compile(r"^\.+$")
     
     try:
         path = Path(outputDir + "/cacheFiles/" + filename)
@@ -339,30 +339,30 @@ def getFriendsAppGroupPlistStorage(app_group_plist_storage_list, arroyo):
                 'cp1252')
             group_id = i['GROUP_ID']
         except Exception as Error:
-            logger.error("Group ID/Name Error:", Error)
+            logger.error(f"Group ID/Name Error: {Error}")
         group_participants = []
         try:
             if i['GROUP_PARTICIPANTS_USER_NAMES'] != "$null":
                 for j in i['GROUP_PARTICIPANTS_USER_NAMES']['NS.objects']:
                     group_participants.append(str(j))
         except Exception as Error:
-            logger.error("Group participant username Error:", Error)
+            logger.error(f"Group participant username Error: {Error}")
 
         groups["Conversation ID"].append(group_id)
         groups["Group Name"].append(group_name)
         groups["Participants"].append(group_participants)
         
     group_df = pd.DataFrame(groups)
-    
+
+    grupper = {"Group Name": [], "Participants": [], "Conversation ID": []}
     try: #Getting info on Chat groups that does not have a set name (Might not be needed, will need more testing)
-        query = """select 
+        query = """select
         client_conversation_id as "Conversation ID",
         group_concat(user_id) as "User ID"
         from user_conversation where conversation_type is 1
         group by client_conversation_id"""
         conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
         df = pd.read_sql_query(query, conn)
-        grupper = {"Group Name":[], "Participants": [], "Conversation ID": []}
 
         for index, row in df.iterrows():
             conv_id = row["Conversation ID"]
@@ -379,17 +379,17 @@ def getFriendsAppGroupPlistStorage(app_group_plist_storage_list, arroyo):
             grupper["Group Name"].append("No Group Name")
         #logger.info(grupper)
     except Exception as E:
-        logger.error(f"Error getting chat groups with no name, this is not expected but will not break anything major: {E}")
-        
+        # The user_conversation table is absent on newer Snapchat schemas; this optional
+        # "groups with no name" enrichment is simply skipped when it can't be built.
+        logger.info(f"Skipping chat groups with no name (optional): {E}")
+
     df_group_noname = pd.DataFrame(grupper)
     
     for index, row in df_group_noname.iterrows():
         try:
             if row["Conversation ID"] not in group_df["Conversation ID"].values:
-                try:
-                    group_df = group_df.append(row)
-                except Exception as E:
-                    raise Exception
+                # DataFrame.append() was removed in pandas 2.0; concat the row as a 1-row frame.
+                group_df = pd.concat([group_df, row.to_frame().T], ignore_index=True)
         except Exception as E:
             logger.error(f"Error appending chat groups with no name, this is not expected but will not break anything major: {E}")
             
@@ -861,6 +861,12 @@ def getCache(cachecontroller):
     
 def getContentmanager(contentmanager):
     logger.info("Getting cache info from contentmanager")
+    # Newer extractions may not have a contentmanager database at all (the glob in main()
+    # then passes ""). Nothing to merge in that case — return an empty, correctly-shaped
+    # frame instead of querying a non-existent table and logging a scary error.
+    if not contentmanager or not os.path.exists(contentmanager):
+        logger.info("No contentmanager database found, skipping")
+        return pd.DataFrame({"CACHE_KEY": [], "EXTERNAL_KEY": [], "MEDIA_CONTEXT_TYPE": []})
     df_content = pd.DataFrame()
     try:
         conn = sqlite3.connect(f"file:{contentmanager}?mode=ro", uri=True)
@@ -1041,6 +1047,11 @@ def getChats(database):
 
 def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     logger.info("Merging chats with cache files")
+    # content_type arrives from arroyo as int64; the loops below relabel some rows with
+    # strings ('local_message_reference', 'Unknown .1020', ...). pandas 3.x refuses to
+    # store a string in an int column, so widen it to object up front.
+    if 'content_type' in chats_df.columns:
+        chats_df['content_type'] = chats_df['content_type'].astype(object)
     for index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
         for index_chat, row_chat in chats_df.iterrows():
             if row_chat['client_conversation_id'] == row_arroyo['client_conversation_id'] and \
@@ -1146,6 +1157,12 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     merge_df = pd.concat(frames, axis=0)
             
     merge_df = merge_df.reset_index(drop=True)
+    # pandas 3.x refuses to set a string into a column it inferred as float64 (all-NaN
+    # after the merge/concat) instead of upcasting like older pandas did. Force the
+    # columns that receive string labels below to object dtype up front.
+    for col in ('content_type', 'message_content', 'server_message_id'):
+        if col in merge_df.columns:
+            merge_df[col] = merge_df[col].astype(object)
     sending_messages = []
     for index, row in merge_df.iterrows():
         try:
@@ -1191,6 +1208,10 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
             pass
 
     merge_df.server_message_id = pd.to_numeric(merge_df.server_message_id, errors="coerce")
+    if sending_messages:
+        # to_numeric made this column numeric; the sending rows below are tagged with the
+        # string "None", so widen back to object (matches pre-pandas-3 silent upcasting).
+        merge_df['server_message_id'] = merge_df['server_message_id'].astype(object)
     for index in sending_messages:
         merge_df.loc[index, 'server_message_id'] = "None"
         merge_df.loc[index, 'content_type'] = "Sending Message"
@@ -1282,7 +1303,7 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
             logger.warning(f"Could not find Display name for local user {row['User ID']}, {Error}")
     return friends_df
 
-def main(Application, AppGroup, keychain):
+def main(Application, AppGroup, keychain, padding="both", tz="local"):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1408,7 +1429,7 @@ def main(Application, AppGroup, keychain):
         try:
             friends_df, group_df = getFriendsAppGroupPlistStorage(app_group_plist_storage, arroyo[0])
         except Exception as E:
-            logger.info(f"Could not find friends in app_group_plist_storage", E)
+            logger.info(f"Could not find friends in app_group_plist_storage: {E}")
             try:
                 friends_df, group_df, df_snapchatter = getFriendsPrimary_DisplayMetadata(Path(primaryDoc[0]), Path(arroyo[0]))
             except:
@@ -1472,7 +1493,17 @@ def main(Application, AppGroup, keychain):
     #final_df.to_excel("test.xlsx")
     if keychain_file != "" and scdb != "":
         df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df, SCContentFolder)
-    
+
+    # Memories media report: links every Memory to all its media (SCContent + caching-media
+    # .pack) and geolocation. Handles both key schemas and multiple profiles; runs even
+    # without a keychain (new-schema imagery decrypts without one).
+    try:
+        from scripts import memories_media_report
+        memories_media_report.main(snapchatFolder, keychain_file, outputDir + "/Memories",
+                                   padding=padding, tz=tz)
+    except Exception as Error:
+        logger.error(f"Memories media report failed: {Error}")
+
     os.system("pause")
     #return user_scoped_id
 

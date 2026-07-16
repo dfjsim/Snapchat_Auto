@@ -139,7 +139,7 @@ def path_to_image_html(filename):
     global exe_path
     global outputDir_name
     
-    dots_regex = re.compile("^\.+$")
+    dots_regex = re.compile(r"^\.+$")
     
     try:
         path = Path(outputDir + "//cacheFiles//" + filename)
