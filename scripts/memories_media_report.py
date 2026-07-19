@@ -54,13 +54,62 @@ PACK_RE = re.compile(r"([0-9a-f]{64})-(\d+)\.pack$")
 
 # --------------------------------------------------------------------------- helpers
 
+def _resolve_sqlcipher_module():
+    """Return a DB-API compatible SQLCipher module (must expose connect), or None.
+
+    Any of sqlcipher3 / sqlcipher3.dbapi2 / pysqlcipher3.dbapi2 will do, so an install or
+    a frozen build can ship whichever wheel is available for its platform.
+    """
+    try:                                                   # preferred when available
+        import sqlcipher3 as candidate                     # type: ignore
+    except ImportError:
+        candidate = None
+
+    if candidate is not None and not hasattr(candidate, "connect"):
+        try:                                               # some distributions expose dbapi2
+            from sqlcipher3 import dbapi2 as candidate     # type: ignore
+        except Exception:
+            candidate = None
+
+    if candidate is None:
+        try:
+            from pysqlcipher3 import dbapi2 as candidate   # type: ignore
+        except ImportError:
+            candidate = None
+
+    if candidate is not None and not hasattr(candidate, "connect"):
+        return None
+    return candidate
+
+
+_SQLCIPHER = _resolve_sqlcipher_module()
+
+
 def _sqlcipher_exe():
-    if getattr(sys, "frozen", False):
-        for cand in (os.path.join(sys._MEIPASS, "scripts", "data", "sqlcipher3.exe"),
-                     os.path.join(sys._MEIPASS, "data", "sqlcipher3.exe")):
-            if os.path.exists(cand):
-                return cand
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sqlcipher3.exe")
+    """Locate a sqlcipher CLI, or None if there isn't one.
+
+    Note: Nuitka's --include-data-dir drops .exe files (they are in its
+    default_ignored_suffixes), so a onefile build must include sqlcipher3.exe with an
+    explicit --include-data-files, or rely on the module route above.
+    """
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)               # PyInstaller
+    if meipass:
+        candidates += [os.path.join(meipass, "scripts", "data", "sqlcipher3.exe"),
+                       os.path.join(meipass, "data", "sqlcipher3.exe")]
+    here = os.path.dirname(os.path.abspath(__file__))      # source tree / Nuitka bundle
+    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))  # beside the built binary
+    candidates += [os.path.join(here, "data", "sqlcipher3.exe"),
+                   os.path.join(exe_dir, "scripts", "data", "sqlcipher3.exe"),
+                   os.path.join(exe_dir, "data", "sqlcipher3.exe")]
+    for cand in candidates:
+        if os.path.exists(cand):
+            return cand
+    for name in ("sqlcipher3", "sqlcipher"):               # anything on PATH
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 def cocoa_to_dt(ts):
@@ -264,18 +313,29 @@ def map_userids(app):
     return out
 
 
-def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
-    """Decrypt a SQLCipher gallery.encrypteddb; return a read-only sqlite3 connection or None."""
-    if not gallery_path or not os.path.exists(gallery_path) or not egocipher_hex:
+def _open_gallery_with_module(local, egocipher_hex):
+    """Open the database in-process with a sqlcipher3 binding. Connection or None."""
+    if _SQLCIPHER is None:
         return None
-    os.makedirs(workdir, exist_ok=True)
-    local = os.path.join(workdir, "gallery.encrypteddb")
-    for suffix in ("", "-wal", "-shm"):
-        src = gallery_path + suffix
-        if os.path.exists(src):
-            shutil.copy(src, local + suffix)
+    try:
+        conn = _SQLCIPHER.connect(local)
+        conn.execute('PRAGMA key = "x\'' + egocipher_hex + '\'"')
+        conn.execute("PRAGMA cipher_compatibility = 3")
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()   # fails on a bad key
+        logger.info("Decrypted gallery.encrypteddb with the sqlcipher3 module")
+        return conn
+    except Exception as error:
+        logger.debug(f"sqlcipher3 module could not open gallery.encrypteddb: {error}")
+        return None
+
+
+def _open_gallery_with_exe(local, egocipher_hex, workdir):
+    """Dump the database with the sqlcipher CLI and rebuild it as plain SQLite."""
+    exe = _sqlcipher_exe()
+    if not exe:
+        return None
     recovery = os.path.join(workdir, "recovery.sql")
-    cmd = [_sqlcipher_exe(), local,
+    cmd = [exe, local,
            'pragma key="x\'' + egocipher_hex + '\'"',
            "PRAGMA cipher_compatibility = 3",
            ".output " + recovery.replace("\\", "/"),
@@ -283,7 +343,7 @@ def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
     try:
         subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except Exception as error:
-        logger.warning(f"sqlcipher failed on {os.path.basename(gallery_path)}: {error}")
+        logger.warning(f"sqlcipher CLI ({exe}) failed: {error}")
         return None
     if not os.path.exists(recovery) or os.path.getsize(recovery) == 0:
         return None
@@ -298,6 +358,35 @@ def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
     except sqlite3.DatabaseError as error:
         logger.warning(f"Could not load decrypted gallery dump: {error}")
         return None
+    logger.info(f"Decrypted gallery.encrypteddb with {os.path.basename(exe)}")
+    return conn
+
+
+def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
+    """Decrypt a SQLCipher gallery.encrypteddb; return a sqlite3-compatible connection or None.
+
+    Tries the sqlcipher3 Python module first (no external binary, so it survives frozen
+    builds), then falls back to a bundled/PATH sqlcipher CLI. On the old storage schema the
+    Memories keys live here, so failing both means no media and no geolocation.
+    """
+    if not gallery_path or not os.path.exists(gallery_path) or not egocipher_hex:
+        return None
+    os.makedirs(workdir, exist_ok=True)
+    local = os.path.join(workdir, "gallery.encrypteddb")
+    for suffix in ("", "-wal", "-shm"):
+        src = gallery_path + suffix
+        if os.path.exists(src):
+            shutil.copy(src, local + suffix)
+
+    conn = _open_gallery_with_module(local, egocipher_hex)
+    if conn is None:
+        conn = _open_gallery_with_exe(local, egocipher_hex, workdir)
+    if conn is None:
+        logger.warning(
+            f"Could not decrypt {os.path.basename(gallery_path)}: no working SQLCipher found. "
+            "Install a binding (pip install sqlcipher3-wheels, sqlcipher3-binary or sqlcipher3) "
+            "or provide sqlcipher3.exe. Memories keys/geolocation will be missing on the old "
+            "storage schema.")
     return conn
 
 
