@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Snapchat_Auto (debugpy)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/Snapchat_Auto_v1.2.1.py",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "purpose": [
+                "debug-in-terminal"
+            ]
+        }
+    ]
+}
