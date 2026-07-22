@@ -8,7 +8,7 @@ Guidance for Claude Code when working in this repository.
 Android device extractions, producing HTML reports of chats, contacts, cached media, and
 Memories / My Eyes Only.
 
-- Entry point: `Snapchat_Auto_v1.2.1.py` (FreeSimpleGUI front end).
+- Entry point: `Snapchat_Auto.py` (FreeSimpleGUI front end).
 - iOS parsing: `scripts/ParseSnapchat_iOS.py`.
 - iOS Memories / MEO decryption: `scripts/DecryptLocalMemories_iOS.py`.
 - Android: `scripts/getCacheAndroid.py`.

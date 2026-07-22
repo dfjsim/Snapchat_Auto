@@ -5,7 +5,7 @@
             "name": "Snapchat_Auto (debugpy)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/Snapchat_Auto_v1.2.1.py",
+            "program": "${workspaceFolder}/Snapchat_Auto.py",
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/Scripts/python.exe",
             "console": "integratedTerminal",
