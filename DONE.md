@@ -1,3 +1,8 @@
+# Documentation
+- [DONE-v1.3.3] Make it clear that this fork has not been tested thouroughly with multiple Snapchat versions and is provided AS IS to help analysing artifacts
+  in combination with other tools and proper validations. It should probably be mentioned in the README and also with a popup that includes a
+  "Don't display again" checkbox when running the app.
+
 # GUI
 - [DONE-v1.3.3] Make it remember the directory path between the ZIP extraction, keychain and temp selections.
   (Persisted to ~/.snapchat_auto_gui.json; the report directory prefills, and zip/keychain have

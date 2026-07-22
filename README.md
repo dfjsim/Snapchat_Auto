@@ -11,6 +11,15 @@
 > original **MIT Licence, © 2022 DFIR-HBG** (see [LICENSE](LICENSE)). Please direct stars,
 > issues and credit upstream.
 
+> ### ⚠️ Disclaimer — provided AS IS
+>
+> This fork is provided **AS IS, with no warranty of any kind**. It has **not been thoroughly
+> tested across the many versions of the Snapchat app**, and Snapchat's database schemas differ
+> between versions, so some artifacts may be parsed incompletely or, in rare cases, incorrectly.
+> Use it as an **aid to analysis, not as a sole authority** — always validate findings against
+> the original artifacts and corroborate them with other tools before relying on them.
+> (The app shows this notice on startup; it can be dismissed with a *"Don't display again"* box.)
+
 Automatic extraction and parsing of Snapchat for iOS and Android
 
 Install required libraries with 'pip install -r requirements.txt'
