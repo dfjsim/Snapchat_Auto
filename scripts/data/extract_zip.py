@@ -2,6 +2,7 @@ from zipfile import ZipFile
 import sys
 import glob
 import os
+import json
 import shutil
 import logging
 import re
@@ -159,6 +160,10 @@ Rename the folder and run again to extract Snapchat data from zip
                 mg = _GROUP_RE.search(path)
                 return bool(mg and mg.group(1).lower() in group_guids)
 
+            # We write files under dest/Application/<UUID>/... (dropping the ZIP path to the left
+            # of "Application"). Remember that dropped prefix per container so reports can rebuild
+            # the full on-device path (e.g. private/var/mobile/Containers/Data/Application/<UUID>).
+            container_prefixes = {}
             try:
                 for i in files_in_zip:
                     if not _in_snapchat(i):
@@ -172,7 +177,12 @@ Rename the folder and run again to extract Snapchat data from zip
                             except:
                                 index = i.find("AppGroup")
                             data = zip1.read(i)
-                            filename = _out(i[index:].replace(":", "_"))
+                            rel = i[index:].replace(":", "_")
+                            filename = _out(rel)
+                            tail = i[index:].replace("\\", "/").split("/")
+                            if len(tail) >= 2:
+                                container_prefixes.setdefault("/".join(tail[:2]),
+                                                              i[:index].replace("\\", "/").strip("/"))
                             if not os.path.exists(os.path.dirname(filename)):
                                 os.makedirs(os.path.dirname(filename))
                             try:
@@ -186,6 +196,11 @@ Rename the folder and run again to extract Snapchat data from zip
             except Exception as err:
                 pass
                 # logger.info(err)
+            try:
+                with open(_out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
+                    json.dump({"container_prefixes": container_prefixes}, mf, indent=2)
+            except Exception as err:
+                logger.debug(f"Could not write extraction manifest: {err}")
             if not os.path.exists(_out("Application")):
                 logger.warning("Can't find any Snapchat-files in extraction. Snapchat is probably not installed")
                 os.system("pause")
