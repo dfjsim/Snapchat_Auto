@@ -614,6 +614,16 @@ def _resolve_sccontent(cache_key, full, parts):
 
 _UUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
+# The account UUID in a com.snap.file_manager_*_SCContent_<userId> folder name — i.e. which
+# account's cache scope an on-disk copy physically lives in (shared with cache_controller_report).
+_SCCONTENT_USER_RE = re.compile(r"SCContent_([0-9A-Fa-f-]{36})")
+
+
+def _scope_user(path):
+    """The SCContent account UUID a path lives under, or None."""
+    mo = _SCCONTENT_USER_RE.search(path.replace("\\", "/"))
+    return mo.group(1) if mo else None
+
 
 def index_cache_controller(app):
     """
@@ -645,6 +655,30 @@ def index_cache_controller(app):
                     "rendered" if ("lowres" in prefix or "rendered" in prefix) else "full")
             out.setdefault(mo.group(0).lower(), []).append((ck, role))
     return out
+
+
+def all_cache_keys(app):
+    """Return the set of every CACHE_KEY present in cache_controller.db (lowercased).
+
+    Used to decide whether a Memory's media file also has a cache_controller entry, so the report
+    can offer a two-way link to the cache_controller report only when that entry actually exists.
+    """
+    keys = set()
+    for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
+                                     "cache_controller.db")):
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            for table in ("CACHE_FILE_CLAIM", "CACHE_FILE_METADATA"):
+                try:
+                    for (ck,) in conn.execute(f"SELECT CACHE_KEY FROM {table}"):
+                        if ck:
+                            keys.add(str(ck).lower())
+                except sqlite3.DatabaseError:
+                    continue
+            conn.close()
+        except sqlite3.DatabaseError as error:
+            logger.debug(f"cache_controller key scan failed: {error}")
+    return keys
 
 
 def index_caching_media(app):
@@ -743,20 +777,31 @@ def collect_media(memories, app, outdir, padding="both"):
     os.makedirs(outdir, exist_ok=True)
     scfull, scparts = index_sccontent(app)
     ccindex = index_cache_controller(app)
+    cc_keys = all_cache_keys(app)              # for two-way links to the cache_controller report
+    userids = map_userids(app)                 # userHash -> userId, to spot cross-scope on-disk copies
     keyed = [(sid, m) for sid, m in memories.items() if m["key"] and m["iv"]]
 
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
     for sid, m in keyed:
-        targets = []                                       # (role, cache_key)
+        targets = []                                       # (role, cache_key, addressing basis)
+        url_fields = {"full": "ZMEDIADOWNLOADURL", "overlay": "ZOVERLAYDOWNLOADURL",
+                      "thumbnail": "ZTHUMBNAILDOWNLOADURL"}
         for role, url in (("full", m["media_url"]), ("overlay", m["overlay_url"]),
                           ("thumbnail", m["thumb_url"])):
             tok = url_token(url)
             if tok:
-                targets.append((role, hashlib.sha256(tok.encode()).hexdigest()[:32]))
-        targets += [(role, ck) for ck, role in ccindex.get(sid.lower(), [])]
+                basis = (f"Located by CDN URL: CACHE_KEY = SHA-256 of the token in "
+                         f"{url_fields[role]} (first 16 bytes). Decrypted with the snap's "
+                         f"AES-256-CBC key/IV.")
+                targets.append((role, hashlib.sha256(tok.encode()).hexdigest()[:32], basis))
+        for ck, role in ccindex.get(sid.lower(), []):
+            basis = (f"Located via cache_controller.db: a CACHE_FILE_CLAIM EXTERNAL_KEY "
+                     f"(snap-{role}-/g-media-<snapid>) names this Memory and points at CACHE_KEY "
+                     f"{ck}. Decrypted with the snap's AES-256-CBC key/IV.")
+            targets.append((role, ck, basis))
 
         seen = set()
-        for role, cache_key in targets:
+        for role, cache_key, addr_basis in targets:
             if cache_key in seen:
                 continue
             seen.add(cache_key)
@@ -780,8 +825,23 @@ def collect_media(memories, app, outdir, padding="both"):
             entry = _save_media(outdir, f"{sid}_{role}_{cache_key[:8]}.{ext}", write_bytes)
             source = (f"SCContent (rebuilt from {len(pparts)} parts)"
                       if pparts and not fulls else "SCContent")
-            entry.update({"role": role, "source": source, "ext": ext, "src": fulls + pparts,
-                          "hashes": hashes, "snap_dim": _snap_dim(m)})
+            if pparts and not fulls:
+                addr_basis += (f" Reconstructed from {len(pparts)} byte-range parts concatenated "
+                               "in offset order before decryption.")
+            # cross-scope: an on-disk copy in a different account's SCContent folder than this
+            # Memory's owner account (an untracked/materialized duplicate; ownership is unchanged).
+            src_paths = fulls + pparts
+            owner_uid = userids.get(m["user_hash"])
+            scope_by_path = {p: _scope_user(p) for p in src_paths}
+            cross_scope = sorted({s for s in scope_by_path.values()
+                                  if s and owner_uid and s.lower() != owner_uid.lower()})
+            entry.update({"role": role, "source": source, "ext": ext, "src": src_paths,
+                          "hashes": hashes, "snap_dim": _snap_dim(m),
+                          "cache_key": cache_key,
+                          "in_cc": cache_key.lower() in cc_keys,
+                          "how": addr_basis,
+                          "owner_uid": owner_uid,
+                          "scope_by_path": scope_by_path, "cross_scope": cross_scope})
             m["media_files"].append(entry)
 
     # --- caching-media (link by decrypt-and-match; unique names by item hash) ---
@@ -801,9 +861,14 @@ def collect_media(memories, app, outdir, padding="both"):
             if not payload:
                 continue
             entry = _save_media(outdir, f"{sid}_pack_{item_hash[:12]}.{ext}", payload)
+            how = ("Linked by decrypt-and-match: caching-media pack names are opaque, so this "
+                   "folder was tried against every Memory's AES key/IV and only this Memory's key "
+                   "decrypts it to valid media (magic bytes after the 8-byte header). Not indexed "
+                   "by cache_controller.db.")
             entry.update({"role": "cached", "source": "caching-media", "ext": ext,
                           "src": chunks, "folder": folder, "item": item_hash,
-                          "hashes": [("", *_hashes(payload))], "snap_dim": _snap_dim(m)})
+                          "hashes": [("", *_hashes(payload))], "snap_dim": _snap_dim(m),
+                          "how": how})
             m["media_files"].append(entry)
 
     # label the smallest caching-media still per memory as the "preview"
@@ -829,7 +894,10 @@ def collect_media(memories, app, outdir, padding="both"):
         entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
                       "src": ["(generated from the decrypted video — not original device data)"]
                              + vids[0]["src"],
-                      "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": ""})
+                      "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": "",
+                      "how": ("Derived artifact: this Memory is a video with no cached still, so a "
+                              "poster frame was extracted from the decrypted .mp4. It is NOT "
+                              "original device data.")})
         m["media_files"].append(entry)
 
 
@@ -1027,6 +1095,45 @@ def _union_cols(mems, attr):
 def _null_cell(v):
     """A table cell: the value, or a muted NULL when it is missing/empty."""
     return "<span class='muted'>NULL</span>" if v in (None, "") else html.escape(str(v))
+
+
+def _info(text):
+    """A small round '?' the examiner can click for an explanation of how a media file was found."""
+    if not text:
+        return ""
+    return ("<span class='hint'><span class='qm' onclick='hint(event,this)'>?</span>"
+            f"<span class='tip'>{html.escape(text)}</span></span>")
+
+
+def _cross_scope_note(f):
+    """Explanation text for a media file with an on-disk copy in another account's scope."""
+    users = f.get("cross_scope") or []
+    owner = f.get("owner_uid") or "(unknown)"
+    return (f"{len(users)} on-disk copy(ies) of this media sit in a different account's SCContent "
+            f"scope ({', '.join(users)}) than this Memory's owner account ({owner}). This is "
+            "typically an untracked/materialized duplicate (e.g. a consolidated copy in the active "
+            "account's cache); it does not change ownership, and cache_controller.db does not claim "
+            "it there. A copy's containing SCContent_<userId> folder is NOT a reliable owner.")
+
+
+def _render_src_paths(f, src_root, manifest):
+    """Render a media file's source paths, grouped by the account SCContent scope they live in so a
+    copy in a different account's scope than the Memory owner is visibly flagged."""
+    scope_by = f.get("scope_by_path") or {}
+    cross = set(f.get("cross_scope") or [])
+    if not scope_by:                                       # caching-media / generated: no scope info
+        return "<br>".join(html.escape(s) for s in
+                           _collapse_part_paths(device_path(s, src_root, manifest) for s in f["src"]))
+    groups = {}
+    for s in f["src"]:
+        groups.setdefault(scope_by.get(s), []).append(s)
+    blocks = []
+    for scope, plist in sorted(groups.items(), key=lambda kv: (kv[0] in cross, str(kv[0]))):
+        listed = "<br>".join(html.escape(s) for s in
+                             _collapse_part_paths(device_path(s, src_root, manifest) for s in plist))
+        badge = " <span class='xscope'>⚠ different account scope</span>" if scope in cross else ""
+        blocks.append(listed + badge)
+    return "<br>".join(blocks)
 
 
 def _grid(pairs):
@@ -1236,7 +1343,8 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
     # block (metadata / location) that turned out to differ across the group.
     mem_blocks = []
     for idx, m in enumerate(members):
-        parts = [f"<div class='ghdr'><span class='glab'>Snap ID</span>"
+        parts = [f"<div class='ghdr' id='mem-{html.escape(m['snap_id'])}'>"
+                 f"<span class='glab'>Snap ID</span>"
                  f"<span class='mono'>{html.escape(m['snap_id'])}</span></div>",
                  f"<div class='cols2'>"
                  f"<div class='c'><div class='sect'>ZGALLERYSNAP values</div>"
@@ -1253,8 +1361,7 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
 
     frows = []
     for f in sorted(files, key=lambda f: (f["source"], -f["bytes"])):
-        srcs = "<br>".join(html.escape(s) for s in
-                           _collapse_part_paths(device_path(s, src_root, manifest) for s in f["src"]))
+        srcs = _render_src_paths(f, src_root, manifest)
         blocks = []
         for label, md5, sha256 in f.get("hashes", []):
             tag = f" <span class='pl'>({html.escape(label)})</span>" if label else ""
@@ -1263,8 +1370,17 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
         hashes = "<div class='hgap'></div>".join(blocks)
         # videos: fall back to the ZGALLERYSNAP dimensions PIL can't read off an mp4 container
         dim = f.get("dim") or f.get("snap_dim") or ""
+        # two-way link to the cache_controller report, only when that file is indexed there
+        source_cell = html.escape(f["source"]) + _info(f.get("how"))
+        if f.get("in_cc") and f.get("cache_key"):
+            source_cell += (" <a class='cclink' target='_blank' "
+                            f"href=\"../CacheController/CacheController_report.html#ck-"
+                            f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>")
+        if f.get("cross_scope"):
+            source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
+                            + _info(_cross_scope_note(f)))
         frows.append(
-            f"<tr><td>{html.escape(f['role'])}</td><td>{html.escape(f['source'])}</td>"
+            f"<tr><td>{html.escape(f['role'])}</td><td>{source_cell}</td>"
             f"<td>{f['ext']}</td><td>{html.escape(dim)}</td>"
             f"<td>{f['bytes']//1024} KB</td>"
             f"<td><a href=\"{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
@@ -1383,6 +1499,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  table.files td.hash .hgap{{height:5px}}
  table.files td.path{{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#555;max-width:460px;overflow-wrap:anywhere}}
  .muted{{color:#999}} .meo{{background:#8a1f1f;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px}}
+ a.cclink{{color:#2d2d71;text-decoration:none;font-size:10.5px;white-space:nowrap}} a.cclink:hover{{text-decoration:underline}}
+ .xscope{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;white-space:nowrap}}
+ .hint{{position:relative;display:inline-block}}
+ .qm{{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
+   background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}}
+ .qm:hover{{background:#2d2d71;color:#fff}}
+ .tip{{display:none;position:absolute;left:20px;top:-4px;z-index:30;background:#1f1f52;color:#fff;padding:8px 11px;
+   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;text-transform:none;letter-spacing:normal}}
+ .hint.open .tip{{display:block}}
  .sharebar{{background:#eef0ff;border:1px solid #c9cdf0;color:#2d2d71;padding:6px 10px;border-radius:5px;font-size:12.5px;font-weight:600;margin-bottom:10px}}
  .ghdr{{margin-top:8px;font-size:12.5px}} .ghdr .glab{{color:#666;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.04em;margin-right:8px}}
  .ghdr .mono{{margin:0}}
@@ -1407,6 +1532,14 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 {banner}
 {nav}
 {''.join(sections)}
+<script>
+function hint(ev,el){{ev.stopPropagation();
+ var h=el.parentNode,was=h.classList.contains('open');
+ document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});
+ if(!was)h.classList.add('open');}}
+document.addEventListener('click',function(){{
+ document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});}});
+</script>
 </body></html>"""
 
     os.makedirs(outdir, exist_ok=True)

@@ -8,6 +8,7 @@ import os
 import json
 import logging
 import datetime
+from html import escape as _esc
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;0"
 
@@ -115,9 +116,9 @@ def add_log_file(directory):
     logger.info(f"Log file: {os.path.abspath(log_path)}")
 
 
-def write_index(root_dir, reports_subdir="Reports"):
+def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path=None):
     """Write <root_dir>/index.html linking to whichever sub-reports were produced under
-    <root_dir>/<reports_subdir>/."""
+    <root_dir>/<reports_subdir>/, with the source extraction / keychain paths at the top."""
     reports = [
         ("Communications", f"{reports_subdir}/Communications/Communications_report.html",
          "Chats, contacts, groups and cached chat media."),
@@ -125,6 +126,8 @@ def write_index(root_dir, reports_subdir="Reports"):
          "Snapchat Memories with all associated media (SCContent + caching-media) and geolocation."),
         ("Local Memories (legacy)", f"{reports_subdir}/LocalMemories_legacy/LocalMemories_legacy_report.html",
          "Legacy Memories / My Eyes Only decryption report."),
+        ("Cache controller (cache_controller.db)", f"{reports_subdir}/CacheController/CacheController_report.html",
+         "Every file indexed by cache_controller.db, linked to on-disk cache files, Memories and chats."),
     ]
     items = []
     for title, rel, desc in reports:
@@ -133,17 +136,31 @@ def write_index(root_dir, reports_subdir="Reports"):
     if not items:
         return
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto report</title>
+    # source provenance block (extraction ZIP + keychain/keystore) shown at the top of the index
+    def _src_row(label, path):
+        val = _esc(path) if path else '<span class="none">(none provided)</span>'
+        return f'<div class="srow"><span class="lbl">{label}</span><span class="val">{val}</span></div>'
+    sources = (f'<div class="sources"><div class="stitle">Sources</div>'
+               f'{_src_row("Extraction", zip_path)}'
+               f'{_src_row("Keychain / keystore", keychain_path)}</div>')
+    html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto v{get_version()} report</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
  header{{background:#2d2d71;color:#fff;padding:18px 26px}} header h1{{margin:0;font-size:20px}}
  header .sub{{opacity:.85;font-size:13px;margin-top:4px}}
- ul{{list-style:none;padding:22px 26px;max-width:760px}}
+ .sources{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin:22px 26px 0;max-width:760px}}
+ .sources .stitle{{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;font-weight:700;margin-bottom:6px}}
+ .srow{{display:grid;grid-template-columns:150px 1fr;gap:8px;font-size:13px;padding:2px 0}}
+ .srow .lbl{{color:#666;font-weight:600}}
+ .srow .val{{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#33367a;overflow-wrap:anywhere}}
+ .srow .none{{color:#999;font-style:italic;font-family:-apple-system,Segoe UI,Roboto,sans-serif}}
+ ul{{list-style:none;padding:16px 26px 22px;max-width:760px}}
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
 </style></head><body>
-<header><h1>Snapchat Auto &mdash; Report index</h1><div class="sub">Generated {generated}</div></header>
+<header><h1>Snapchat Auto v{get_version()} &mdash; Report index</h1><div class="sub">Generated {generated}</div></header>
+{sources}
 <ul>{''.join(items)}</ul>
 </body></html>"""
     with open(os.path.join(root_dir, "index.html"), "w", encoding="utf-8") as f:
@@ -196,7 +213,7 @@ def main(args):
                  font=("", 8), text_color="gray")],
         [sg.Button('Ok'), sg.Button('Cancel')]]
 
-    window = sg.Window('Snapchat Auto', layout)
+    window = sg.Window(f'Snapchat Auto v{get_version()}', layout)
     while True:
         event, values = window.read()
         if event in (sg.WIN_CLOSED, "Cancel"):
@@ -257,8 +274,11 @@ def main(args):
             logger.info("Found SnapFixedVideos folder, skipping that step")
         ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], values["keychain"],
                                padding=padding, tz=tz, report_dir="./Reports")
-        write_index(".", "Reports")
+        # Write the report index BEFORE the pause, so index.html exists when the "press any key"
+        # prompt appears (previously the pause lived inside the parser and blocked this step).
+        write_index(".", "Reports", zip_path=values["zip"], keychain_path=values["keychain"])
         logger.info(f"Report index: {os.path.abspath('index.html')}")
+        os.system("pause")
     elif values[1]:
         logger.info("You chose Android")
         extracted_files_dir = extract_zip.extract(values['zip'], 'android', dest="ExtractedData")
