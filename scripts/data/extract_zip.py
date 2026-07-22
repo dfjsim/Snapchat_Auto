@@ -49,7 +49,10 @@ def discover_snapchat_containers(zip1, names):
     return data_uuids, group_guids
 
 
-def extract(file_name, mode):
+def extract(file_name, mode, dest="."):
+
+    def _out(rel):
+        return os.path.join(dest, rel) if dest not in ("", ".") else rel
 
     ios_files = [
         "Documents/user_scoped",  ### Filer som behövs från iOS
@@ -72,22 +75,25 @@ def extract(file_name, mode):
         "com.snapchat.android/files/file_manager/snap",
     ]
 
+    if dest not in ("", "."):
+        os.makedirs(dest, exist_ok=True)
+
     if mode == "ios":
-        if os.path.isdir("Application") or os.path.isdir("AppGroup"):
+        if os.path.isdir(_out("Application")) or os.path.isdir(_out("AppGroup")):
             logger.info("""
 ##################################################################################################################
-Application or AppGroup folder already found, assuming files are already extracted. 
+Application or AppGroup folder already found, assuming files are already extracted.
 Rename the folders and run again to extract Snapchat data from zip
 ##################################################################################################################""")
-            return os.path.realpath("Application").replace("\\", "/"), os.path.realpath("AppGroup").replace("\\", "/")
+            return os.path.realpath(_out("Application")).replace("\\", "/"), os.path.realpath(_out("AppGroup")).replace("\\", "/")
     elif mode == "android":
-        if os.path.isdir("com.snapchat.android"):
+        if os.path.isdir(_out("com.snapchat.android")):
             logger.info("""
 ##################################################################################################################
-com.snapchat.android folder already found, assuming files are already extracted. 
+com.snapchat.android folder already found, assuming files are already extracted.
 Rename the folder and run again to extract Snapchat data from zip
 ##################################################################################################################""")
-            return os.path.realpath("com.snapchat.android").replace("\\", "/")
+            return os.path.realpath(_out("com.snapchat.android")).replace("\\", "/")
 
     snapchat_found = False
     logger.info(f"Reading contents of zip {file_name}")
@@ -113,10 +119,11 @@ Rename the folder and run again to extract Snapchat data from zip
                             else:
                                 snapchat_found = True
                                 data = zip1.read(i)
-                                if not os.path.exists(os.path.dirname(i[index:])):
-                                    os.makedirs(os.path.dirname(i[index:]))
+                                out_path = _out(i[index:])
+                                if not os.path.exists(os.path.dirname(out_path)):
+                                    os.makedirs(os.path.dirname(out_path))
                                 try:
-                                    with open(i[index:], "wb") as file:
+                                    with open(out_path, "wb") as file:
                                         file.write(data)
                                 except PermissionError:
                                     pass
@@ -128,7 +135,7 @@ Rename the folder and run again to extract Snapchat data from zip
                 # logger.info(err)
             if snapchat_found:
                 logger.info("Snapchat files extracted to com.snapchat.android folder")
-                return os.path.realpath("com.snapchat.android").replace("\\", "/")
+                return os.path.realpath(_out("com.snapchat.android")).replace("\\", "/")
             else:
                 logger.warning("Snapchat not found in extraction")
                 os.system("pause")
@@ -165,10 +172,10 @@ Rename the folder and run again to extract Snapchat data from zip
                             except:
                                 index = i.find("AppGroup")
                             data = zip1.read(i)
-                            if not os.path.exists(os.path.dirname(i[index:])):
-                                os.makedirs(os.path.dirname(i[index:]))
+                            filename = _out(i[index:].replace(":", "_"))
+                            if not os.path.exists(os.path.dirname(filename)):
+                                os.makedirs(os.path.dirname(filename))
                             try:
-                                filename = i[index:].replace(":", "_")
                                 with open(filename, "wb") as file:
                                     file.write(data)
                             except PermissionError:
@@ -179,16 +186,16 @@ Rename the folder and run again to extract Snapchat data from zip
             except Exception as err:
                 pass
                 # logger.info(err)
-            if not os.path.exists("Application"):
+            if not os.path.exists(_out("Application")):
                 logger.warning("Can't find any Snapchat-files in extraction. Snapchat is probably not installed")
                 os.system("pause")
                 sys.exit()
-            if not os.path.exists("AppGroup"):
+            if not os.path.exists(_out("AppGroup")):
                 logger.info("Snapchat files extracted to Application folder - Could not find files located in AppGroup")
-                return os.path.realpath("Application").replace("\\", "/"), ""
+                return os.path.realpath(_out("Application")).replace("\\", "/"), ""
             else:
                 logger.info("Snapchat files extracted to Application and AppGroup folders")
-                return os.path.realpath("Application").replace("\\", "/"), os.path.realpath("AppGroup").replace(
+                return os.path.realpath(_out("Application")).replace("\\", "/"), os.path.realpath(_out("AppGroup")).replace(
                     "\\", "/"
                 )
 

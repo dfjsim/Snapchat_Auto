@@ -17,6 +17,7 @@ import filetype
 import subprocess
 from PIL import Image
 import shutil
+import tempfile
 import re
 import ntpath
 import numpy as np
@@ -46,7 +47,17 @@ reserved_sz = salt_sz + hmac_sz
 def decrypt_sqlcipher(db, egocipher):
     key = egocipher
 
-    print(f"Dekrypterar {db}")#med nyckel {key}") 
+    # Decrypt from a private copy of the DB (with its -wal/-shm). Running sqlcipher on the
+    # extracted file in-place can miss the -wal contents and produce an empty dump.
+    _tmpdir = tempfile.mkdtemp()
+    _copy = os.path.join(_tmpdir, os.path.basename(db))
+    for _suf in ("", "-wal", "-shm"):
+        if os.path.exists(db + _suf):
+            shutil.copy(db + _suf, _copy + _suf)
+    if os.path.exists(_copy):
+        db = _copy
+
+    print(f"Dekrypterar {db}")#med nyckel {key}")
     if platform == "Windows":
         if using_exe:
             try:
@@ -74,6 +85,7 @@ def decrypt_sqlcipher(db, egocipher):
             recoveredConn.executescript(recoverySql.read())
             recoveredConn.close()
         #os.remove("recovery.sql")
+        shutil.rmtree(_tmpdir, ignore_errors=True)
         logger.info("Database Recovered!")
 
 def decryptGalleryDB(db, egocipher, persisted):
@@ -622,7 +634,7 @@ def generateReport(df_merge):
     html = html.replace('<video width="320" height="240" controls> <source src="./DecryptedMemories/" type="video/mp4"> Your browser does not support the video tag. </video> <a href="./DecryptedMemories/" open><br>Open </a>', "Could not be found or decrypted, "
                                                                              "usually because the Memory/MEO was " 
                                                                              "not locally stored")
-    with open(f'{outputDir}/Report.html', 'w') as f:
+    with open(f'{outputDir}/LocalMemories_legacy_report.html', 'w') as f:
         f.write(html)
     logger.info(f'Decrypted {len(df_report)} Memories/MEO and added them to report')
 
@@ -731,26 +743,26 @@ def readKeychain(keychain):
     return egocipher, persisted
 
 
-def main(enc_db, scdb, keychain, cache_df, SCContentFolder):
+def main(enc_db, scdb, keychain, cache_df, SCContentFolder, out_dir=None):
     global decryptedName
     global outputDir
     global SCContentFolder_path
     global exe_path
     global platform
     global using_exe
-    
+
     platform = system()
-    
+
     if getattr(sys, 'frozen', False):
         exe_path = sys._MEIPASS
         using_exe = True
     else:
         exe_path = os.path.dirname(os.path.abspath(__file__))
         using_exe = False
-        
+
     logger.info("Decrypting locally stored Memories and MEO")
 
-    outputDir = "./Snapchat_LocalMemories_report_" + datetime.today().strftime('%Y%m%d_%H%M%S')
+    outputDir = out_dir or ("./Snapchat_LocalMemories_report_" + datetime.today().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(outputDir + "//DecryptedMemories", exist_ok=True)
 
     #enc_db = sys.argv[1]
