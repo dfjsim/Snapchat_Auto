@@ -982,7 +982,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 </body></html>"""
 
     os.makedirs(outdir, exist_ok=True)
-    report = os.path.join(outdir, "Memories.html")
+    report = os.path.join(outdir, "Memories_report.html")
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, linked, located

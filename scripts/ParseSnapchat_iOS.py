@@ -1303,7 +1303,7 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
             logger.warning(f"Could not find Display name for local user {row['User ID']}, {Error}")
     return friends_df
 
-def main(Application, AppGroup, keychain, padding="both", tz="local"):
+def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1321,6 +1321,9 @@ def main(Application, AppGroup, keychain, padding="both", tz="local"):
 
     if platform != "Windows" and platform != "Linux":
         logger.warning(f"WARNING! Your platform {platform} might not be supported")
+
+    if report_dir is None:
+        report_dir = "./Report_" + datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
 
     uuid_pattern = re.compile("[a-fA-F0-9-]{36}")
     previous = ""
@@ -1374,7 +1377,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local"):
         else:
             groupPlist = ""
             app_group_plist_storage = ""
-        outputDir = "./Snapchat_iOS_report_" + datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
+        outputDir = report_dir + "/Communications"
         os.makedirs(outputDir + "//cacheFiles", exist_ok=True)
         try:
             contentmanager = glob.glob(snapchatFolder + f"/Documents/contentmanagerV3_{uuid_sha256}/contentManagerDb.db", recursive = True)[0]
@@ -1484,22 +1487,23 @@ def main(Application, AppGroup, keychain, padding="both", tz="local"):
     
     
 
-    html = getHtml(final_df, friends_df, group_df)   
-    text_file = open(outputDir + "/Snapchat_report.html", "w", encoding="cp1252")
+    html = getHtml(final_df, friends_df, group_df)
+    text_file = open(outputDir + "/Communications_report.html", "w", encoding="cp1252")
     text_file.write(html)
     text_file.close()
     logger.info("Success, report can be found in " + os.path.abspath(outputDir))
     logger.info("")
     #final_df.to_excel("test.xlsx")
     if keychain_file != "" and scdb != "":
-        df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df, SCContentFolder)
+        df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df, SCContentFolder,
+                                                 out_dir=report_dir + "/LocalMemories_legacy")
 
     # Memories media report: links every Memory to all its media (SCContent + caching-media
     # .pack) and geolocation. Handles both key schemas and multiple profiles; runs even
     # without a keychain (new-schema imagery decrypts without one).
     try:
         from scripts import memories_media_report
-        memories_media_report.main(snapchatFolder, keychain_file, outputDir + "/Memories",
+        memories_media_report.main(snapchatFolder, keychain_file, report_dir + "/Memories",
                                    padding=padding, tz=tz)
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")

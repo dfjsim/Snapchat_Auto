@@ -1,30 +1,18 @@
-# GUI
-- Make it remember the directory path between the ZIP extraction, keychain and temp selections.
-- Write a note under the Timestamp timezone that explains that daylight saving will be applied.
-
-# Report structure and directory paths
-- Add "/Report" to "Working/Temp".
-- Make the Working/Temp/Report directory path selection mandatory.
-- Write the LOG file to the Working/Temp/Report directory.
-- Put the data extracted from the ZIP file in it's own sub-directory in the Working/Temp/Report directory.
-- Rename these output folders/filenames...
-  - Snapchat_iOS_report_date_time/Snapchat_report.html --> Report_date_time/Communications/Communications_report.html
-  - Snapchat_iOS_report_date_time/Memories/Memories.html --> Report_date_time/Memories/Memories_report.html
-  - Snapchat_LocalMemories_report_date_time/Report.html --> Report_date_time/LocalMemories_legacy/LocalMemories_legacy_report.html.
-- Add Report_date_time/index.html to help navigate to other reports.
+# Documentation
+- Make it clear that this fork has not been properly tested with multiple Snapchat versions and it's provided AS IS to help with other tools and proper validation/analysis of the artifacts.
 
 # Snapchat Communications report
 - Add a way to select only specific conversations or parts of conversations and their associated contacts and output them to PDF with attachments.
 
 # Snapchat Memories report
-- [DONE] Fix ".pack" files not being decoded and associated to Snapchat Memories anymore.
-  (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
-  Snapchat's app/app-group containers from container metadata plists and extracts within them.)
 - For the geolocations, also include a link to Google Maps on the same line as the OSM link.
-- There are often multiple Memories linked to the same cache media files. It would be nice to group them together
-  and put the common metadata details (timestamps, Key/IV, etc.) together.
-- Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
+- There are often multiple Memories linked to the same cache media files using the same encryption keys.
+  We should group them together and put the common metadata details in a single block.
+- Add "Dimensions" data for mp4 video files also - the details are in the ZGALLERYSNAP table.
+- The Source paths should show the paths in the device extraction ZIP archive and not the temporary extracted files paths.
 - Figure out where the files in SnapFixedVideos are coming from and what they link to. Also make sure they show up in reports.
+- Show timestamp entries in two tables (one for `ZGALLERYSNAP` and one for `ZGALLERYENTRY`) and include NULL values so that the columns are consistent.
+- Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
 
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.. 
@@ -38,10 +26,29 @@
 - Fix Pylance/Pyright/Ruff warnings/errors.
 
 # Analysis
-- Check if we have metadata in cache_controller.db for all files in Documents/com.snap.file_manager_3_SCContent_*
+- Check if we have metadata in `cache_controller.db` for all files in `Documents/com.snap.file_manager_3_SCContent_...`.
 - Figure out how Cellebrite decides which "File Uploads" get the "My Story" flag.
+- Figure out these values:
+  - ZZGALLERYENTRY.ZGALLERYTYPE
+  - ZGALLERYSNAP.ZSYNCEDENTRY
+  - ...ZENTRYSOURCE
+  - ...ZEXTERNALID
 
+## In our test "C:\Temp\Snapchat_Auto\20260720-0136"...
+- The media file "6382911a94286738b6f31e326e2b8dbf" is found in two `com.snap.file_manager_3_SCContent_...` directories (one contains a full copy and the other contains multiple parts):
+  - "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_3559758e-fefe-4fef-8946-c5e85ce12e53\6382911a94286738b6f31e326e2b8dbf"
+  - "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_5803ed5b-a28e-4bed-b418-8416323781ad\6382911a94286738b6f31e326e2b8dbf_2127264-2416128"
+  - "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_5803ed5b-a28e-4bed-b418-8416323781ad\6382911a94286738b6f31e326e2b8dbf_131072-1129680"
+  - "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_5803ed5b-a28e-4bed-b418-8416323781ad\6382911a94286738b6f31e326e2b8dbf_1129680-2127264"
+  - "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_5803ed5b-a28e-4bed-b418-8416323781ad\6382911a94286738b6f31e326e2b8dbf_0-1"
+- From my understanding, the UUID after `com.snap.file_manager_3_SCContent_` is the user account ID.
+- In the report, we show this media file associated to the user ID "5803ed5b-a28e-4bed-b418-8416323781ad" only,
+  but the first cache file shown in the table is the one in "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_3559758e-fefe-4fef-8946-c5e85ce12e53".
+- We don't show the multi-part copy in "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\com.snap.file_manager_3_SCContent_5803ed5b-a28e-4bed-b418-8416323781ad".
+- We also have a reconstructed copy of the video: "C:\Temp\Snapchat_Auto\20260720-0136\SnapFixedVideos\6382911a94286738b6f31e326e2b8dbf.mp4"
+- When matching the `CACHE_KEY` column to "6382911a94286738b6f31e326e2b8dbf" in the tables in "\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\global_scoped\cachecontroller\cache_controller.db",
+  we can associate this media to the "EB854B71-49A9-414E-99DF-F79417AC4123" memory.
+- "EB854B71-49A9-414E-99DF-F79417AC4123" is only found in the `scdb-27.sqlite3` for user "5803ed5b-a28e-4bed-b418-8416323781ad".
 
-"C:\Temp\Snapchat_Auto\20260716-1503\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\global_scoped\cachecontroller\cache_controller.db"
-"C:\Temp\Snapchat_Auto\20260716-1503\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\gallery_data_object\1\650c8c96bef03ebd3a6683b275ac35178d3fc41f0752d96f0b607b80d5b73742\scdb-27.sqlite3"
-"C:\Temp\Snapchat_Auto\20260716-1503\Application\84132E3E-CADD-4579-8D7D-534D30E19A8E\Documents\gallery_data_object\1\09e676dd458b7196a9c0aa2a90ff50136158da725927a880ca8d680d41420163\scdb-27.sqlite3"
+# New report for other items in `cache_controller.db` not already covered in other reports (Communications and Memories)
+- What else can we figure out from `cache_controller.db` by matching the `CACHE_KEY` values to filesystem filenames?
