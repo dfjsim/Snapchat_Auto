@@ -71,6 +71,41 @@ def save_config(cfg):
         logger.warning(f"Could not save GUI settings: {error}")
 
 
+DISCLAIMER_TEXT = (
+    "Snapchat Auto is an independent, community fork provided AS IS, with NO WARRANTY of any "
+    "kind.\n\n"
+    "It has NOT been thoroughly tested across the many different versions of the Snapchat app, "
+    "and the database schemas vary between versions. Some artifacts may therefore be parsed "
+    "incompletely, or in rare cases incorrectly.\n\n"
+    "Use it as an aid to analysis — not as a sole authority. Always validate findings against the "
+    "original artifacts and corroborate them with other tools before relying on them.")
+
+
+def show_disclaimer(cfg):
+    """Show the one-time AS-IS disclaimer, unless the user ticked 'Don't display again'.
+
+    The choice is persisted in the GUI config (`hide_disclaimer`). Dismissing the dialog any way
+    proceeds; it never blocks the run.
+    """
+    if cfg.get("hide_disclaimer"):
+        return
+    layout = [
+        [sg.Text("Disclaimer — please read", font=("", 12, "bold"))],
+        [sg.Text(DISCLAIMER_TEXT, size=(78, 10))],
+        [sg.Checkbox("Don't display this again", key="hide")],
+        [sg.Push(), sg.Button("I understand", key="ok"), sg.Push()],
+    ]
+    try:
+        window = sg.Window("Snapchat Auto — Disclaimer", layout, modal=True, keep_on_top=True)
+        _, values = window.read(close=True)
+    except Exception as error:                              # never let the dialog block a run
+        logger.debug(f"Could not show disclaimer dialog: {error}")
+        return
+    if values and values.get("hide"):
+        cfg["hide_disclaimer"] = True
+        save_config(cfg)
+
+
 def add_log_file(directory):
     """Attach a file log handler that writes into `directory` (the report/working folder)."""
     log_path = os.path.join(directory, f"SnapchatAuto_{datetime.datetime.today().strftime('%Y%m%d_%H%M%S')}.log")
@@ -130,6 +165,7 @@ def main(args):
 
     logger.info(f"Snapchat Auto v{get_version()}")
     cfg = load_config()
+    show_disclaimer(cfg)
 
     def _browse_start(this_val, other_val, saved_key):
         """Start a file dialog in the folder of the other field, else this field's saved dir."""
@@ -192,8 +228,11 @@ def main(args):
             break
     window.close()
 
-    save_config({"zip": values["zip"], "keychain": values["keychain"], "workdir": values["workdir"],
-                 "padding": values.get("padding", PADDING_OPTIONS[0]), "timezone": values.get("timezone", "Local time")})
+    # merge into cfg so other saved settings (e.g. hide_disclaimer) are preserved
+    cfg.update({"zip": values["zip"], "keychain": values["keychain"], "workdir": values["workdir"],
+                "padding": values.get("padding", PADDING_OPTIONS[0]),
+                "timezone": values.get("timezone", "Local time")})
+    save_config(cfg)
 
     padding = PADDING_MAP.get(values.get("padding"), "both")
     tz = _map_timezone(values.get("timezone"))
