@@ -11,6 +11,26 @@
 - [DONE-v1.3.3] In Snapchat_Auto.py, get the version automatically for the logger instead of hard coding it.
   (get_version() reads pyproject.toml, falling back to installed package metadata.)
 
+# Reporting
+- [DONE-v1.4.0] For media artifacts, display a small interrogation symbol icon that the user can click to get details on
+  how the link was made between the media and artifact shown.
+- [RESOLVED-v1.4.0] `index.html` seems to be generated only after the pause that asks the user to press any key to continue.
+  (Moved `os.system("pause")` out of `ParseSnapchat_iOS.main` and into `Snapchat_Auto.main`, after
+  `write_index`, so the index is written before the prompt appears.)
+- [DONE-v1.4.0] Added the source extraction ZIP and keychain/keystore paths at the top of `index.html`
+  (a "Sources" block; `write_index` now takes `zip_path`/`keychain_path`).
+- [DONE-v1.4.0] cache_controller report flags **cross-scope on-disk copies** — a physical copy sitting
+  in a different account's `SCContent_<userId>` folder than the account(s) that claim the file (an
+  untracked/materialized duplicate). Shows a ⚠ chip + on-disk marker, groups the detail paths by
+  account scope, adds a "cross-scope only" filter and a summary count, and the "?" explains it. The
+  claim's USER_ID stays authoritative. Verified on the 2023 GK device (4 such files, incl. the
+  `6382911a…` memory whose full copy lives in the active account's scope). See `_scope_user` /
+  `_resolve_on_disk` / `_cross_scope_basis`; documented in `docs/report_cache_controller.md`.
+- [DONE-v1.4.0] Mirrored the cross-scope flag in the **Memories report**: each media file's source
+  paths are grouped by SCContent account scope, a ⚠ "cross-scope copy" badge + "?" appears when a
+  copy lives in a different account's scope than the Memory owner (`map_userids` owner lookup).
+  Shared `_scope_user` helper (defined in `memories_media_report`, imported by the cache report).
+
 # Report structure and directory paths
 - [DONE-v1.3.3] Add "/Report" to "Working/Temp" in the GUI.
 - [DONE-v1.3.3] Make the Working/Temp/Report directory path selection mandatory.
@@ -44,3 +64,42 @@
   order, and decrypted (same reconstruction as `SnapFixedVideos`, but decrypted from the parts and
   hash-verified). All full copies + parts show as source paths. See `index_sccontent` /
   `_resolve_sccontent` in `scripts/memories_media_report.py`.
+
+# cache_controller.db report
+- [DONE-v1.3.3] New `Reports/CacheController/CacheController_report.html` (`scripts/cache_controller_report.py`).
+  One row per physical cache file (`CACHE_KEY`), aggregating all of its `CACHE_FILE_CLAIM` rows and
+  joining `CACHE_FILE_METADATA` (size/type/shard, the `CHILDREN` protobuf = byte-range parts or
+  bundle child keys, and `CONTENT_RETRIEVAL_METADATA` = CDN URL + content SHA-256). Each entry is
+  resolved to its on-disk file(s) under `com.snap.file_manager_*_SCContent_*` (whole / parts /
+  bundle children). Sortable/filterable table with a global search, category / on-disk / linked
+  filters, and per-row expandable detail. `CACHE_FILE_SAMPLED_TOMBSTONE` deletion records are
+  folded into their entry; `CACHE_KEY_VIRTUALIZATION` is listed but its semantics are marked
+  unconfirmed (empty in all test data). Columns are read dynamically (schema varies by app version).
+- [DONE-v1.3.3] Two-way cross-report links. cache→Memory via `snap-*-<UUID>` / `g-media-<UUID>` →
+  `#mem-<snapid>` anchors added to the Memories report; the Memories report links back per media
+  file to `#ck-<cache_key>` (only when that key is present in cache_controller). cache→chat via a
+  `cache_links.json` manifest the Communications report now writes; `path_to_image_html` adds a
+  `#cf-<cache_key>` anchor and a back-link to the cache entry. Verified on the 2023 GK FFS
+  extraction (2 users): 77/77 cache-to-memory and 98/98 memory-to-cache anchors resolve.
+- [DONE-v1.3.3] cache-to-Memory linking has two **fallbacks** after the primary snap-UUID-in-EXTERNAL_KEY
+  match: (a) `SHA-256(memory URL token)[:16] == CACHE_KEY` for CDN-downloaded media with only a URL
+  claim, and (b) a `ZMEDIAID` UUID inside an EXTERNAL_KEY. Each link records *how* it was made.
+  Measured on both test extractions: the fallbacks add 0 links (the primary already resolves every
+  linkable entry), so they are dormant-but-validated robustness for other app versions / cloud-only
+  memories. See `load_memory_index` / `build_entries`.
+- [DONE-v1.3.3] Every media file and cross-report link carries a clickable round **"?"** icon whose
+  popover explains, in plain language, how that association was derived (matched identifier, primary
+  vs fallback, how the bytes were located/decrypted). Added to both the cache_controller report and
+  the Memories report (`_info` + `how`/`memory_basis` strings).
+- [DONE-v1.3.3] Documented the reports and their linking logic under `docs/`:
+  `cross_report_linking.md` (the anchor scheme + every link basis), `report_cache_controller.md`,
+  `report_memories.md`, `report_communications.md`.
+
+# Analysis / Reverse engineering
+- [DONE-v1.4.0] Check if we have metadata in `cache_controller.db` for all files in `Documents/com.snap.file_manager_3_SCContent_...`.
+
+# Other
+- [RESOLVED-v1.4.0] Earlier note about `path_to_image_html` reading `platform` as a global: on closer
+  inspection this was NOT a bug — `main()` declares `global platform` (ParseSnapchat_iOS.py:1342)
+  and sets it before any attachment is rendered, so it always works. Hardened anyway with a
+  module-level `platform = system()` default so it no longer depends on `main()` running first.

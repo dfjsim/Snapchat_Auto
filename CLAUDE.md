@@ -11,6 +11,8 @@ Memories / My Eyes Only.
 - Entry point: `Snapchat_Auto.py` (FreeSimpleGUI front end).
 - iOS parsing: `scripts/ParseSnapchat_iOS.py`.
 - iOS Memories / MEO decryption: `scripts/DecryptLocalMemories_iOS.py`.
+- iOS `cache_controller.db` report: `scripts/cache_controller_report.py` (one row per cached file,
+  linked to on-disk cache files and two-way to the Memories / Communications reports).
 - Android: `scripts/getCacheAndroid.py`.
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`).
@@ -28,6 +30,11 @@ Memories / My Eyes Only.
 
 ## Research notes / findings
 
+- Per-report internals and the cross-report linking scheme:
+  [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
+  [report_cache_controller.md](docs/report_cache_controller.md),
+  [report_memories.md](docs/report_memories.md),
+  [report_communications.md](docs/report_communications.md).
 - [Decrypting & linking Snapchat Memories media](docs/snapchat_ios_memories_decryption.md)
   — full method for recovering Memories media (`SCContent` + `caching-media/**/*.pack`) and
   geolocation, and linking each media file to its `scdb-27.sqlite3` Memory. Covers both storage

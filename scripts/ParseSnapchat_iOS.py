@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 import sqlite3
 import pandas as pd
 import plistlib
@@ -23,6 +24,9 @@ logger = logging.getLogger(__name__)
 SCContentFolder = ""
 outputDir = ""
 memories_cache_df = pd.DataFrame()
+# Module-level default so path_to_image_html never depends on main() having run first (main()
+# re-assigns this same global at startup and logs it).
+platform = system()
 
 
 def proto_to_msg(bin_file):
@@ -141,20 +145,25 @@ def path_to_image_html(filename):
                     relpath = realpath.split("/")[-2:]
                 relpath = str(Path(relpath[0] + "/" + relpath[1]))
                 if kind.extension == "mp4":
-                    return ('<video width="320" height="240" controls> <source src="' + (
+                    result = ('<video width="320" height="240" controls> <source src="' + (
                         relpath) + '" type="video/mp4"> Your browser does not support the video tag. </video> <a href="' + (
                                 relpath) + '"><br>' + basename + '</a>')
                 elif kind.extension == "png":
-                    return ('<a href="' + (relpath) + '"><img src="' + (
+                    result = ('<a href="' + (relpath) + '"><img src="' + (
                         relpath) + '" width="150" ><br>' + basename + '</a>')
                 elif kind.extension == "jpg":
-                    return ('<a href="' + (relpath) + '"><img src="' + (
+                    result = ('<a href="' + (relpath) + '"><img src="' + (
                         relpath) + '" width="150" ><br>' + basename + '</a>')
                 elif kind.extension == "webp":
-                    return ('<a href="' + (relpath) + '"><img src="' + (
+                    result = ('<a href="' + (relpath) + '"><img src="' + (
                         relpath) + '" width="150" ><br>' + basename + '</a>')
                 else:
                     return filename + " - Unknown extension: " + kind.extension
+                # basename == the CACHE_KEY: expose a stable anchor the cache_controller report can
+                # jump to, plus a two-way link back to that report's entry for this file.
+                cc_link = ('<br><a class="cclink" href="../CacheController/CacheController_report.html#ck-'
+                           + basename + '">&#128451; cache_controller entry</a>')
+                return ('<span id="cf-' + basename + '">' + result + '</span>' + cc_link)
             except PermissionError as Error:
                 if dots_regex.match(filename):
                     return filename
@@ -1495,6 +1504,24 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         if file not in messages:
             os.remove(f"{outputDir}/cacheFiles/{file}")
 
+    # Manifest of chat cache attachments for the cache_controller report's two-way links:
+    # CACHE_KEY -> [{conversation_id, server_message_id}]. Built while Message Content still holds
+    # the raw cache key (the cacheFiles filename), before it is turned into HTML just below.
+    cache_links = {}
+    cachefiles_dir = outputDir + "/cacheFiles/"
+    for index, row in final_df.iterrows():
+        mc = row["Message Content"]
+        if isinstance(mc, str) and mc and os.path.exists(cachefiles_dir + mc):
+            cache_links.setdefault(mc, []).append({
+                "conversation_id": row["Client Conversation ID"],
+                "server_message_id": str(row["Server Message ID"]),
+            })
+    try:
+        with open(outputDir + "/cache_links.json", "w", encoding="utf-8") as manifest:
+            json.dump(cache_links, manifest)
+    except Exception as Error:
+        logger.debug(f"Could not write cache_links.json: {Error}")
+
     for index, row in final_df.iterrows():
         final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
     
@@ -1535,7 +1562,16 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
-    os.system("pause")
+    # cache_controller.db report: indexes every cached file, links each to its on-disk cache
+    # file(s) and — two-way — to the Memories and Communications reports. Runs after those two so
+    # it can read the chat-attachment manifest the Communications report wrote.
+    try:
+        from scripts import cache_controller_report
+        cache_controller_report.main(snapchatFolder, report_dir + "/CacheController",
+                                     tz=tz, src_root=os.path.dirname(Application),
+                                     report_dir=report_dir)
+    except Exception as Error:
+        logger.error(f"cache_controller report failed: {Error}")
     #return user_scoped_id
 
 

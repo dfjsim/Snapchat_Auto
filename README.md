@@ -80,6 +80,11 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
 - The **Memories media report** described above (`scripts/memories_media_report.py`), which links
   each Memory to all of its recovered media, including the `caching-media/**/*.pack` cache, and
   adds geolocation, hashes and source paths.
+- A **`cache_controller.db` report** (`scripts/cache_controller_report.py`) — a sortable/filterable
+  index of every file Snapchat cached on the device (one row per `CACHE_KEY`), joining the claim,
+  metadata, children and deletion tables, resolving each entry to its on-disk cache file(s), and
+  cross-linking two-way to the Memories and Communications reports. Run standalone with
+  `python -m scripts.cache_controller_report <extraction_root_or_app_container> [output_dir]`.
 - **Compatibility fixes** for pandas 3.x / Python 3.14 and for newer Snapchat iOS schemas — see
   [docs/pandas3_python314_compat.md](docs/pandas3_python314_compat.md).
 - `uv` project setup (`pyproject.toml`) and a Nuitka build script.
