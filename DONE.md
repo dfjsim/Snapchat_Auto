@@ -27,3 +27,20 @@
   (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
   Snapchat's app/app-group containers from container metadata plists and extracts within them.)
   (commit 775abb843347a6f6d9c6daf6dcc9b8c97adc4f36)
+- [DONE-v1.3.3] Geolocations now include a Google Maps link on the same line as the OSM link.
+- [DONE-v1.3.3] Memories sharing the same cache media + AES key/IV are grouped; media, encryption and
+  timestamps are shown once per group (see `_render_group`).
+- [DONE-v1.3.3] "Dimensions" now falls back to the ZGALLERYSNAP ZWIDTH×ZHEIGHT for mp4 video files.
+- [DONE-v1.3.3] Source paths are shown as their in-extraction/device path (anchored on `/private/var/mobile/`
+  or `/Application/`) instead of the temporary extracted path. NOTE: heuristic — revisit if an
+  extraction tool uses a different root layout.
+- [DONE-v1.3.3] Timestamps render as two NULL-filled tables (ZGALLERYSNAP / ZGALLERYENTRY) with a fixed
+  column set across all Memories artifacts.
+- [DONE-v1.3.3] Surfaced extra ZGALLERYSNAP / ZGALLERYENTRY fields (`SNAP_OTHER_LABELS` / `ENTRY_OTHER_LABELS`),
+  kept in separate sections so a column name present in both tables shows both values.
+
+- [DONE-v1.3.3] cache_controller.db lookup now treats the `CACHE_KEY` as the *start* of the on-disk filename:
+  media stored split into `<cache_key>_<start>-<end>` parts is discovered, concatenated in offset
+  order, and decrypted (same reconstruction as `SnapFixedVideos`, but decrypted from the parts and
+  hash-verified). All full copies + parts show as source paths. See `index_sccontent` /
+  `_resolve_sccontent` in `scripts/memories_media_report.py`.

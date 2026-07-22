@@ -20,6 +20,10 @@ import logging
 import numpy as np
 
 logger = logging.getLogger(__name__)
+SCContentFolder = ""
+outputDir = ""
+memories_cache_df = pd.DataFrame()
+
 
 def proto_to_msg(bin_file):
     try:
@@ -938,21 +942,41 @@ def mergeCache(df_cache, df_content):
     
     try:
         logger.info("Merging Cache info")
+        df_cache = df_cache.copy()
+        df_content = df_content.copy()
+
+        # pandas 3.x refuses to merge integer and string values for the same key when
+        # cache rows come from SQLite and content rows come from protobuf decoding.
+        # Normalize the join columns to strings so both schemas can be matched reliably.
+        for frame in (df_cache, df_content):
+            for column in ("CACHE_KEY", "EXTERNAL_KEY", "MEDIA_CONTEXT_TYPE"):
+                if column in frame.columns:
+                    frame[column] = frame[column].apply(
+                        lambda value: "" if pd.isna(value) else str(value)
+                    )
+
         df_merge = pd.merge(df_cache, df_content, on=["CACHE_KEY", "EXTERNAL_KEY", "MEDIA_CONTEXT_TYPE"], how="outer")
         memories_cache_df = df_merge
         # logger.info(len(df_merge))
         # con = sqlite3.connect("merge.db")
         # df_merge.to_sql("test", con)
         
+        sccontent_folder = SCContentFolder or ""
+        output_directory = outputDir or "."
+        cache_output_dir = os.path.join(output_directory, "cacheFiles")
+        os.makedirs(cache_output_dir, exist_ok=True)
+
         foundFiles = []
         if isinstance(SCContentFolder, list):
             logger.info(f"Getting cache files from {len(SCContentFolder)} SCContent folders")
-            for i in SCContentFolder:
-                files = glob.glob(SCContentFolder + '/*')
-                foundFiles = foundFiles + files
+            for folder in SCContentFolder:
+                if folder:
+                    files = glob.glob(os.path.join(folder, "*"))
+                    foundFiles.extend(files)
         else:
-            logger.info(f"Getting cache files from {SCContentFolder.split('/')[-2]}")
-            foundFiles = glob.glob(SCContentFolder + '*')
+            folder_name = os.path.basename(os.path.dirname(sccontent_folder.rstrip("/"))) if sccontent_folder else "unknown"
+            logger.info(f"Getting cache files from {folder_name}")
+            foundFiles = glob.glob(os.path.join(sccontent_folder, "*")) if sccontent_folder else []
         tmp = []
         for item in foundFiles:
             item = item.replace("\\", "/")
@@ -960,21 +984,18 @@ def mergeCache(df_cache, df_content):
         foundFiles = tmp
         for index, row in df_merge.iterrows():
             try:
-                try:
-                    if math.isnan(row["CACHE_KEY"]):
-                        df_merge = df_merge.drop(index)
-                        continue
-                        
-                except TypeError:
-                    pass
-                file = SCContentFolder + row["CACHE_KEY"]
-                file = file.replace("\\", "/")
+                # CACHE_KEY was normalized to str above (empty string == missing/NaN),
+                # so drop rows with no cache key instead of the old math.isnan() check.
+                if not row["CACHE_KEY"]:
+                    df_merge = df_merge.drop(index)
+                    continue
+                file = os.path.join(sccontent_folder, str(row["CACHE_KEY"])).replace("\\", "/")
                 if file in foundFiles:
                     fileIndex = foundFiles.index(file)
                     kind = filetype.guess(foundFiles[fileIndex])
                     if os.stat(foundFiles[fileIndex]).st_size != 0 and kind is not None:
                         if kind.extension == "mp4" or kind.extension == "jpg" or kind.extension == "png" or kind.extension == "webp":
-                            shutil.copy(foundFiles[fileIndex], outputDir + '//cacheFiles')
+                            shutil.copy(foundFiles[fileIndex], cache_output_dir)
                         else:
                             df_merge = df_merge.drop(index)  # ("dropping because of invalid type")
                     else:
@@ -990,8 +1011,11 @@ def mergeCache(df_cache, df_content):
         return (df_merge)
     except Exception as E:
         logger.error(f"Error merging cache info: {E}")
-        return pd.DataFrame()
-        
+        # Return the correctly-shaped empty frame (like getCache/getContentmanager) so a
+        # merge failure degrades gracefully instead of crashing mergeCacheChats with a
+        # KeyError on the missing EXTERNAL_KEY/CACHE_KEY columns.
+        return pd.DataFrame({"CACHE_KEY": [], "EXTERNAL_KEY": [], "MEDIA_CONTEXT_TYPE": []})
+
 def getChats(database):
     logger.info("")
     logger.info("Getting chats from " + ntpath.basename(database))
@@ -1503,8 +1527,11 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # without a keychain (new-schema imagery decrypts without one).
     try:
         from scripts import memories_media_report
+        # Application is the extracted ".../ExtractedData/Application" folder; its parent is the
+        # archive root, so source paths in the report show as "/Application/<UUID>/Documents/...".
         memories_media_report.main(snapchatFolder, keychain_file, report_dir + "/Memories",
-                                   padding=padding, tz=tz)
+                                   padding=padding, tz=tz,
+                                   src_root=os.path.dirname(Application))
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
