@@ -10,4 +10,4 @@ rem first at runtime; the exe below is the fallback.
 python -m nuitka --onefile --output-dir=dist --enable-plugin=tk-inter ^
 	--include-data-dir=scripts=scripts ^
 	--include-data-files=scripts\data\sqlcipher3.exe=scripts\data\sqlcipher3.exe ^
-	Snapchat_Auto_v1.2.1.py
+	Snapchat_Auto.py

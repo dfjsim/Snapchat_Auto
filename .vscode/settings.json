@@ -1,0 +1,10 @@
+{
+    "githubPullRequests.ignoredPullRequestBranches": [
+        "main"
+    ],
+    // "python.analysis.typeCheckingMode": "off",
+    "ruff.enable": false,
+    "python.languageServer": "None",
+    "editor.formatOnSave": false,
+    "editor.formatOnPaste": false,
+}
