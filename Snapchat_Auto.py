@@ -29,12 +29,41 @@ else:
 logger.info(app_path)
 
 
+def _pyproject_candidates():
+    """Locations pyproject.toml may live in across run modes: source tree, a Nuitka onefile bundle
+    (dirname(__file__)), a PyInstaller bundle (sys._MEIPASS), and beside the built binary."""
+    seen, out = set(), []
+    for base in (app_path,
+                 os.path.dirname(os.path.abspath(__file__)),
+                 getattr(sys, "_MEIPASS", None),
+                 os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else None):
+        if not base:
+            continue
+        cand = os.path.join(base, "pyproject.toml")
+        if cand not in seen:
+            seen.add(cand)
+            out.append(cand)
+    return out
+
+
 def get_version():
-    """Return the project version — from pyproject.toml (source) or package metadata."""
+    """Return the project version — from a bundled/source pyproject.toml, else package metadata.
+
+    The build bundles pyproject.toml (see build_nuitka.cmd) so the frozen GUI shows the real version;
+    Nuitka sets neither sys.frozen nor sys._MEIPASS, so we probe several candidate locations.
+    """
     try:
         import tomllib
-        with open(os.path.join(app_path, "pyproject.toml"), "rb") as f:
-            return tomllib.load(f).get("project", {}).get("version") or "unknown"
+        for path in _pyproject_candidates():
+            try:
+                with open(path, "rb") as f:
+                    v = tomllib.load(f).get("project", {}).get("version")
+                if v:
+                    return v
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
     except Exception:
         pass
     try:
