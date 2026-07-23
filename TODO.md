@@ -14,6 +14,30 @@
   - Keystore auto-detection.
   - Memories decoding with media/geolcation decryption.
 
+# Cleanup: remove legacy Memories report + SnapFixedVideos (AFTER validation)
+- Keep the legacy path for now. Only remove it once the new Memories + cache_controller reports
+  have been fully tested and cross-validated against the original/legacy output on several
+  extractions (multiple OS/app versions and extraction tools).
+- Why it is redundant:
+  - `scripts/parseSnapvideos_PREFETCH.py` reconstructs split videos from their byte-range parts into
+    `SnapFixedVideos/<cache_key>.mp4` (still ENCRYPTED). It is created once from `Snapchat_Auto.main`.
+  - It is consumed ONLY by the legacy `scripts/DecryptLocalMemories_iOS.py` report, which copies those
+    reconstructed files back INTO the extraction's SCContent folder (renamed to the cache key) just
+    to decrypt them.
+  - The new reports already reconstruct split files directly from the parts (`index_sccontent` /
+    `_resolve_sccontent` / `materialize_ondisk`) and the Memories report decrypts them in place, so
+    both `SnapFixedVideos` and the legacy report are dead weight. Verified on the `6382911a…` split
+    video.
+- Removal steps when we get to it:
+  - `Snapchat_Auto.py`: drop the `parseSnapvideos_PREFETCH.main()` call + the `SnapFixedVideos`
+    existence check, and the import.
+  - `ParseSnapchat_iOS.py`: drop the `DecryptLocalMemories_iOS.main()` legacy-report block and its
+    import there.
+  - `write_index`: drop the "Local Memories (legacy)" entry.
+  - KEEP `scripts/DecryptLocalMemories_iOS.py` — the new Memories report reuses its `readKeychain`
+    (imported as `_memkeys`). Optionally delete `scripts/parseSnapvideos_PREFETCH.py` (unused after).
+  - Benefit: faster runs and no longer writing into `ExtractedData`.
+
 # Code cleanup and optimization
 - Fix Pylance/Pyright/Ruff warnings/errors.
 
