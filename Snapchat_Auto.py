@@ -119,20 +119,26 @@ def add_log_file(directory):
 def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path=None):
     """Write <root_dir>/index.html linking to whichever sub-reports were produced under
     <root_dir>/<reports_subdir>/, with the source extraction / keychain paths at the top."""
+    # Each report opens in its own *named* tab (target), shared with the cross-report links inside
+    # the reports, so navigating between reports reuses one tab per report instead of piling up new
+    # ones. Ctrl/Shift/middle-click still force a new tab/window (browser default).
     reports = [
         ("Communications", f"{reports_subdir}/Communications/Communications_report.html",
-         "Chats, contacts, groups and cached chat media."),
+         "Chats, contacts, groups and cached chat media.", "scauto_comms"),
         ("Memories", f"{reports_subdir}/Memories/Memories_report.html",
-         "Snapchat Memories with all associated media (SCContent + caching-media) and geolocation."),
+         "Snapchat Memories with all associated media (SCContent + caching-media) and geolocation.",
+         "scauto_memories"),
         ("Local Memories (legacy)", f"{reports_subdir}/LocalMemories_legacy/LocalMemories_legacy_report.html",
-         "Legacy Memories / My Eyes Only decryption report."),
+         "Legacy Memories / My Eyes Only decryption report.", "scauto_localmem"),
         ("Cache controller (cache_controller.db)", f"{reports_subdir}/CacheController/CacheController_report.html",
-         "Every file indexed by cache_controller.db, linked to on-disk cache files, Memories and chats."),
+         "Every file indexed by cache_controller.db, linked to on-disk cache files, Memories and chats.",
+         "scauto_cache"),
     ]
     items = []
-    for title, rel, desc in reports:
+    for title, rel, desc, target in reports:
         if os.path.exists(os.path.join(root_dir, rel)):
-            items.append(f'<li><a href="{rel}">{title}</a><div class="d">{desc}</div></li>')
+            items.append(f'<li><a href="{rel}" target="{target}">{title}</a>'
+                         f'<div class="d">{desc}</div></li>')
     if not items:
         return
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')

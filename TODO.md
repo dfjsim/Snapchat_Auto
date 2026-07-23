@@ -9,11 +9,18 @@
     - user ID associated with the Memory
     - IDs like the ZSNAPID, ZENTRYID, etc.
     - strings that look like UUIDs or hashes in cache filenames
+    - MD5/SHA256 hashes
     - timestamps
     - geolocation
     - link to a separate HTML page for each Memory or group of Memories
   - In the main index table, include sorting and filtering for the table columns and a global search.
     (The thumbnail column should allow sorting/filtering with or without.)
+- We should have a second level of merging by matching media file MD5/SHA256 hashes.
+  - If there are any 0-byte media files, they should be excluded for matching because they
+    would all have the same hash values.
+  - We will need to make the MEDIA and SNAP IDs more obvious.
+  - This extra merging logic will make it so that matching media files will all end up in the
+    same HTML sub-page.
 
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.. 

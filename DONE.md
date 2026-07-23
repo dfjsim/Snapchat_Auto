@@ -69,7 +69,8 @@
 - [DONE-v1.3.3] New `Reports/CacheController/CacheController_report.html` (`scripts/cache_controller_report.py`).
   One row per physical cache file (`CACHE_KEY`), aggregating all of its `CACHE_FILE_CLAIM` rows and
   joining `CACHE_FILE_METADATA` (size/type/shard, the `CHILDREN` protobuf = byte-range parts or
-  bundle child keys, and `CONTENT_RETRIEVAL_METADATA` = CDN URL + content SHA-256). Each entry is
+  bundle child keys, and `CONTENT_RETRIEVAL_METADATA` = CDN URL + content ref, the latter labelled
+  by value: a CDN media token, a 64-hex content SHA-256, or the CACHE_KEY). Each entry is
   resolved to its on-disk file(s) under `com.snap.file_manager_*_SCContent_*` (whole / parts /
   bundle children). Sortable/filterable table with a global search, category / on-disk / linked
   filters, and per-row expandable detail. `CACHE_FILE_SAMPLED_TOMBSTONE` deletion records are

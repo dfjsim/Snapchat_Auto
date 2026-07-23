@@ -39,9 +39,19 @@ Decoded by `parse_children`. Field `1` is one child or a list; each child is
   `zfe09d729…`) plus a filename such as `lar_lens_notifications_geofences_v6.json`.
 
 ### `CACHE_FILE_METADATA.CONTENT_RETRIEVAL_METADATA` (protobuf)
-Decoded by `parse_retrieval`. Field `5.1`/`6.1` = the **CDN URL** the file was fetched from;
-field `8` = a **content SHA-256** (64 hex). Both are surfaced — the URL often exists even when the
-`EXTERNAL_KEY` is a bare token, and the hash is useful for corroboration.
+Decoded by `parse_retrieval`. Field `5.1`/`6.1` = the **CDN URL** the file was fetched from.
+Field `8` is a **content reference whose form varies** by app version / media kind, so the report
+inspects the value rather than assuming a type:
+
+* most often a **CDN media token** (the same token after `/d/` in the URL, sometimes with a `.NNN`
+  suffix) — e.g. `S8fDoGrkeolX01yylQtsf`;
+* a **64-hex content SHA-256** on newer app versions (only ~13% of entries on the 2026 device);
+* the **32-hex `CACHE_KEY`** on the 2023 device.
+
+It is labelled accordingly in the detail panel ("Content SHA-256" only when it is genuinely 64 hex,
+otherwise "CDN media token" or "Content ref … equals CACHE_KEY"). **Do not** read field 8 as a
+hash without checking its length — an earlier version of this report mislabelled every field-8
+value as "Content SHA-256".
 
 ## Categorisation
 

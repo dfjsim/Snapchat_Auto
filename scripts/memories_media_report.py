@@ -1373,7 +1373,7 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
         # two-way link to the cache_controller report, only when that file is indexed there
         source_cell = html.escape(f["source"]) + _info(f.get("how"))
         if f.get("in_cc") and f.get("cache_key"):
-            source_cell += (" <a class='cclink' target='_blank' "
+            source_cell += (" <a class='cclink' target='scauto_cache' "
                             f"href=\"../CacheController/CacheController_report.html#ck-"
                             f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>")
         if f.get("cross_scope"):
