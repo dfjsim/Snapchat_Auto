@@ -41,7 +41,7 @@ from urllib.parse import urlparse
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
-    load_path_manifest, make_time_formatter, _collapse_part_paths,
+    load_path_manifest, make_time_formatter, _collapse_part_paths, guess_media,
     _scope_user, _UUID_RE, _SC_SPLIT_RE,
 )
 
@@ -289,6 +289,22 @@ def load_chat_links(report_dir):
     return {}
 
 
+def load_memory_pages(report_dir):
+    """Load the Memories report's snap_id -> detail-sub-page manifest, if present.
+
+    Lets each memory-linked cache entry link straight to that memory's detail page (in addition to
+    the index row). Empty when the Memories report didn't run or is the old single-file layout.
+    """
+    cand = os.path.join(report_dir or "", "Memories", "memory_pages.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as error:
+            logger.debug(f"Could not read memory page manifest {cand}: {error}")
+    return {}
+
+
 def _resolve_on_disk(cache_key, children, scfull, scparts):
     """Resolve a cache key to on-disk source paths + total bytes present.
 
@@ -331,7 +347,60 @@ def _resolve_on_disk(cache_key, children, scfull, scparts):
     return paths, total, bool(paths), scope_by_path
 
 
-def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt):
+def _reconstruct_bytes(cache_key, scfull, scparts):
+    """Rebuild the logical cached file's bytes: a whole ``<cache_key>`` file, else its byte-range
+    parts concatenated in offset order (deduped). Returns bytes or None."""
+    fulls = scfull.get(cache_key, [])
+    if fulls:
+        try:
+            with open(fulls[0], "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+    parts = scparts.get(cache_key.lower(), [])
+    if not parts:
+        return None
+    seen, chunks = set(), []
+    for off, p in sorted(parts):
+        if off in seen:
+            continue
+        seen.add(off)
+        chunks.append(p)
+    try:
+        return b"".join(open(p, "rb").read() for p in chunks)
+    except OSError:
+        return None
+
+
+def materialize_ondisk(entries, scfull, scparts, files_dir, max_view_bytes=30 * 1024 * 1024):
+    """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 and,
+    when those bytes are recognizable plaintext media (magic bytes) small enough to view, copy them
+    to ``files/<cache_key>.<ext>`` so the examiner can open them even when the entry links to no
+    Memory or conversation. Encrypted cache bytes are still hashed (as stored) but not copied.
+    """
+    os.makedirs(files_dir, exist_ok=True)
+    for e in entries:
+        if not e["on_disk"]["found"]:
+            continue
+        data = _reconstruct_bytes(e["cache_key"], scfull, scparts)
+        if data is None:
+            continue
+        e["ondisk_md5"] = hashlib.md5(data).hexdigest()
+        e["ondisk_sha256"] = hashlib.sha256(data).hexdigest()
+        ext = guess_media(data[:16])
+        e["ondisk_type"] = ext
+        if ext and len(data) <= max_view_bytes:
+            name = f"{e['cache_key']}.{ext}"
+            try:
+                with open(os.path.join(files_dir, name), "wb") as fh:
+                    fh.write(data)
+                e["view"] = "files/" + name
+                e["view_is_image"] = ext in ("jpg", "png", "webp")
+            except OSError as error:
+                logger.debug(f"Could not write viewable copy for {e['cache_key']}: {error}")
+
+
+def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows). Each entry aggregates its claims, metadata, on-disk
@@ -340,6 +409,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt):
     snap_ids = mem_index["snap_ids"]
     url_keys = mem_index["url_keys"]
     media_ids = mem_index["media_ids"]
+    memory_pages = memory_pages or {}
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     claims = _read_all(conn, "CACHE_FILE_CLAIM")
     metas = _read_all(conn, "CACHE_FILE_METADATA")
@@ -416,6 +486,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt):
                     basis = (f"Fallback: EXTERNAL_KEY UUID {mo.group(0)} matches this Memory's "
                              f"ZMEDIAID (Memory {canonical}).")
                     break
+        if memory:                                             # detail sub-page, when available
+            memory["page"] = memory_pages.get(memory["snap_id"])
         chats = chat_links.get(key, [])
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
@@ -526,9 +598,13 @@ def _links_html(entry, rel_prefix):
     chips = []
     if entry["memory"]:
         sid = entry["memory"]["snap_id"]
+        page = entry["memory"].get("page")
         chips.append(f'<a class="chip mem" target="scauto_memories" '
                      f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
-                     f'🧠 Memory {_esc(sid[:8])}…</a>' + _info(entry.get("memory_basis")))
+                     f'🧠 Memory {_esc(sid[:8])}… (index)</a>' + _info(entry.get("memory_basis")))
+        if page:
+            chips.append(f'<a class="chip mem" target="scauto_memories" '
+                         f'href="{rel_prefix}Memories/{_esc(page)}#mem-{_esc(sid)}">📄 detail</a>')
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
@@ -554,7 +630,7 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
     e = entry
     parts = []
 
-    # claims
+    # claims — headers are the real CACHE_FILE_CLAIM column names (description in parentheses)
     rows = []
     for c in e["claims"]:
         rows.append(f"<tr><td class='mono'>{_esc(c['external_key'])}</td>"
@@ -562,34 +638,43 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
                     f"<td>{_esc(c['category'])}</td><td>{_esc(c['created'])}</td>"
                     f"<td>{_esc(c['expires'])}</td><td>{_esc(c['deleted'])}</td></tr>")
     if rows:
-        parts.append("<div class='sect'>Claims (CACHE_FILE_CLAIM)</div>"
-                     "<table class='sub'><tr><th>EXTERNAL_KEY</th><th>Context type</th><th>User</th>"
-                     "<th>Category</th><th>Created</th><th>Expires</th><th>Deleted</th></tr>"
+        parts.append("<div class='sect'>CACHE_FILE_CLAIM</div>"
+                     "<table class='sub'><tr><th>EXTERNAL_KEY</th><th>MEDIA_CONTEXT_TYPE (context type)</th>"
+                     "<th>USER_ID</th><th>(category)</th><th>CREATION_TIMESTAMP_MILLIS (created)</th>"
+                     "<th>EXPIRATION_TIMESTAMP_MILLIS (expires)</th>"
+                     "<th>DELETED_TIMESTAMP_MILLIS (deleted)</th></tr>"
                      + "".join(rows) + "</table>")
 
-    # metadata grid
+    # metadata grid — real CACHE_FILE_METADATA column names with descriptions in parentheses
     m = e["meta"]
-    grid = [("Physical type", f"{m['type']} ({TYPE_LABELS.get(m['type'], '?')})" if m["type"] is not None else ""),
-            ("File size", _fmt_bytes(m["size"])),
-            ("Disk used", _fmt_bytes(m["disk_used"])),
-            ("Known content length", _fmt_bytes(m["known_len"])),
-            ("Storage type", m["storage_type"]),
-            ("Shard index", m["shard_index"]),
-            ("Last read", m["last_read"])]
+    grid = [("TYPE (physical type)", f"{m['type']} ({TYPE_LABELS.get(m['type'], '?')})" if m["type"] is not None else ""),
+            ("FILE_SIZE_BYTES (file size)", _fmt_bytes(m["size"])),
+            ("TOTAL_DISK_USED_BYTES (disk used)", _fmt_bytes(m["disk_used"])),
+            ("KNOWN_CONTENT_LENGTH_BYTES (known content length)", _fmt_bytes(m["known_len"])),
+            ("STORAGE_TYPE (storage type)", m["storage_type"]),
+            ("SHARD_INDEX (shard index)", m["shard_index"]),
+            ("LAST_READ_TIMESTAMP_MILLIS (last read)", m["last_read"])]
     if e["retrieval"].get("url"):
-        grid.append(("CDN URL", e["retrieval"]["url"]))
+        grid.append(("CONTENT_RETRIEVAL_METADATA → source URL", e["retrieval"]["url"]))
     ref = e["retrieval"].get("content_ref")
     if ref:
         ref = str(ref)
+        note = _info("This is CONTENT_RETRIEVAL_METADATA field 8. Its form varies (a CDN media "
+                     "token, a 64-hex hash, or the CACHE_KEY). When it is a 64-hex hash it is a "
+                     "server-/source-side content hash that DOES NOT necessarily match the actual "
+                     "cached bytes on disk — verified on an app_install_screenshot where field 8 "
+                     "differed from both the cached file's SHA-256 and the download's. Use the "
+                     "'cached file on disk' SHA-256 below for the bytes actually present.")
         if re.fullmatch(r"[0-9a-fA-F]{64}", ref):
-            grid.append(("Content SHA-256", ref))
+            grid.append((f"CONTENT_RETRIEVAL_METADATA field 8 — source content hash (SHA-256; may "
+                         f"differ from cached bytes){note}", ref))
         elif ref.lower() == str(e["cache_key"]).lower():
-            grid.append(("Content ref (retrieval field 8 — equals CACHE_KEY)", ref))
+            grid.append((f"CONTENT_RETRIEVAL_METADATA field 8 (equals CACHE_KEY){note}", ref))
         else:
-            grid.append(("CDN media token (retrieval field 8)", ref))
-    grid_html = "".join(f"<div class='k'>{_esc(k)}</div><div class='v'>{_esc(v)}</div>"
+            grid.append((f"CONTENT_RETRIEVAL_METADATA field 8 — CDN media token{note}", ref))
+    grid_html = "".join(f"<div class='k'>{k}</div><div class='v'>{_esc(v)}</div>"
                         for k, v in grid if v not in (None, ""))
-    parts.append(f"<div class='sect'>Metadata (CACHE_FILE_METADATA)</div><div class='grid'>{grid_html}</div>")
+    parts.append(f"<div class='sect'>CACHE_FILE_METADATA</div><div class='grid'>{grid_html}</div>")
 
     # children
     if e["children"]:
@@ -597,8 +682,8 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
         for ch in e["children"]:
             crows.append(f"<tr><td class='mono'>{_esc(ch['name'])}</td>"
                          f"<td>{_fmt_bytes(ch['size'])}</td><td>{_esc(ch['offset'])}</td></tr>")
-        parts.append("<div class='sect'>Children (parts / bundle files)</div>"
-                     "<table class='sub'><tr><th>Name</th><th>Size</th><th>Offset</th></tr>"
+        parts.append("<div class='sect'>CHILDREN (byte-range parts / bundle files)</div>"
+                     "<table class='sub'><tr><th>name</th><th>size</th><th>offset</th></tr>"
                      + "".join(crows) + "</table>")
 
     # on-disk paths, grouped by the SCContent account scope each copy lives in, so a copy in a
@@ -617,8 +702,23 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
                      if scope in cross else "")
             blocks.append(f"<div class='scopehdr'>SCContent scope: <span class='mono'>{_esc(scope)}</span>"
                           f"{badge}</div><div class='paths'>{listed}</div>")
+        # the actual bytes present on disk: their real hashes (NOT the metadata field-8 value) plus
+        # a viewer when the bytes are recognizable plaintext media.
+        hview = []
+        if e.get("ondisk_sha256"):
+            hview.append(f"<div class='grid'>"
+                         f"<div class='k'>cached file MD5</div><div class='v hex'>{_esc(e['ondisk_md5'])}</div>"
+                         f"<div class='k'>cached file SHA-256</div><div class='v hex'>{_esc(e['ondisk_sha256'])}</div>"
+                         f"<div class='k'>detected type</div><div class='v'>"
+                         f"{_esc(e.get('ondisk_type') or 'not a recognized plaintext media (encrypted or other)')}</div></div>")
+        if e.get("view"):
+            if e.get("view_is_image"):
+                hview.append(f"<a href='{_esc(e['view'])}' target='_blank'>"
+                             f"<img class='cacheview' src='{_esc(e['view'])}' loading='lazy'></a>")
+            else:
+                hview.append(f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>▶ view cached file</a>")
         parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present</div>"
-                     + "".join(blocks))
+                     + "".join(blocks) + "".join(hview))
     else:
         parts.append("<div class='sect'>Cache file(s) on disk</div>"
                      "<div class='muted'>no matching file found in the SCContent folders</div>")
@@ -629,9 +729,10 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
         for t in e["tombstones"]:
             trows.append(f"<tr><td>{_esc(_mct_label(t['mct']))}</td><td>{_esc(t['reason'])}</td>"
                          f"<td>{_fmt_bytes(t['bytes'])}</td><td>{_esc(t['deleted'])}</td></tr>")
-        parts.append("<div class='sect'>Deletion record (CACHE_FILE_SAMPLED_TOMBSTONE)</div>"
-                     "<table class='sub'><tr><th>Context type</th><th>Reason</th><th>Bytes deleted</th>"
-                     "<th>Deleted</th></tr>" + "".join(trows) + "</table>")
+        parts.append("<div class='sect'>CACHE_FILE_SAMPLED_TOMBSTONE (deletion record)</div>"
+                     "<table class='sub'><tr><th>MEDIA_CONTEXT_TYPE</th><th>DELETION_REASON</th>"
+                     "<th>BYTES_DELETED</th><th>DELETED_TIMESTAMP_MILLIS</th></tr>"
+                     + "".join(trows) + "</table>")
 
     links = _links_html(e, rel_prefix)
     if links:
@@ -676,7 +777,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             linkbits.append("Chat")
         links_col = ", ".join(linkbits)
         is_xscope = bool(e["on_disk"].get("cross_scope"))
-        disk_cell = ('📁' + (" <span class='xwarn'>⚠</span>" if is_xscope else "")) if e["on_disk"]["found"] \
+        disk_cell = ('📁' + (" 👁" if e.get("view") else "")
+                     + (" <span class='xwarn'>⚠</span>" if is_xscope else "")) if e["on_disk"]["found"] \
                     else ('—' if e["claims"] else '')
         detail = _detail_html(e, rel_prefix, src_root, manifest)
         rows.append(
@@ -721,6 +823,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .toolbar input,.toolbar select{{font-size:13px;padding:5px 8px;border:1px solid #bcbcd0;border-radius:5px}}
  .toolbar input[type=search]{{min-width:280px}}
  .toolbar label{{color:#555;font-weight:600}}
+ .toolbar button{{font-size:13px;padding:5px 10px;border:1px solid #bcbcd0;border-radius:5px;background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}}
+ .toolbar button:hover{{background:#e7e7f4}}
+ img.cacheview{{max-width:220px;max-height:300px;border-radius:5px;box-shadow:0 1px 4px rgba(0,0,0,.25);margin-top:6px}}
  table.main{{border-collapse:collapse;width:100%;font-size:12.5px}}
  table.main th{{background:#1f1f52;color:#fff;text-align:left;padding:7px 10px;position:sticky;top:53px;cursor:pointer;white-space:nowrap}}
  table.main th .ar{{opacity:.5;font-size:10px}}
@@ -777,6 +882,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
    <option value="Memory">Memory</option><option value="Chat">Chat</option></select></label>
  <label title="Only files with an on-disk copy in a different account's SCContent scope than the claim">
    <input type="checkbox" id="xscope" onchange="flt()"> ⚠ cross-scope only</label>
+ <button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>
  <span id="count" style="color:#555"></span>
 </div>
 <table class="main" id="tbl">
@@ -803,6 +909,13 @@ document.addEventListener('click',function(){{
  document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});}});
 function tog(r){{r.classList.toggle('open');var d=r.nextElementSibling;
  if(d&&d.classList.contains('detail'))d.classList.toggle('show');}}
+function xall(btn){{var op=btn.dataset.o==='1';
+ document.querySelectorAll('#tbl tbody tr.row').forEach(function(r){{
+  if(r.style.display==='none')return;
+  var d=r.nextElementSibling;
+  if(op){{r.classList.remove('open');if(d&&d.classList.contains('detail'))d.classList.remove('show');}}
+  else{{r.classList.add('open');if(d&&d.classList.contains('detail'))d.classList.add('show');}}}});
+ btn.dataset.o=op?'0':'1';btn.textContent=op?'Expand all':'Collapse all';}}
 function flt(){{
  var q=document.getElementById('q').value.toLowerCase();
  var cat=document.getElementById('cat').value, disk=document.getElementById('disk').value,
@@ -874,14 +987,19 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     # report_dir defaults to the parent of outdir when the report is placed under …/Reports/CacheController
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     chat_links = load_chat_links(rdir)
+    memory_pages = load_memory_pages(rdir)
     # links to the sibling reports are relative to CacheController_report.html (…/Reports/CacheController/)
     rel_prefix = "../"
 
     all_entries, virtual = [], []
     for db in dbs:
-        entries, virt = build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt)
+        entries, virt = build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt,
+                                      memory_pages)
         all_entries.extend(entries)
         virtual.extend(virt)
+
+    # hash the actual cached bytes and copy viewable plaintext media into files/ for inspection
+    materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"))
 
     db_display = device_path(dbs[0], src_root, manifest) if dbs else ""
     report, stats = generate_report(all_entries, virtual, outdir, tz_label, rel_prefix,

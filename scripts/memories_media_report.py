@@ -1292,20 +1292,172 @@ def _enc_html(members):
     return "<div class='v muted'>key not available</div>"
 
 
-def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root=None, manifest=None):
-    """Render one `<tr>` for a set of memories that share the same media (same ZMEDIAID).
+# --------------------------------------------------------------------------- shared assets
 
-    Media-intrinsic blocks (metadata, location, CDN URLs, encryption) are shown once for the whole
-    group when identical across its snaps, and only broken out per-snap when they actually differ.
-    Per-snap identity (Snap ID + ZGALLERYSNAP / ZGALLERYENTRY values) and the timestamps are always
-    listed per snap.
+# Interrogation-mark popover behaviour, shared by the index and every detail sub-page.
+_HINT_JS = """
+function hint(ev,el){ev.stopPropagation();
+ var h=el.parentNode,was=h.classList.contains('open');
+ document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});
+ if(!was)h.classList.add('open');}
+document.addEventListener('click',function(){
+ document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});});
+"""
+
+# Styling shared by the detail sub-pages (single-braced: inserted as a value into the f-string).
+_BASE_CSS = """
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}
+ header{background:#2d2d71;color:#fff;padding:16px 24px}
+ header h1{margin:0;font-size:19px} .sum{opacity:.85;font-size:13px;margin-top:4px}
+ a.back{display:inline-block;margin:14px 24px 0;color:#2d2d71;font-weight:600;text-decoration:none;font-size:13px}
+ a.back:hover{text-decoration:underline}
+ .warn{background:#ffe8e8;border:1px solid #e0a0a0;color:#7a1f1f;padding:10px 24px;font-size:13px}
+ .detailwrap{display:grid;grid-template-columns:190px 1fr;gap:16px;padding:16px 24px;align-items:start}
+ .detailwrap .thumbcol img{max-width:170px;max-height:300px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+ .noimg{width:150px;height:120px;display:flex;align-items:center;justify-content:center;background:#e6e6ee;color:#888;border-radius:6px;font-size:12px}
+ .gencap{font-size:10.5px;color:#8a1f1f;margin-top:3px;max-width:170px}
+ .kind{font-weight:600;font-size:16px} .mono{font-family:ui-monospace,Consolas,monospace}
+ .idband{margin-top:8px}
+ .idband .idrow{display:flex;align-items:baseline;gap:8px;margin:3px 0}
+ .idband .idlab{color:#666;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;min-width:74px}
+ .idband .idval{font-family:ui-monospace,Consolas,monospace;font-size:14px;font-weight:700;color:#1b1b1f;overflow-wrap:anywhere}
+ .sect{margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}
+ .grid{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12.5px;margin-top:4px}
+ .grid .k{color:#666} .grid .v{color:#1b1b1f;word-break:break-word}
+ .v.url{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
+ .v.hex{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#7a1f5a;overflow-wrap:anywhere}
+ .grid .v .col{color:#aaa;font-family:ui-monospace,Consolas,monospace;font-size:10px;margin-left:8px}
+ .geo{margin-top:4px;font-size:13px}
+ table.files{border-collapse:collapse;margin-top:6px;font-size:12px;width:100%}
+ table.files th{background:#2d2d71;color:#fff;text-align:left;padding:4px 8px;font-weight:600}
+ table.files td{border:1px solid #e0e0e8;padding:4px 8px;vertical-align:top}
+ table.files td.hash{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#555;white-space:nowrap}
+ table.files td.hash .hl{color:#2d2d71;font-weight:700} table.files td.hash .pl{color:#8a1f5a}
+ table.files td.hash .hgap{height:5px}
+ table.files td.path{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#555;max-width:460px;overflow-wrap:anywhere}
+ .muted{color:#999} .meo{background:#8a1f1f;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px}
+ a.cclink{color:#2d2d71;text-decoration:none;font-size:10.5px;white-space:nowrap} a.cclink:hover{text-decoration:underline}
+ .xscope{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;white-space:nowrap}
+ .hint{position:relative;display:inline-block}
+ .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
+   background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}
+ .qm:hover{background:#2d2d71;color:#fff}
+ .tip{display:none;position:absolute;left:20px;top:-4px;z-index:30;background:#1f1f52;color:#fff;padding:8px 11px;
+   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;text-transform:none;letter-spacing:normal}
+ .hint.open .tip{display:block}
+ .sharebar{background:#eef0ff;border:1px solid #c9cdf0;color:#2d2d71;padding:6px 10px;border-radius:5px;font-size:12.5px;font-weight:600;margin-bottom:10px}
+ .mem{padding:8px 0;border-left:2px solid #e2e2ee;padding-left:10px;margin-top:8px}
+ .mem + .mem{border-top:1px dashed #cfcfe0;margin-top:8px}
+ .mem .snapid{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;font-weight:700;color:#1b1b1f;overflow-wrap:anywhere}
+ .mem .snaplab{color:#666;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;margin-right:8px}
+ .tswrap{overflow-x:auto;margin-top:4px}
+ table.ts{border-collapse:collapse;font-size:11.5px;width:auto;min-width:100%}
+ table.ts th{background:#efeff7;color:#2d2d71;text-align:left;padding:3px 8px;font-weight:600;white-space:nowrap;vertical-align:bottom}
+ table.ts td{border:1px solid #e0e0e8;padding:3px 8px;white-space:nowrap}
+ table.ts th.rid{font-family:ui-monospace,Consolas,monospace;font-weight:400;color:#555;position:sticky;left:0;background:#efeff7}
+ table.ts .col{color:#aaa;font-family:ui-monospace,Consolas,monospace;font-size:9.5px;font-weight:400}
+ table.ts td.tsmatch{background:#e7f6ea} table.ts td.tsuniq{background:#fdf0dc}
+ .tslegend{font-size:10.5px;color:#777;margin-top:3px}
+ .tslegend .sw{display:inline-block;width:10px;height:10px;border:1px solid #ccc;border-radius:2px;vertical-align:middle;margin-right:3px}
+ .tslegend .sw.tsmatch{background:#e7f6ea} .tslegend .sw.tsuniq{background:#fdf0dc}
+ .shared2,.cols2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 26px;align-items:start}
+ .shared2 .c,.cols2 .c{min-width:0}
+ @media(max-width:900px){.shared2,.cols2,.detailwrap{grid-template-columns:1fr}}
+"""
+
+
+# --------------------------------------------------------------------------- grouping
+
+def assign_groups(memories):
+    """Group memories by two merge relations, via union-find:
+
+    1. shared ``ZMEDIAID`` (the same media object), and
+    2. shared **non-zero** media MD5 (identical recovered bytes) — matched **across users**, so the
+       same picture saved on two accounts lands on one page. Zero-byte files are excluded (they
+       would all collapse together).
+
+    Returns ``(groups, snap_to_key)``: ``groups`` is ``[(key, [members...])]`` ordered by earliest
+    creation, ``snap_to_key`` maps each ``snap_id`` to its group key (a short, stable hash).
+    """
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:                               # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for m in memories.values():
+        find(m["snap_id"])
+
+    for attr, getter in (("mediaid", lambda m: m["ids"].get("ZMEDIAID")),):
+        buckets = {}
+        for m in memories.values():
+            v = getter(m)
+            if v:
+                buckets.setdefault(v, []).append(m["snap_id"])
+        for sids in buckets.values():
+            for s in sids[1:]:
+                union(sids[0], s)
+
+    by_hash = {}
+    for m in memories.values():
+        for f in m["media_files"]:
+            if f.get("bytes", 0) <= 0:
+                continue
+            hs = f.get("hashes") or []
+            md5 = hs[0][1] if hs else None
+            if md5:
+                by_hash.setdefault(md5, set()).add(m["snap_id"])
+    for sids in by_hash.values():
+        sids = list(sids)
+        for s in sids[1:]:
+            union(sids[0], s)
+
+    comps = {}
+    for m in memories.values():
+        comps.setdefault(find(m["snap_id"]), []).append(m)
+
+    groups, snap_to_key = [], {}
+    for members in comps.values():
+        members.sort(key=lambda m: (m["created_sort"], m["snap_id"]))
+        key = hashlib.md5("|".join(sorted(x["snap_id"] for x in members)).encode()).hexdigest()[:12]
+        groups.append((key, members))
+        for m in members:
+            snap_to_key[m["snap_id"]] = key
+    groups.sort(key=lambda kv: (min(m["created_sort"] for m in kv[1]), kv[0]))
+    return groups, snap_to_key
+
+
+def _primary_media(m):
+    """The largest non-zero recovered media file for a memory (for hash/thumbnail columns)."""
+    cands = [f for f in m["media_files"] if f.get("bytes", 0) > 0]
+    return max(cands, key=lambda f: f["bytes"]) if cands else None
+
+
+# --------------------------------------------------------------------------- detail sub-page
+
+def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
+                         src_root, manifest, userids, media_prefix="../", cc_prefix="../../"):
+    """Return the detail body HTML for one group (thumbnail + all blocks), for a sub-page.
+
+    ``media_prefix`` prefixes links to ``media/`` and ``cc_prefix`` prefixes links to the sibling
+    CacheController report, since sub-pages live one level deeper (``Memories/pages/``).
     """
     files = _dedup_media(members)
     still = _best_still(files)
     if still:
         cap = "<div class='gencap'>▶ poster generated from video</div>" if still.get("generated") else ""
-        thumb_html = (f'<a href="{html.escape(still["path"])}" target="_blank">'
-                      f'<img src="{html.escape(still["path"])}" loading="lazy"></a>{cap}')
+        thumb_html = (f'<a href="{media_prefix}{html.escape(still["path"])}" target="_blank">'
+                      f'<img src="{media_prefix}{html.escape(still["path"])}" loading="lazy"></a>{cap}')
     else:
         thumb_html = '<div class="noimg">no cached media</div>'
 
@@ -1317,15 +1469,19 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
         kind += " <span class='muted'>(preview only — full video not cached)</span>"
     meo = ' <span class="meo">My Eyes Only</span>' if any(m["is_meo"] for m in members) else ""
 
+    # prominent MEDIA ID (shared) + snap count
     media_id = lead["ids"].get("ZMEDIAID")
-    header = (f"<div class='ghdr'><span class='glab'>Media ID</span>"
-              f"<span class='mono'>{html.escape(str(media_id))}</span></div>") if media_id else ""
+    idrows = []
+    if media_id:
+        idrows.append(f"<div class='idrow'><span class='idlab'>Media ID</span>"
+                      f"<span class='idval'>{html.escape(str(media_id))}</span></div>")
+    idrows.append(f"<div class='idrow'><span class='idlab'>Memories</span>"
+                  f"<span class='idval'>{len(members)}</span></div>")
+    idband = f"<div class='idband'>{''.join(idrows)}</div>"
     sharebar = ("" if single else
-                f"<div class='sharebar'>🔗 {len(members)} memories share the same media "
-                f"(ZMEDIAID) — media-level details are shown once below</div>")
+                f"<div class='sharebar'>🔗 {len(members)} memories are grouped here (same ZMEDIAID "
+                "and/or identical media bytes) — media-level details are shown once below</div>")
 
-    # blocks that are usually identical across the group: show once, else break out per snap.
-    # (CDN URLs almost always differ between snaps of the same media, so they live per-snap only.)
     meta, meta_shared = _shared_or_per(members, _meta_grid)
     loc, loc_shared = _shared_location(members, keychain_available)
     varies = "<div class='v muted'>varies per snap (see below)</div>"
@@ -1339,13 +1495,13 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
     shared_html = (f"<div class='shared2'><div class='c'>{left}</div>"
                    f"<div class='c'>{loc_block}{enc_block}</div></div>")
 
-    # per-snap blocks: Snap ID + ZGALLERYSNAP / ZGALLERYENTRY values + CDN URLs, plus any shared
-    # block (metadata / location) that turned out to differ across the group.
     mem_blocks = []
     for idx, m in enumerate(members):
-        parts = [f"<div class='ghdr' id='mem-{html.escape(m['snap_id'])}'>"
-                 f"<span class='glab'>Snap ID</span>"
-                 f"<span class='mono'>{html.escape(m['snap_id'])}</span></div>",
+        uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:12] + "…")
+        parts = [f"<div id='mem-{html.escape(m['snap_id'])}'>"
+                 f"<span class='snaplab'>Snap ID</span>"
+                 f"<span class='snapid'>{html.escape(m['snap_id'])}</span></div>"
+                 f"<div class='mono' style='font-size:11px;color:#666;margin:2px 0 4px'>user {html.escape(str(uid))}</div>",
                  f"<div class='cols2'>"
                  f"<div class='c'><div class='sect'>ZGALLERYSNAP values</div>"
                  f"<div class='grid'>{_snap_values_grid(m)}</div></div>"
@@ -1368,13 +1524,11 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
             blocks.append(f"<span class='hl'>MD5</span>{tag} {md5}<br>"
                           f"<span class='hl'>SHA-256</span>{tag} {sha256}")
         hashes = "<div class='hgap'></div>".join(blocks)
-        # videos: fall back to the ZGALLERYSNAP dimensions PIL can't read off an mp4 container
         dim = f.get("dim") or f.get("snap_dim") or ""
-        # two-way link to the cache_controller report, only when that file is indexed there
         source_cell = html.escape(f["source"]) + _info(f.get("how"))
         if f.get("in_cc") and f.get("cache_key"):
-            source_cell += (" <a class='cclink' target='scauto_cache' "
-                            f"href=\"../CacheController/CacheController_report.html#ck-"
+            source_cell += (f" <a class='cclink' target='scauto_cache' "
+                            f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
                             f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>")
         if f.get("cross_scope"):
             source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
@@ -1383,7 +1537,7 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
             f"<tr><td>{html.escape(f['role'])}</td><td>{source_cell}</td>"
             f"<td>{f['ext']}</td><td>{html.escape(dim)}</td>"
             f"<td>{f['bytes']//1024} KB</td>"
-            f"<td><a href=\"{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
+            f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
             f"<td class='hash'>{hashes}</td>"
             f"<td class='path'>{srcs}</td></tr>")
     files_table = ("<table class='files'><tr><th>Role</th><th>Source cache</th><th>Type</th>"
@@ -1392,157 +1546,213 @@ def _render_group(members, keychain_available, snap_tcols, entry_tcols, src_root
                    + "".join(frows) + "</table>") if frows else "<div class='muted'>no cached media recovered</div>"
 
     return f"""
-        <tr>
-          <td class="media">{thumb_html}</td>
-          <td>
-            {sharebar}
-            <div class="kind">{kind}{meo}</div>
-            {header}
-            {shared_html}
-            {''.join(mem_blocks)}
-            <div class="sect">Timestamps — Snap (ZGALLERYSNAP)</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
-            <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY)</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
-            <div class="sect">Media files</div>{files_table}
-          </td>
-        </tr>"""
+      <div class="detailwrap">
+        <div class="thumbcol">{thumb_html}</div>
+        <div class="detailcol">
+          {sharebar}
+          <div class="kind">{kind}{meo}</div>
+          {idband}
+          {shared_html}
+          {''.join(mem_blocks)}
+          <div class="sect">Timestamps — Snap (ZGALLERYSNAP)</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
+          <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY)</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
+          <div class="sect">Media files</div>{files_table}
+        </div>
+      </div>"""
+
+
+def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
+                   src_root, manifest, userids, tz_label):
+    """Write ``pages/<key>.html`` for one group and return its path relative to the Memories dir."""
+    lead = members[0]
+    body = _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
+                                src_root, manifest, userids)
+    back = (f'<a class="back" href="../Memories_report.html#mem-{html.escape(lead["snap_id"])}">'
+            '← Back to Memories index</a>')
+    doc = (f'<!doctype html><html><head><meta charset="utf-8">'
+           f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title><style>{_BASE_CSS}</style></head><body>'
+           f'<header><h1>Snapchat Memory detail</h1>'
+           f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
+           f'{back}{body}<script>{_HINT_JS}</script></body></html>')
+    os.makedirs(pages_dir, exist_ok=True)
+    with open(os.path.join(pages_dir, f"{key}.html"), "w", encoding="utf-8") as fh:
+        fh.write(doc)
+    return f"pages/{key}.html"
+
+
+# --------------------------------------------------------------------------- index page
+
+def _geo_compact(m):
+    """Short geolocation cell for the index: coords + OpenStreetMap and Google Maps links.
+
+    (A tile-server link can be added here later when an offline tile server is configured.)
+    """
+    if m["latitude"] is not None:
+        lat, lon = m["latitude"], m["longitude"]
+        return (f'{lat:.5f}, {lon:.5f}<br>'
+                f'<a href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}" '
+                f'target="_blank">OSM</a> &middot; '
+                f'<a href="https://www.google.com/maps?q={lat},{lon}" target="_blank">Google</a>')
+    if m["has_location"]:
+        return '<span class="muted">on-device</span>'
+    return '<span class="muted">—</span>'
+
+
+def _cache_tokens(m):
+    """Distinct cache-file tokens (CACHE_KEY / item hashes) for a memory's recovered media."""
+    toks = []
+    for f in m["media_files"]:
+        for t in (f.get("cache_key"), f.get("item")):
+            if t and t not in toks:
+                toks.append(t)
+    return toks
 
 
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
                     src_root=None, manifest=None):
-    userids = userids or {}
-    groups = {}
-    for m in memories.values():
-        groups.setdefault(m["user_hash"], []).append(m)
-    # most-populated profile first
-    ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
 
+    Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
+    link straight to a memory's detail page. Returns (index_path, linked, located).
+    """
+    userids = userids or {}
+    os.makedirs(outdir, exist_ok=True)
     total = len(memories)
     linked = sum(1 for m in memories.values() if m["media_files"])
     located = sum(1 for m in memories.values() if m["latitude"] is not None)
 
-    # one column set for every timestamp table in the report (union across all memories, NULL-filled)
     snap_tcols = _union_cols(memories.values(), "times")
     entry_tcols = _union_cols(memories.values(), "entry_times")
 
-    # top navigation (only when more than one profile)
-    nav = ""
-    if len(ordered) > 1:
-        items = []
-        for uh, mems in ordered:
-            label = userids.get(uh) or ("userHash " + uh[:12] + "…")
-            withmedia = sum(1 for x in mems if x["media_files"])
-            items.append(f'<a href="#u_{uh}">{html.escape(label)}'
-                         f'<span class="navcount">{len(mems)} memories &middot; {withmedia} with media</span></a>')
-        nav = '<nav><span class="navlabel">Users:</span>' + "".join(items) + "</nav>"
+    groups, snap_to_key = assign_groups(memories)
+    pages_dir = os.path.join(outdir, "pages")
+    for key, members in groups:
+        render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
+                       src_root, manifest, userids, tz_label)
 
-    # memories that reference the same media (same ZMEDIAID) are grouped so the media, encryption
-    # and matching timestamps are shown once. We key on ZMEDIAID rather than the AES key or media
-    # hash: the same picture can legitimately appear in several distinct memories with its own
-    # key, and only a shared ZMEDIAID means it is truly the same media object. Memories with no
-    # ZMEDIAID each form their own group.
-    def _grp_key(m):
-        mid = m["ids"].get("ZMEDIAID")
-        return ("m", mid) if mid else ("s", m["snap_id"])
+    # manifest for the cache_controller report's direct-to-detail links
+    page_manifest = {m["snap_id"]: f"pages/{key}.html" for key, members in groups for m in members}
+    try:
+        with open(os.path.join(outdir, "memory_pages.json"), "w", encoding="utf-8") as fh:
+            json.dump(page_manifest, fh)
+    except Exception as error:
+        logger.debug(f"Could not write memory_pages.json: {error}")
 
-    sections = []
-    for uh, mems in ordered:
-        uid = userids.get(uh)
-        mems_sorted = sorted(mems, key=lambda m: (m["created_sort"], m["snap_id"]))
-        grouped = {}
-        for m in mems_sorted:
-            grouped.setdefault(_grp_key(m), []).append(m)
-        rows = "".join(_render_group(g, keychain_available, snap_tcols, entry_tcols, src_root, manifest)
-                       for g in grouped.values())
-        withmedia = sum(1 for x in mems if x["media_files"])
-        loc = sum(1 for x in mems if x["latitude"] is not None)
-        head = (f'<h2 id="u_{uh}">User: {html.escape(uid) if uid else "(user id unknown)"}'
-                f'<span class="uh">userHash {uh}</span>'
-                f'<span class="hcount">{len(mems)} memories &middot; {withmedia} with media &middot; {loc} geolocated</span></h2>')
-        sections.append(head + f"<table>{rows}</table>")
+    # one row per memory, ordered by group then creation
+    rows = []
+    n_users = len({m["user_hash"] for m in memories.values()})
+    for key, members in groups:
+        for m in members:
+            uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:10] + "…")
+            still = _best_still(m["media_files"]) or _best_still(_dedup_media(members))
+            has_img = bool(still)
+            page_href = f"pages/{key}.html#mem-{html.escape(m['snap_id'])}"
+            if still:
+                thumb = (f'<a href="{page_href}"><img src="{html.escape(still["path"])}" '
+                         f'loading="lazy"></a>')
+            else:
+                thumb = '<span class="nothumb">—</span>'
+            prim = _primary_media(m)
+            md5 = prim["hashes"][0][1] if prim and prim.get("hashes") else ""
+            sha = prim["hashes"][0][2] if prim and prim.get("hashes") else ""
+            zsnap = m["snap_id"]
+            zentry = m["entry_other"].get("ZENTRYID") or ""
+            zmedia = m["ids"].get("ZMEDIAID") or ""
+            toks = "<br>".join(html.escape(t) for t in _cache_tokens(m)) or ""
+            is_video = m["media_type"] == 1
+            kind = "🎬" if is_video else "🖼️"
+            rows.append(
+                f"<tr class='row' id='mem-{html.escape(zsnap)}' data-hasimg='{'y' if has_img else 'n'}' "
+                f"data-user='{html.escape(str(uid))}'>"
+                f"<td class='thumb'>{thumb}</td>"
+                f"<td>{kind}</td>"
+                f"<td class='mono'>{html.escape(str(uid))}</td>"
+                f"<td class='mono idcell'>"
+                f"<div><span class='idk'>ZMEDIAID</span> {html.escape(str(zmedia))}</div>"
+                f"<div><span class='idk'>ZSNAPID</span> {html.escape(zsnap)}</div>"
+                f"<div><span class='idk'>ZENTRYID</span> {html.escape(str(zentry))}</div></td>"
+                f"<td class='mono tok'>{toks}</td>"
+                f"<td class='mono hashcell'><span class='hl'>MD5</span> {html.escape(md5)}<br>"
+                f"<span class='hl'>SHA-256</span> {html.escape(sha)}</td>"
+                f"<td data-sort='{m['created_sort']}'>{html.escape(m['create_utc'])}</td>"
+                f"<td>{_geo_compact(m)}</td>"
+                f"<td><a class='detail' href='{page_href}'>open ▸</a>"
+                f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>"
+                f"</td></tr>")
+
+    user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
+                        for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
+                                         for m in memories.values()}))
 
     banner = "" if keychain_available else (
-        '<div class="warn">No usable keychain (egocipher/persistedkey) was supplied — '
-        'geolocation and My Eyes Only memories cannot be recovered, and old-schema imagery '
-        'cannot be decrypted. Provide a full-filesystem keychain to complete these.</div>')
+        '<div class="warn">No usable keychain (egocipher/persistedkey) was supplied — geolocation '
+        'and My Eyes Only memories cannot be recovered, and old-schema imagery cannot be decrypted.</div>')
 
-    doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat Memories</title><style>
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
- header{{background:#2d2d71;color:#fff;padding:16px 24px}}
- header h1{{margin:0;font-size:20px}} .sum{{opacity:.85;font-size:13px;margin-top:4px}}
- .warn{{background:#ffe8e8;border:1px solid #e0a0a0;color:#7a1f1f;padding:10px 24px;font-size:13px}}
- nav{{padding:12px 24px;background:#ececf4;border-bottom:1px solid #d7d7e2;font-size:13px;position:sticky;top:0}}
- nav .navlabel{{color:#555;font-weight:700;margin-right:8px}}
- nav a{{display:inline-block;margin:2px 18px 2px 0;color:#2d2d71;text-decoration:none;font-weight:600}}
- nav a:hover{{text-decoration:underline}} .navcount{{color:#888;font-weight:400;margin-left:8px}}
- h2{{margin:0;padding:12px 24px;background:#1f1f52;color:#fff;font-size:15px}}
- h2 .uh{{font-weight:400;opacity:.65;font-size:11.5px;font-family:ui-monospace,Consolas,monospace;margin-left:12px}}
- h2 .hcount{{font-weight:400;opacity:.8;font-size:12px;margin-left:12px}}
- table{{border-collapse:collapse;width:100%}}
- body table td{{border-bottom:1px solid #ddd;padding:14px;vertical-align:top}}
- td.media{{width:170px}} td.media img{{max-width:150px;max-height:280px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.25)}}
- .noimg{{width:150px;height:120px;display:flex;align-items:center;justify-content:center;background:#e6e6ee;color:#888;border-radius:6px;font-size:12px}}
- .gencap{{font-size:10.5px;color:#8a1f1f;margin-top:3px;max-width:150px}}
- .kind{{font-weight:600;font-size:15px}} .mono{{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#555;margin-bottom:4px}}
- .sect{{margin-top:10px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}}
- .grid{{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12.5px;margin-top:4px}}
- .grid .k{{color:#666}} .grid .v{{color:#1b1b1f;word-break:break-word}}
- .v.url{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}}
- .v.hex{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#7a1f5a;overflow-wrap:anywhere}}
- .grid .v .col{{color:#aaa;font-family:ui-monospace,Consolas,monospace;font-size:10px;margin-left:8px}}
- .geo{{margin-top:4px;font-size:13px}}
- table.files{{border-collapse:collapse;margin-top:6px;font-size:12px;width:100%}}
- table.files th{{background:#2d2d71;color:#fff;text-align:left;padding:4px 8px;font-weight:600}}
- table.files td{{border:1px solid #e0e0e8;padding:4px 8px;vertical-align:top}}
- table.files td.hash{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#555;white-space:nowrap}}
- table.files td.hash .hl{{color:#2d2d71;font-weight:700}} table.files td.hash .pl{{color:#8a1f5a}}
- table.files td.hash .hgap{{height:5px}}
- table.files td.path{{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#555;max-width:460px;overflow-wrap:anywhere}}
- .muted{{color:#999}} .meo{{background:#8a1f1f;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px}}
- a.cclink{{color:#2d2d71;text-decoration:none;font-size:10.5px;white-space:nowrap}} a.cclink:hover{{text-decoration:underline}}
- .xscope{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;white-space:nowrap}}
- .hint{{position:relative;display:inline-block}}
- .qm{{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
-   background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}}
- .qm:hover{{background:#2d2d71;color:#fff}}
- .tip{{display:none;position:absolute;left:20px;top:-4px;z-index:30;background:#1f1f52;color:#fff;padding:8px 11px;
-   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;text-transform:none;letter-spacing:normal}}
- .hint.open .tip{{display:block}}
- .sharebar{{background:#eef0ff;border:1px solid #c9cdf0;color:#2d2d71;padding:6px 10px;border-radius:5px;font-size:12.5px;font-weight:600;margin-bottom:10px}}
- .ghdr{{margin-top:8px;font-size:12.5px}} .ghdr .glab{{color:#666;font-weight:700;text-transform:uppercase;font-size:10.5px;letter-spacing:.04em;margin-right:8px}}
- .ghdr .mono{{margin:0}}
- .mem{{padding:8px 0}} .mem + .mem{{border-top:1px dashed #cfcfe0;margin-top:8px}}
- .mem{{border-left:2px solid #e2e2ee;padding-left:10px;margin-top:8px}}
- .tswrap{{overflow-x:auto;margin-top:4px}}
- table.ts{{border-collapse:collapse;font-size:11.5px;width:auto;min-width:100%}}
- table.ts th{{background:#efeff7;color:#2d2d71;text-align:left;padding:3px 8px;font-weight:600;white-space:nowrap;vertical-align:bottom}}
- table.ts td{{border:1px solid #e0e0e8;padding:3px 8px;white-space:nowrap}}
- table.ts th.rid{{font-family:ui-monospace,Consolas,monospace;font-weight:400;color:#555;position:sticky;left:0;background:#efeff7}}
- table.ts .col{{color:#aaa;font-family:ui-monospace,Consolas,monospace;font-size:9.5px;font-weight:400}}
- table.ts td.tsmatch{{background:#e7f6ea}} table.ts td.tsuniq{{background:#fdf0dc}}
- .tslegend{{font-size:10.5px;color:#777;margin-top:3px}}
- .tslegend .sw{{display:inline-block;width:10px;height:10px;border:1px solid #ccc;border-radius:2px;vertical-align:middle;margin-right:3px}}
- .tslegend .sw.tsmatch{{background:#e7f6ea}} .tslegend .sw.tsuniq{{background:#fdf0dc}}
- .shared2,.cols2{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 26px;align-items:start}}
- .shared2 .c,.cols2 .c{{min-width:0}}
- @media(max-width:900px){{.shared2,.cols2{{grid-template-columns:1fr}}}}
-</style></head><body>
-<header><h1>Snapchat Memories</h1>
- <div class="sum">{len(ordered)} user profile(s) &middot; {total} memories &middot; {linked} with recovered media &middot; {located} geolocated &middot; times shown in <b>{html.escape(tz_label)}</b></div></header>
-{banner}
-{nav}
-{''.join(sections)}
-<script>
-function hint(ev,el){{ev.stopPropagation();
- var h=el.parentNode,was=h.classList.contains('open');
- document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});
- if(!was)h.classList.add('open');}}
-document.addEventListener('click',function(){{
- document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});}});
-</script>
-</body></html>"""
+    index_css = """
+ .toolbar{position:sticky;top:0;background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
+   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px;z-index:5}
+ .toolbar input,.toolbar select{font-size:13px;padding:5px 8px;border:1px solid #bcbcd0;border-radius:5px}
+ .toolbar input[type=search]{min-width:280px} .toolbar label{color:#555;font-weight:600}
+ table.main{border-collapse:collapse;width:100%;font-size:12px}
+ table.main th{background:#1f1f52;color:#fff;text-align:left;padding:7px 9px;position:sticky;top:53px;cursor:pointer;white-space:nowrap}
+ table.main th .ar{opacity:.5;font-size:10px}
+ table.main td{border-bottom:1px solid #e2e2ea;padding:6px 9px;vertical-align:top}
+ tr.row:hover{background:#eef0ff}
+ td.thumb{width:90px} td.thumb img{max-width:80px;max-height:130px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+ .nothumb{color:#bbb} .mono{font-family:ui-monospace,Consolas,monospace;font-size:11px}
+ td.idcell{color:#33367a;overflow-wrap:anywhere;max-width:230px} td.idcell div{margin:1px 0}
+ td.idcell .idk{color:#8a8aa0;font-weight:700;font-size:9px;letter-spacing:.03em;margin-right:5px}
+ td.tok{color:#555;max-width:150px;overflow-wrap:anywhere}
+ td.hashcell{color:#555;max-width:300px;overflow-wrap:anywhere} td.hashcell .hl{color:#2d2d71;font-weight:700}
+ a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap} a.detail:hover{text-decoration:underline}
+ .nsnaps{color:#888;font-size:10.5px;white-space:nowrap} .muted{color:#999}
+"""
 
-    os.makedirs(outdir, exist_ok=True)
+    doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
+           f'<style>{_BASE_CSS}{index_css}</style></head><body>'
+           f'<header><h1>Snapchat Memories — index</h1>'
+           f'<div class="sum">{n_users} user profile(s) &middot; {total} memories &middot; {linked} with '
+           f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
+           f'times in <b>{html.escape(tz_label)}</b></div></header>'
+           f'{banner}'
+           f'<div class="toolbar">'
+           f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, user…" oninput="flt()">'
+           f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
+           f'<label>Thumbnail <select id="img" onchange="flt()"><option value="">any</option>'
+           f'<option value="y">with</option><option value="n">without</option></select></label>'
+           f'<span id="count" style="color:#555"></span></div>'
+           f'<table class="main" id="tbl"><thead><tr>'
+           f'<th>Thumb</th><th onclick="srt(1)">Kind <span class="ar">↕</span></th>'
+           f'<th onclick="srt(2)">User <span class="ar">↕</span></th>'
+           f'<th onclick="srt(3)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></th>'
+           f'<th>Cache tokens</th>'
+           f'<th>Media MD5 / SHA-256</th>'
+           f'<th onclick="srt(6)">Created <span class="ar">↕</span></th>'
+           f'<th>Geolocation</th><th>Detail</th></tr></thead>'
+           f'<tbody>{"".join(rows)}</tbody></table>'
+           f'<script>{_HINT_JS}'
+           'function flt(){'
+           'var q=document.getElementById("q").value.toLowerCase();'
+           'var u=document.getElementById("user").value,im=document.getElementById("img").value;'
+           'var rows=document.querySelectorAll("#tbl tbody tr.row"),n=0;'
+           'rows.forEach(function(r){'
+           'var ok=(!q||r.textContent.toLowerCase().indexOf(q)>-1)&&(!u||r.dataset.user===u)'
+           '&&(!im||r.dataset.hasimg===im);'
+           'r.style.display=ok?"":"none";if(ok)n++;});'
+           'document.getElementById("count").textContent=n+" shown";}'
+           'function srt(col){var tb=document.querySelector("#tbl tbody");'
+           'var rows=Array.prototype.slice.call(tb.querySelectorAll("tr.row"));'
+           'var dir=tb.getAttribute("data-dir")==="asc"?1:-1;tb.setAttribute("data-dir",dir===1?"desc":"asc");'
+           'rows.sort(function(a,b){var ca=a.children[col],cb=b.children[col];'
+           'var va=ca.getAttribute("data-sort"),vb=cb.getAttribute("data-sort");'
+           'if(va!==null&&vb!==null)return (Number(va)-Number(vb))*dir;'
+           'return ca.textContent.localeCompare(cb.textContent)*dir;});'
+           'rows.forEach(function(r){tb.appendChild(r);});}'
+           'flt();'
+           'if(location.hash){var el=document.querySelector(location.hash.replace(/[^#\\w-]/g,""));'
+           'if(el){el.scrollIntoView();el.style.background="#fff6cc";}}'
+           '</script></body></html>')
+
     report = os.path.join(outdir, "Memories_report.html")
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)

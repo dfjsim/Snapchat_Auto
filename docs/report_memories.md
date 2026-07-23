@@ -33,10 +33,32 @@ that are concatenated in offset order before decryption (`_resolve_sccontent`); 
 notes the reconstruction. If a video has no cached still, a **poster frame** is derived from the
 decrypted `.mp4` and clearly labelled as a derived artifact.
 
-## Grouping and layout
-Memories that reference the same media (same `ZMEDIAID`) are grouped so media, encryption and
-matching timestamps show once; per-snap identity and timestamps show per snap. Each snap's header
-carries the `id="mem-<ZSNAPID>"` anchor other reports link to.
+## Layout — a lightweight index + per-group detail sub-pages
+To keep the report usable with many Memories, it is split (`generate_report`):
+
+* **`Memories_report.html`** — a lightweight, **sortable/filterable index table** (global search,
+  per-column sort, a with/without-thumbnail filter, a user filter). One **row per Memory (snap)**
+  with: thumbnail, kind, user, `ZSNAPID` / `ZENTRYID` / `ZMEDIAID`, cache-file tokens, the media
+  **MD5 / SHA-256**, created time, geolocation, and a link to the detail sub-page. Each row carries
+  `id="mem-<ZSNAPID>"` (the anchor other reports link to).
+* **`pages/<key>.html`** — one **detail sub-page per group**, holding the full detail (metadata,
+  location, per-snap AES key/IV, ZGALLERYSNAP/ZGALLERYENTRY values, CDN URLs, timestamp tables, and
+  the media-files table with hashes/paths and the 🗄 cache-entry links). MEDIA ID and SNAP IDs are
+  shown prominently. Each member also carries an `id="mem-<ZSNAPID>"` anchor, and the page links
+  back to the index.
+
+### Two-level grouping (`assign_groups`, union-find)
+1. **ZMEDIAID** — memories referencing the same media object.
+2. **Identical media bytes** — memories whose recovered media share a **non-zero-byte MD5**,
+   matched **across user accounts** (zero-byte files excluded, since they would all collide).
+
+Both relations are unioned (connected components), so "same bytes, different ZMEDIAID" — even on two
+different accounts — land on one sub-page. Group key = a short stable hash of the member snap ids.
+
+### Manifest for cross-report links
+`generate_report` writes `memory_pages.json` (`snap_id → pages/<key>.html`). The cache_controller
+report reads it (it runs after Memories) to offer **both** an index-row link and a direct
+detail-page link per memory-linked entry. See [cross_report_linking.md](cross_report_linking.md).
 
 ## Cross-scope on-disk copies
 Each recovered media file's source paths are grouped by the account `SCContent_<userId>` scope

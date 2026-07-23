@@ -43,6 +43,16 @@
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
 # Snapchat Memories report
+- [DONE-v1.4.0] Split the Memories report into a **lightweight index** (`Memories_report.html`) plus
+  one **detail sub-page per group** (`pages/<key>.html`), so it stays usable with many Memories.
+  The index is a sortable/filterable table (global search, with/without-thumbnail filter, user
+  filter), one row per memory: thumbnail, kind, user, ZSNAPID/ZENTRYID/ZMEDIAID, cache tokens,
+  media MD5/SHA-256, created, geolocation, detail link. Sub-pages hold the full detail with MEDIA/
+  SNAP IDs prominent and a back-to-index link. Second-level grouping (`assign_groups`, union-find)
+  merges memories by ZMEDIAID **and** by identical non-zero media MD5 **across users** (0-byte
+  excluded). Writes `memory_pages.json` (snap_id -> sub-page) so the cache_controller report links
+  to both the index row and the detail page. Verified on the 2023 GK device: 80 memories -> 66
+  groups, and 80/80 index<->subpage + 77/77 cache->index + 77/77 cache->detail links resolve.
 - [DONE-v1.3.1] Fix ".pack" files not being decoded and associated to Snapchat Memories anymore.
   (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
   Snapchat's app/app-group containers from container metadata plists and extracts within them.)
@@ -95,6 +105,21 @@
 - [DONE-v1.3.3] Documented the reports and their linking logic under `docs/`:
   `cross_report_linking.md` (the anchor scheme + every link basis), `report_cache_controller.md`,
   `report_memories.md`, `report_communications.md`.
+
+# cache_controller.db report — follow-up improvements
+- [DONE-v1.4.0] Field-8 of `CONTENT_RETRIEVAL_METADATA` was mislabelled "Content SHA-256". It is
+  usually a CDN media token, sometimes a 64-hex hash, sometimes the CACHE_KEY — and even the 64-hex
+  form is a **source-side** hash that need not match the cached bytes (proven on `f1cd5e24…`, an
+  app_install_screenshot whose field 8 matched neither the cached file nor the download). Now
+  labelled by real column name + value-type + a "?" caveat, and the report additionally computes and
+  shows the **actual cached file's** MD5/SHA-256 (`materialize_ondisk`).
+- [DONE-v1.4.0] Cached media files are now **viewable even when unlinked** to a Memory/chat:
+  recognizable plaintext media (≤30 MB) is copied to `files/<CACHE_KEY>.<ext>` and embedded/linked
+  (👁 marker in the table). Encrypted bytes are hashed but not copied.
+- [DONE-v1.4.0] Detail panels now use the **real DB column names** (description in parentheses).
+- [DONE-v1.4.0] Added an **Expand all** / Collapse all button.
+- [DONE-v1.4.0] Memories index: ZMEDIAID/ZSNAPID/ZENTRYID combined into one labelled column;
+  geolocation shows OSM **and** Google links; the Detail column shows each group's snap count.
 
 # Analysis / Reverse engineering
 - [DONE-v1.4.0] Check if we have metadata in `cache_controller.db` for all files in `Documents/com.snap.file_manager_3_SCContent_...`.
