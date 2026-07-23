@@ -27,9 +27,15 @@ and exactly how each cross-link is derived**. Each per-report page documents its
 
 | Report | Anchor id | On what element | Written by |
 |---|---|---|---|
-| Memories | `mem-<ZSNAPID>` | each snap's "Snap ID" header | `_render_group` in `scripts/memories_media_report.py` |
+| Memories index | `mem-<ZSNAPID>` | each memory's index-table row | `generate_report` in `scripts/memories_media_report.py` |
+| Memories detail sub-page | `mem-<ZSNAPID>` | each member block on `pages/<key>.html` | `_render_group_detail` |
 | cache_controller | `ck-<CACHE_KEY>` | each physical-file row | `generate_report` in `scripts/cache_controller_report.py` |
 | Communications | `cf-<CACHE_KEY>` | each cached chat attachment | `path_to_image_html` in `scripts/ParseSnapchat_iOS.py` |
+
+The Memories report is split into a lightweight index (`Memories_report.html`) plus one detail
+sub-page per group (`pages/<key>.html`); the same `mem-<ZSNAPID>` anchor exists on both, so links can
+target either. `generate_report` writes `Memories/memory_pages.json` (`snap_id → pages/<key>.html`)
+so other reports can resolve a snap to its detail page.
 
 `<ZSNAPID>` is the exact `ZGALLERYSNAP.ZSNAPID` string (upper-case UUID). `<CACHE_KEY>` is the
 32-hex `cache_controller.db` key, which is also the on-disk filename in the `SCContent` folder.
@@ -53,6 +59,10 @@ Tried in priority order; the first that matches wins, and the icon records which
 > On both test extractions the primary method already resolves every linkable entry — the two
 > fallbacks add nothing there. They exist for app versions / cloud-only memories where a physical
 > file carries a URL claim but no snap-scoped claim. See the measurement in `DONE.md`.
+
+A memory-linked cache entry shows **two** links: the index row
+(`Memories_report.html#mem-<ZSNAPID>`) **and**, when `memory_pages.json` is present, the detail
+sub-page (`pages/<key>.html#mem-<ZSNAPID>`). Both open in the `scauto_memories` tab.
 
 ### Memory → cache_controller
 Per recovered media file, the Memory report links to `#ck-<CACHE_KEY>` **only when that key is

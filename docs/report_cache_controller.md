@@ -48,10 +48,25 @@ inspects the value rather than assuming a type:
 * a **64-hex content SHA-256** on newer app versions (only ~13% of entries on the 2026 device);
 * the **32-hex `CACHE_KEY`** on the 2023 device.
 
-It is labelled accordingly in the detail panel ("Content SHA-256" only when it is genuinely 64 hex,
-otherwise "CDN media token" or "Content ref … equals CACHE_KEY"). **Do not** read field 8 as a
-hash without checking its length — an earlier version of this report mislabelled every field-8
-value as "Content SHA-256".
+Even when field 8 **is** a 64-hex hash it is a **source-/server-side content hash that does NOT
+necessarily match the bytes actually cached on disk** — verified on an `app_install_screenshot`
+(`CACHE_KEY f1cd5e24…`) where field 8 (`5b99116f…`) matched neither the cached file's real SHA-256
+(`a57e0444…`) nor the download. The report therefore:
+
+* labels field 8 by its real column name (`CONTENT_RETRIEVAL_METADATA field 8`) with a value-type
+  hint ("source content hash (SHA-256; may differ from cached bytes)" / "CDN media token" /
+  "equals CACHE_KEY") and a "?" spelling out the caveat, and
+* separately computes and shows the **actual cached file's MD5/SHA-256** (see below) so the bytes
+  on disk always have a trustworthy hash.
+
+### The bytes actually on disk (hash + view)
+`materialize_ondisk` reconstructs each on-disk entry's logical bytes (a whole `<CACHE_KEY>` file,
+or its byte-range parts concatenated), computes the **cached file's real MD5/SHA-256**, and — when
+those bytes are recognizable **plaintext** media (magic bytes) up to 30 MB — copies them to
+`files/<CACHE_KEY>.<ext>` and links/embeds them so any cached file can be **viewed even when it
+links to no Memory or conversation** (e.g. an "App install" screenshot). Encrypted cache bytes are
+still hashed (as stored) but not copied. All field labels use the **real DB column names with the
+description in parentheses**, and an **Expand all** button opens every row's detail at once.
 
 ## Categorisation
 
