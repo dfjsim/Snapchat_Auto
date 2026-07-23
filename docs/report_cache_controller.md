@@ -70,7 +70,8 @@ unless it must be:
 * a **whole** file → **linked in place** to the original extracted file (any size, no copy).
   Extensionless originals still render because `<img>` content-sniffs;
 * a **split** file (byte-range parts) → reconstructed into `files/<CACHE_KEY>.<ext>` (the only way
-  to view it as one file) when ≤ 30 MB; larger split files are hashed and noted.
+  to view it as one file) when ≤ 1 GB (so we essentially never leave a file unviewable); larger
+  split files are hashed and noted.
 
 Links resolve while the report stays beside the extraction (both under the same run folder).
 Encrypted cache bytes are still hashed (as stored) but never copied. All field labels use the
