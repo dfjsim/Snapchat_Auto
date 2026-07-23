@@ -60,13 +60,22 @@ necessarily match the bytes actually cached on disk** — verified on an `app_in
   on disk always have a trustworthy hash.
 
 ### The bytes actually on disk (hash + view)
-`materialize_ondisk` reconstructs each on-disk entry's logical bytes (a whole `<CACHE_KEY>` file,
-or its byte-range parts concatenated), computes the **cached file's real MD5/SHA-256**, and — when
-those bytes are recognizable **plaintext** media (magic bytes) up to 30 MB — copies them to
-`files/<CACHE_KEY>.<ext>` and links/embeds them so any cached file can be **viewed even when it
-links to no Memory or conversation** (e.g. an "App install" screenshot). Encrypted cache bytes are
-still hashed (as stored) but not copied. All field labels use the **real DB column names with the
-description in parentheses**, and an **Expand all** button opens every row's detail at once.
+`materialize_ondisk` **streams** each on-disk entry's logical bytes (a whole `<CACHE_KEY>` file, or
+its byte-range parts in order) to compute the **cached file's real MD5/SHA-256** — chunked, so any
+size is safe. When the bytes are recognizable **plaintext** media (magic bytes) the file is made
+viewable so it can be opened **even when it links to no Memory or conversation** (e.g. an
+"App install" screenshot). To avoid duplicating data already in the extraction, nothing is copied
+unless it must be:
+
+* a **whole** file → **linked in place** to the original extracted file (any size, no copy).
+  Extensionless originals still render because `<img>` content-sniffs;
+* a **split** file (byte-range parts) → reconstructed into `files/<CACHE_KEY>.<ext>` (the only way
+  to view it as one file) when ≤ 30 MB; larger split files are hashed and noted.
+
+Links resolve while the report stays beside the extraction (both under the same run folder).
+Encrypted cache bytes are still hashed (as stored) but never copied. All field labels use the
+**real DB column names with the description in parentheses**, and an **Expand all** button opens
+every row's detail at once.
 
 ## Categorisation
 

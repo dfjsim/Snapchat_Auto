@@ -32,6 +32,7 @@ import sys
 import json
 import html
 import glob
+import shutil
 import sqlite3
 import hashlib
 import logging
@@ -347,57 +348,96 @@ def _resolve_on_disk(cache_key, children, scfull, scparts):
     return paths, total, bool(paths), scope_by_path
 
 
-def _reconstruct_bytes(cache_key, scfull, scparts):
-    """Rebuild the logical cached file's bytes: a whole ``<cache_key>`` file, else its byte-range
-    parts concatenated in offset order (deduped). Returns bytes or None."""
+def _ondisk_paths_ordered(cache_key, scfull, scparts):
+    """The source files making up the logical cached file, in read order: a single whole
+    ``<cache_key>`` file, else its byte-range parts in offset order (deduped). Returns
+    ``(paths, single_whole_path_or_None)``."""
     fulls = scfull.get(cache_key, [])
     if fulls:
-        try:
-            with open(fulls[0], "rb") as fh:
-                return fh.read()
-        except OSError:
-            return None
+        return [fulls[0]], fulls[0]
     parts = scparts.get(cache_key.lower(), [])
     if not parts:
-        return None
+        return [], None
     seen, chunks = set(), []
     for off, p in sorted(parts):
         if off in seen:
             continue
         seen.add(off)
         chunks.append(p)
-    try:
-        return b"".join(open(p, "rb").read() for p in chunks)
-    except OSError:
-        return None
+    return chunks, None
 
 
-def materialize_ondisk(entries, scfull, scparts, files_dir, max_view_bytes=30 * 1024 * 1024):
-    """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 and,
-    when those bytes are recognizable plaintext media (magic bytes) small enough to view, copy them
-    to ``files/<cache_key>.<ext>`` so the examiner can open them even when the entry links to no
-    Memory or conversation. Encrypted cache bytes are still hashed (as stored) but not copied.
+def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
+                       max_reconstruct_bytes=30 * 1024 * 1024):
+    """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 (by
+    streaming, so any size is safe) and make the file viewable when it is recognizable plaintext
+    media, so the examiner can open it even when the entry links to no Memory or conversation.
+
+    To avoid duplicating data already in the extraction, files are **not** copied when they don't
+    need to be:
+
+    * a **whole** ``<cache_key>`` file → **linked in place** to the original extracted file (any
+      size, no copy). Extensionless originals still render (``<img>`` content-sniffs);
+    * a file **split** into byte-range parts → reconstructed into ``files/<cache_key>.<ext>`` (the
+      only way to view it as one file), when it is <= ``max_reconstruct_bytes``; larger split files
+      are hashed and noted.
+
+    Encrypted cache bytes are still hashed (as stored) but never copied. Links resolve as long as the
+    report stays beside the extraction (both live under the same run folder).
     """
     os.makedirs(files_dir, exist_ok=True)
     for e in entries:
         if not e["on_disk"]["found"]:
             continue
-        data = _reconstruct_bytes(e["cache_key"], scfull, scparts)
-        if data is None:
+        paths, single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
+        if not paths:
             continue
-        e["ondisk_md5"] = hashlib.md5(data).hexdigest()
-        e["ondisk_sha256"] = hashlib.sha256(data).hexdigest()
-        ext = guess_media(data[:16])
+        md5, sha, head, total = hashlib.md5(), hashlib.sha256(), bytearray(), 0
+        try:
+            for p in paths:
+                with open(p, "rb") as fh:
+                    while True:
+                        chunk = fh.read(1 << 20)
+                        if not chunk:
+                            break
+                        md5.update(chunk)
+                        sha.update(chunk)
+                        total += len(chunk)
+                        if len(head) < 16:
+                            head += chunk[:16 - len(head)]
+        except OSError as error:
+            logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {error}")
+            continue
+        e["ondisk_md5"], e["ondisk_sha256"], e["ondisk_bytes"] = md5.hexdigest(), sha.hexdigest(), total
+        ext = guess_media(bytes(head))
         e["ondisk_type"] = ext
-        if ext and len(data) <= max_view_bytes:
+        if not ext:                                            # encrypted / unrecognized: hashed only
+            continue
+        is_img = ext in ("jpg", "png", "webp")
+        if single:                                             # already one file on disk: link it
+            try:
+                rel = os.path.relpath(single, report_dir).replace("\\", "/")
+            except ValueError:                                 # different Windows drive
+                rel = None
+            if rel:
+                e["view"], e["view_is_image"] = rel, is_img
+                e["view_note"] = "original cache file — linked, not copied"
+            else:
+                e["view_note"] = f"{ext}, {_fmt_bytes(total)} — open from the source path above"
+        elif total <= max_reconstruct_bytes:                   # split: must reconstruct to view
             name = f"{e['cache_key']}.{ext}"
             try:
                 with open(os.path.join(files_dir, name), "wb") as fh:
-                    fh.write(data)
-                e["view"] = "files/" + name
-                e["view_is_image"] = ext in ("jpg", "png", "webp")
+                    for p in paths:
+                        with open(p, "rb") as src:
+                            shutil.copyfileobj(src, fh)
+                e["view"], e["view_is_image"] = "files/" + name, is_img
+                e["view_note"] = f"reconstructed from {len(paths)} parts"
             except OSError as error:
-                logger.debug(f"Could not write viewable copy for {e['cache_key']}: {error}")
+                logger.debug(f"Could not write reconstructed copy for {e['cache_key']}: {error}")
+        else:                                                  # split and too large
+            e["view_note"] = (f"{ext}, {_fmt_bytes(total)} split into {len(paths)} parts — too large "
+                              "to reconstruct here; rebuild from the part files listed above")
 
 
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None):
@@ -711,12 +751,15 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
                          f"<div class='k'>cached file SHA-256</div><div class='v hex'>{_esc(e['ondisk_sha256'])}</div>"
                          f"<div class='k'>detected type</div><div class='v'>"
                          f"{_esc(e.get('ondisk_type') or 'not a recognized plaintext media (encrypted or other)')}</div></div>")
+        note = f" <span class='muted'>({_esc(e['view_note'])})</span>" if e.get("view_note") else ""
         if e.get("view"):
             if e.get("view_is_image"):
                 hview.append(f"<a href='{_esc(e['view'])}' target='_blank'>"
-                             f"<img class='cacheview' src='{_esc(e['view'])}' loading='lazy'></a>")
+                             f"<img class='cacheview' src='{_esc(e['view'])}' loading='lazy'></a>{note}")
             else:
-                hview.append(f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>▶ view cached file</a>")
+                hview.append(f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>▶ view cached file</a>{note}")
+        elif e.get("view_note"):                               # recognized media too large to embed
+            hview.append(f"<div class='muted'>▶ {_esc(e['view_note'])}</div>")
         parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present</div>"
                      + "".join(blocks) + "".join(hview))
     else:
@@ -998,8 +1041,9 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
         all_entries.extend(entries)
         virtual.extend(virt)
 
-    # hash the actual cached bytes and copy viewable plaintext media into files/ for inspection
-    materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"))
+    # hash the actual cached bytes and make viewable plaintext media openable (copied when small,
+    # linked in place when large); paths in the "link in place" case are relative to outdir.
+    materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
 
     db_display = device_path(dbs[0], src_root, manifest) if dbs else ""
     report, stats = generate_report(all_entries, virtual, outdir, tz_label, rel_prefix,
