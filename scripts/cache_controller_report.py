@@ -166,13 +166,16 @@ def parse_children(blob):
     for it in items:
         if not isinstance(it, dict):
             continue
-        name = _as_text(it.get("1"))
+        # field 1 is usually the child name (a byte-range part or a child cache key), but in some
+        # app versions it is a nested descriptor dict — keep a name only when it is actually text.
+        raw = it.get("1")
+        name = _as_text(raw) if isinstance(raw, (bytes, bytearray, str)) else None
         size = offset = None
         meta = it.get("2")
         if isinstance(meta, dict):
-            size = meta.get("1")
+            size = meta.get("1") if isinstance(meta.get("1"), (int, float)) else None
             inner = meta.get("2")
-            if isinstance(inner, dict):
+            if isinstance(inner, dict) and isinstance(inner.get("1"), (int, float)):
                 offset = inner.get("1")
         out.append({"name": name, "size": size, "offset": offset})
     return out
@@ -336,7 +339,9 @@ def _resolve_on_disk(cache_key, children, scfull, scparts):
         add(p)
     # bundle child keys (a 32-hex name, optionally with a leading marker byte like 'z')
     for ch in children:
-        name = ch.get("name") or ""
+        name = ch.get("name")
+        if not isinstance(name, str):                          # structured (non-name) child descriptor
+            continue
         if _SC_SPLIT_RE.match(name):                           # byte-range part, handled via scparts
             continue
         key = name[1:] if name[:1].isalpha() and len(name) == 33 else name
@@ -368,7 +373,7 @@ def _ondisk_paths_ordered(cache_key, scfull, scparts):
 
 
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
-                       max_reconstruct_bytes=30 * 1024 * 1024):
+                       max_reconstruct_bytes=1024 * 1024 * 1024):
     """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 (by
     streaming, so any size is safe) and make the file viewable when it is recognizable plaintext
     media, so the examiner can open it even when the entry links to no Memory or conversation.
@@ -379,8 +384,8 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
     * a **whole** ``<cache_key>`` file → **linked in place** to the original extracted file (any
       size, no copy). Extensionless originals still render (``<img>`` content-sniffs);
     * a file **split** into byte-range parts → reconstructed into ``files/<cache_key>.<ext>`` (the
-      only way to view it as one file), when it is <= ``max_reconstruct_bytes``; larger split files
-      are hashed and noted.
+      only way to view it as one file), when it is <= ``max_reconstruct_bytes`` (1 GB by default, so
+      we essentially never end up with an unviewable file); larger split files are hashed and noted.
 
     Encrypted cache bytes are still hashed (as stored) but never copied. Links resolve as long as the
     report stays beside the extraction (both live under the same run folder).
