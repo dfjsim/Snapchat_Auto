@@ -161,7 +161,8 @@ def path_to_image_html(filename):
                     return filename + " - Unknown extension: " + kind.extension
                 # basename == the CACHE_KEY: expose a stable anchor the cache_controller report can
                 # jump to, plus a two-way link back to that report's entry for this file.
-                cc_link = ('<br><a class="cclink" href="../CacheController/CacheController_report.html#ck-'
+                cc_link = ('<br><a class="cclink" target="scauto_cache" '
+                           'href="../CacheController/CacheController_report.html#ck-'
                            + basename + '">&#128451; cache_controller entry</a>')
                 return ('<span id="cf-' + basename + '">' + result + '</span>' + cc_link)
             except PermissionError as Error:

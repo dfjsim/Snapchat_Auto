@@ -178,7 +178,14 @@ def parse_children(blob):
 
 
 def parse_retrieval(blob):
-    """Pull the CDN URL and content hash out of CONTENT_RETRIEVAL_METADATA. Returns {url, sha256}."""
+    """Pull the CDN URL and content reference out of CONTENT_RETRIEVAL_METADATA. Returns
+    {url, content_ref}.
+
+    ``content_ref`` is protobuf field 8, whose form varies by app version / media kind: a CDN media
+    token (most common — the same token found after ``/d/`` in the URL, sometimes with a ``.NNN``
+    suffix), a 64-hex content SHA-256 (newer app versions), or the 32-hex CACHE_KEY (older). The
+    caller labels it by inspecting the value, so we never claim a token is a hash.
+    """
     if not blob or blackboxprotobuf is None:
         return {}
     try:
@@ -192,8 +199,8 @@ def parse_retrieval(blob):
         if url:
             out["url"] = url
     h = data.get("8")
-    if h:
-        out["sha256"] = _as_text(h)
+    if isinstance(h, (bytes, bytearray, str)):                 # skip the rare nested-structure case
+        out["content_ref"] = _as_text(h)
     return out
 
 
@@ -519,8 +526,9 @@ def _links_html(entry, rel_prefix):
     chips = []
     if entry["memory"]:
         sid = entry["memory"]["snap_id"]
-        chips.append(f'<a class="chip mem" href="{rel_prefix}Memories/Memories_report.html#mem-'
-                     f'{_esc(sid)}">🧠 Memory {_esc(sid[:8])}…</a>' + _info(entry.get("memory_basis")))
+        chips.append(f'<a class="chip mem" target="scauto_memories" '
+                     f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
+                     f'🧠 Memory {_esc(sid[:8])}…</a>' + _info(entry.get("memory_basis")))
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
@@ -528,9 +536,9 @@ def _links_html(entry, rel_prefix):
                  f"message {smid or '(unknown)'} in conversation {conv or '(unknown)'} "
                  "(via its local_message_references / content-type mapping, exported to "
                  "cache_links.json).")
-        chips.append(f'<a class="chip chat" href="{rel_prefix}Communications/Communications_report.html#cf-'
-                     f'{_esc(entry["cache_key"])}">💬 Chat'
-                     f'{" " + _esc(conv[:8]) + "…" if conv else ""}</a>' + _info(basis))
+        chips.append(f'<a class="chip chat" target="scauto_comms" '
+                     f'href="{rel_prefix}Communications/Communications_report.html#cf-{_esc(entry["cache_key"])}">'
+                     f'💬 Chat{" " + _esc(conv[:8]) + "…" if conv else ""}</a>' + _info(basis))
     if entry["on_disk"]["found"]:
         chips.append('<span class="chip ok">📁 on disk</span>' + _info(_on_disk_basis(entry)))
     elif entry["claims"]:
@@ -570,8 +578,15 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
             ("Last read", m["last_read"])]
     if e["retrieval"].get("url"):
         grid.append(("CDN URL", e["retrieval"]["url"]))
-    if e["retrieval"].get("sha256"):
-        grid.append(("Content SHA-256", e["retrieval"]["sha256"]))
+    ref = e["retrieval"].get("content_ref")
+    if ref:
+        ref = str(ref)
+        if re.fullmatch(r"[0-9a-fA-F]{64}", ref):
+            grid.append(("Content SHA-256", ref))
+        elif ref.lower() == str(e["cache_key"]).lower():
+            grid.append(("Content ref (retrieval field 8 — equals CACHE_KEY)", ref))
+        else:
+            grid.append(("CDN media token (retrieval field 8)", ref))
     grid_html = "".join(f"<div class='k'>{_esc(k)}</div><div class='v'>{_esc(v)}</div>"
                         for k, v in grid if v not in (None, ""))
     parts.append(f"<div class='sect'>Metadata (CACHE_FILE_METADATA)</div><div class='grid'>{grid_html}</div>")
