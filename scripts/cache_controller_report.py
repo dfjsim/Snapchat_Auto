@@ -39,6 +39,7 @@ import logging
 from datetime import datetime
 from urllib.parse import urlparse
 
+from scripts import report_ui
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
@@ -280,16 +281,45 @@ def load_memory_index(app):
 def load_chat_links(report_dir):
     """Load the chat attachment manifest written by the Communications report, if present.
 
-    Maps CACHE_KEY -> [{conversation_id, server_message_id}]. Empty when the Communications report
-    didn't run or produced no cached attachments.
+    Returns ``(by_key, by_message)``:
+
+    * ``by_key``     : CACHE_KEY -> [{conversation_id, server_message_id, anchor}]
+    * ``by_message`` : "<conversation>|<server message id>" -> the same records
+
+    ``by_message`` is the fallback that links **every** cache entry belonging to a message (a chat
+    video is typically a full-media claim, a thumbnail claim and a raw content claim), not only the
+    single file the Communications report chose to display. Empty when that report didn't run.
+    Version-1 manifests (a bare CACHE_KEY -> records map) are still understood.
     """
-    for cand in (os.path.join(report_dir or "", "Communications", "cache_links.json"),):
-        if cand and os.path.isfile(cand):
-            try:
-                with open(cand, encoding="utf-8") as f:
-                    return json.load(f) or {}
-            except Exception as error:
-                logger.debug(f"Could not read chat link manifest {cand}: {error}")
+    cand = os.path.join(report_dir or "", "Communications", "cache_links.json")
+    if not (cand and os.path.isfile(cand)):
+        return {}, {}
+    try:
+        with open(cand, encoding="utf-8") as f:
+            data = json.load(f) or {}
+    except Exception as error:
+        logger.debug(f"Could not read chat link manifest {cand}: {error}")
+        return {}, {}
+    if data.get("version") == 2:
+        return data.get("by_key") or {}, data.get("by_message") or {}
+    return data, {}                                            # legacy (v1) manifest
+
+
+def load_memory_media(report_dir):
+    """Load the Memories report's ``media_by_cache_key.json`` (CACHE_KEY -> decrypted media files).
+
+    Most Memory media is stored **encrypted** in the SCContent cache, so its bytes are not viewable
+    here. The Memories report has already decrypted those files with the snap's AES key; this
+    manifest lets each cache entry link straight to that decrypted copy instead of leaving the
+    examiner with an unopenable blob. Empty when the Memories report didn't run.
+    """
+    cand = os.path.join(report_dir or "", "Memories", "media_by_cache_key.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as error:
+            logger.debug(f"Could not read decrypted-media manifest {cand}: {error}")
     return {}
 
 
@@ -309,12 +339,46 @@ def load_memory_pages(report_dir):
     return {}
 
 
+def _is_range_child(name):
+    """True for a CHILDREN entry that names a byte range of the parent (handled via ``scparts``)."""
+    if not isinstance(name, str):
+        return False
+    return (name == "PREFETCH" or bool(re.fullmatch(r"\d+-\d+", name))
+            or bool(_SC_SPLIT_RE.match(name)))
+
+
+def child_ondisk_paths(cache_key, name, scfull, scparts):
+    """On-disk paths for one **bundle child**, in read order.
+
+    A bundle (``TYPE=3``) is unpacked into one file per child, named ``<CACHE_KEY>_<child name>``
+    — e.g. ``4bfc4bba…_z2a132f1f…`` for child ``z2a132f1f…``. Other layouts store the child under
+    its own cache key, so both spellings are tried. This is what makes a bundle's actual media
+    reachable (e.g. the .mp4 of a chat video and its .webp overlay): the parent ``<CACHE_KEY>``
+    file itself only holds the small CHILDREN descriptor.
+    """
+    if not isinstance(name, str) or _is_range_child(name):
+        return []
+    bare = name[1:] if (len(name) == 33 and name[:1].isalpha()) else name
+    paths, seen = [], set()
+    for cand in (f"{cache_key}_{name}", name, bare):
+        for p in scfull.get(cand, []):
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+        for _off, p in sorted(scparts.get(cand.lower(), [])):
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+    return paths
+
+
 def _resolve_on_disk(cache_key, children, scfull, scparts):
     """Resolve a cache key to on-disk source paths + total bytes present.
 
     Looks for a whole ``<cache_key>`` file, its byte-range parts, and — for bundles — the files of
-    each named child key. Returns (paths, bytes_on_disk, found_bool, scope_by_path), where
-    scope_by_path maps each path to the SCContent account UUID it physically lives under.
+    each named child (``<cache_key>_<child>`` or the child's own cache key). Returns (paths,
+    bytes_on_disk, found_bool, scope_by_path), where scope_by_path maps each path to the SCContent
+    account UUID it physically lives under.
     """
     paths, total = [], 0
     seen = set()
@@ -337,19 +401,10 @@ def _resolve_on_disk(cache_key, children, scfull, scparts):
         add(p)
     for _off, p in sorted(scparts.get(cache_key.lower(), [])):
         add(p)
-    # bundle child keys (a 32-hex name, optionally with a leading marker byte like 'z')
+    # bundle children — stored as <cache_key>_<child name> (see child_ondisk_paths)
     for ch in children:
-        name = ch.get("name")
-        if not isinstance(name, str):                          # structured (non-name) child descriptor
-            continue
-        if _SC_SPLIT_RE.match(name):                           # byte-range part, handled via scparts
-            continue
-        key = name[1:] if name[:1].isalpha() and len(name) == 33 else name
-        if re.fullmatch(r"[0-9a-fA-F]{32}", key or ""):
-            for p in scfull.get(key, []):
-                add(p)
-            for _off, p in sorted(scparts.get(key.lower(), [])):
-                add(p)
+        for p in child_ondisk_paths(cache_key, ch.get("name"), scfull, scparts):
+            add(p)
     return paths, total, bool(paths), scope_by_path
 
 
@@ -372,80 +427,183 @@ def _ondisk_paths_ordered(cache_key, scfull, scparts):
     return chunks, None
 
 
+def _hash_stream(paths):
+    """Stream ``paths`` in order; return (md5, sha256, first 16 bytes, total). Any size is safe."""
+    md5, sha, head, total = hashlib.md5(), hashlib.sha256(), bytearray(), 0
+    for p in paths:
+        with open(p, "rb") as fh:
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    break
+                md5.update(chunk)
+                sha.update(chunk)
+                total += len(chunk)
+                if len(head) < 16:
+                    head += chunk[:16 - len(head)]
+    return md5.hexdigest(), sha.hexdigest(), bytes(head), total
+
+
+def publish_view(paths, files_dir, name_base, ext, total, max_reconstruct_bytes):
+    """Make recognizable plaintext media openable from the report as ``files/<name_base>.<ext>``.
+
+    Returns ``(relative url or None, note)``. Cache files on disk are named after their CACHE_KEY
+    with **no extension**, which browsers handle inconsistently (Chrome downloads it, Firefox may
+    show it as text, ``<video>`` refuses it) — so every viewable file gets a name that ends in its
+    real extension. Data is not duplicated where it can be avoided:
+
+    * one whole file → a **hard link** to the original extracted file (same bytes on disk, no copy),
+      falling back to a real copy only when the filesystem refuses the link;
+    * byte-range parts → concatenated into one file, which is the only way to view them, up to
+      ``max_reconstruct_bytes``.
+    """
+    dst = os.path.join(files_dir, f"{name_base}.{ext}")
+    rel = "files/" + f"{name_base}.{ext}"
+    if os.path.exists(dst):                                    # left by an earlier run into this dir
+        try:
+            linked = os.stat(dst).st_nlink > 1
+        except OSError:
+            linked = False
+        return rel, ("hard link to the original cache file (no data duplicated)" if linked else
+                     (f"reconstructed from {len(paths)} parts" if len(paths) > 1 else "copied"))
+    if len(paths) == 1:
+        try:
+            os.link(paths[0], dst)
+            return rel, "hard link to the original cache file (no data duplicated)"
+        except OSError:
+            pass
+        if total <= max_reconstruct_bytes:
+            try:
+                shutil.copy2(paths[0], dst)
+                return rel, "copied (the filesystem does not support linking here)"
+            except OSError as error:
+                logger.debug(f"Could not publish {name_base}: {error}")
+        return None, (f"{ext}, {_fmt_bytes(total)} — open it from the source path above "
+                      "(could not be published next to the report)")
+    if total > max_reconstruct_bytes:
+        return None, (f"{ext}, {_fmt_bytes(total)} split into {len(paths)} parts — too large to "
+                      "reconstruct here; rebuild from the part files listed above")
+    try:
+        with open(dst, "wb") as fh:
+            for p in paths:
+                with open(p, "rb") as src:
+                    shutil.copyfileobj(src, fh)
+        return rel, f"reconstructed from {len(paths)} parts"
+    except OSError as error:
+        logger.debug(f"Could not write reconstructed copy for {name_base}: {error}")
+        return None, f"{ext}, {_fmt_bytes(total)} — could not be reconstructed"
+
+
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                        max_reconstruct_bytes=1024 * 1024 * 1024):
-    """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 (by
-    streaming, so any size is safe) and make the file viewable when it is recognizable plaintext
-    media, so the examiner can open it even when the entry links to no Memory or conversation.
+    """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 and
+    make the file viewable when it is recognizable plaintext media, so the examiner can open it
+    even when the entry links to no Memory or conversation.
 
-    To avoid duplicating data already in the extraction, files are **not** copied when they don't
-    need to be:
+    Three shapes are handled:
 
-    * a **whole** ``<cache_key>`` file → **linked in place** to the original extracted file (any
-      size, no copy). Extensionless originals still render (``<img>`` content-sniffs);
-    * a file **split** into byte-range parts → reconstructed into ``files/<cache_key>.<ext>`` (the
-      only way to view it as one file), when it is <= ``max_reconstruct_bytes`` (1 GB by default, so
-      we essentially never end up with an unviewable file); larger split files are hashed and noted.
+    * a **whole** ``<cache_key>`` file, or a file **split** into byte-range parts → hashed as one
+      logical file and published through :func:`publish_view`;
+    * a **bundle** (``TYPE=3``) → the parent file is only the CHILDREN descriptor, so each child
+      (``<cache_key>_<child>``) is hashed and published **separately**. This is what makes e.g. a
+      chat video's .mp4 viewable: the bundle itself never looks like media.
 
-    Encrypted cache bytes are still hashed (as stored) but never copied. Links resolve as long as the
-    report stays beside the extraction (both live under the same run folder).
+    Encrypted cache bytes are still hashed (as stored) but never published — for those, the report
+    links to the copy the Memories report already decrypted, when there is one.
     """
     os.makedirs(files_dir, exist_ok=True)
     for e in entries:
         if not e["on_disk"]["found"]:
             continue
-        paths, single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
-        if not paths:
-            continue
-        md5, sha, head, total = hashlib.md5(), hashlib.sha256(), bytearray(), 0
-        try:
-            for p in paths:
-                with open(p, "rb") as fh:
-                    while True:
-                        chunk = fh.read(1 << 20)
-                        if not chunk:
-                            break
-                        md5.update(chunk)
-                        sha.update(chunk)
-                        total += len(chunk)
-                        if len(head) < 16:
-                            head += chunk[:16 - len(head)]
-        except OSError as error:
-            logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {error}")
-            continue
-        e["ondisk_md5"], e["ondisk_sha256"], e["ondisk_bytes"] = md5.hexdigest(), sha.hexdigest(), total
-        ext = guess_media(bytes(head))
-        e["ondisk_type"] = ext
-        if not ext:                                            # encrypted / unrecognized: hashed only
-            continue
-        is_img = ext in ("jpg", "png", "webp")
-        if single:                                             # already one file on disk: link it
+        paths, _single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
+        if paths:
             try:
-                rel = os.path.relpath(single, report_dir).replace("\\", "/")
-            except ValueError:                                 # different Windows drive
-                rel = None
-            if rel:
-                e["view"], e["view_is_image"] = rel, is_img
-                e["view_note"] = "original cache file — linked, not copied"
-            else:
-                e["view_note"] = f"{ext}, {_fmt_bytes(total)} — open from the source path above"
-        elif total <= max_reconstruct_bytes:                   # split: must reconstruct to view
-            name = f"{e['cache_key']}.{ext}"
-            try:
-                with open(os.path.join(files_dir, name), "wb") as fh:
-                    for p in paths:
-                        with open(p, "rb") as src:
-                            shutil.copyfileobj(src, fh)
-                e["view"], e["view_is_image"] = "files/" + name, is_img
-                e["view_note"] = f"reconstructed from {len(paths)} parts"
+                e["ondisk_md5"], e["ondisk_sha256"], head, total = _hash_stream(paths)
             except OSError as error:
-                logger.debug(f"Could not write reconstructed copy for {e['cache_key']}: {error}")
-        else:                                                  # split and too large
-            e["view_note"] = (f"{ext}, {_fmt_bytes(total)} split into {len(paths)} parts — too large "
-                              "to reconstruct here; rebuild from the part files listed above")
+                logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {error}")
+                head, total = b"", 0
+            e["ondisk_bytes"] = total
+            ext = guess_media(head)
+            e["ondisk_type"] = ext
+            if total == 0:
+                e["view_note"] = ("the cached file is 0 bytes on disk — the index entry exists but "
+                                  "no content was stored/captured")
+            elif ext:
+                view, note = publish_view(paths, files_dir, e["cache_key"], ext, total,
+                                          max_reconstruct_bytes)
+                e["view"], e["view_is_image"] = view, ext in ("jpg", "png", "webp")
+                e["view_ext"], e["view_note"] = ext, note
+
+        # bundle children: each is its own file with its own type
+        kids = []
+        for ch in e["children"]:
+            cpaths = child_ondisk_paths(e["cache_key"], ch.get("name"), scfull, scparts)
+            if not cpaths:
+                continue
+            kid = {"name": ch.get("name"), "paths": cpaths}
+            try:
+                kid["md5"], kid["sha256"], head, total = _hash_stream(cpaths)
+            except OSError as error:
+                logger.debug(f"Could not read bundle child {ch.get('name')}: {error}")
+                continue
+            kid["bytes"] = total
+            kid["type"] = guess_media(head)
+            if kid["type"]:
+                base = f"{e['cache_key']}_{re.sub(r'[^0-9A-Za-z_.-]', '_', str(kid['name']))}"
+                kid["view"], kid["note"] = publish_view(cpaths, files_dir, base, kid["type"],
+                                                        total, max_reconstruct_bytes)
+                kid["view_is_image"] = kid["type"] in ("jpg", "png", "webp")
+            kids.append(kid)
+        e["child_files"] = kids
+        # the bundle's own "viewable" file is its largest recognizable child
+        if not e.get("view") and kids:
+            best = max((k for k in kids if k.get("view")), key=lambda k: k["bytes"], default=None)
+            if best:
+                e["view"], e["view_is_image"] = best["view"], best["view_is_image"]
+                e["view_ext"] = best["type"]
+                e["view_note"] = (f"bundle child {best['name']} ({best['type']}) — "
+                                  f"{best.get('note', '')}")
 
 
-def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None):
+# A chat claim's EXTERNAL_KEY is "<type>:<conversation id>:<message id>:<part>[:…]" — e.g.
+# "thumbnail~1:19e0693c-…:12:0:0". The (conversation, message.part) it carries is what ties a cache
+# entry to a chat message even when the Communications report attached a *different* file to it.
+_CHAT_EK_RE = re.compile(r"^(?P<type>[^:]*):(?P<conv>[0-9a-fA-F-]{36}):(?P<msg>\d+):(?P<part>\d+)")
+
+
+def _chat_links_for(clist, cache_key, by_key, by_message):
+    """Chat messages this cache entry belongs to, with an explanation of how each was matched."""
+    out, seen = [], set()                                      # one chip per (conversation, message)
+    for rec in by_key.get(cache_key, []):
+        anchor = rec.get("anchor") or f"cf-{cache_key}"
+        seen.add((rec.get("conversation_id"), rec.get("server_message_id")))
+        out.append(dict(rec, anchor=anchor, basis=(
+            f"This CACHE_KEY is the attachment file the Communications report recorded for "
+            f"message {rec.get('server_message_id') or '(unknown)'} in conversation "
+            f"{rec.get('conversation_id') or '(unknown)'} (via its local_message_references / "
+            f"content-type mapping, exported to cache_links.json).")))
+    for c in clist:
+        mo = _CHAT_EK_RE.match(c["external_key"] or "")
+        if not mo:
+            continue
+        smid = f"{mo.group('msg')}.{mo.group('part')}"
+        for rec in by_message.get(f"{mo.group('conv')}|{smid}", []):
+            anchor = rec.get("anchor")
+            ident = (rec.get("conversation_id"), rec.get("server_message_id"))
+            if not anchor or ident in seen:
+                continue
+            seen.add(ident)
+            out.append(dict(rec, anchor=anchor, basis=(
+                f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries the conversation id "
+                f"{mo.group('conv')} and message {smid}, which the Communications report reported "
+                f"for that message. The link therefore points at the message rather than at this "
+                f"exact file — a message can have several cached files (full media, thumbnail, raw "
+                f"content claim), and only one of them is displayed in the chat report.")))
+    return out
+
+
+def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
+                  chat_by_message=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows). Each entry aggregates its claims, metadata, on-disk
@@ -533,7 +691,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     break
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
-        chats = chat_links.get(key, [])
+        chats = _chat_links_for(clist, key, chat_links, chat_by_message or {})
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
                        or {t["user_id"] for t in tomb_by_key.get(key, []) if t["user_id"]})
@@ -578,6 +736,12 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
 # --------------------------------------------------------------------------- HTML
 
 TYPE_LABELS = {1: "file", 2: "sharded", 3: "bundle"}
+
+# Index-table geometry. The virtual table draws fixed-height rows, so the column track list is
+# shared by the header and every row, and cells that overflow are clipped (the full value is always
+# in the row's detail).
+CC_COLS = ("24px 118px 260px 96px minmax(150px,1fr) 66px 82px 132px minmax(180px,300px)")
+CC_ROW_H = 46
 
 
 def _fmt_bytes(n):
@@ -627,8 +791,9 @@ def _on_disk_basis(entry):
         n = len(entry["on_disk"]["paths"])
         base = ("The CACHE_KEY is the on-disk filename inside a com.snap.file_manager_*_SCContent_* "
                 "folder. Sharded media is stored as <CACHE_KEY>_<start>-<end> byte-range parts "
-                "(plus a PREFETCH chunk) which are concatenated in offset order; bundle children "
-                f"are resolved by their own cache key. {n} file(s) matched here.")
+                "(plus a PREFETCH chunk) which are concatenated in offset order; a bundle's "
+                "children are stored as <CACHE_KEY>_<child name> and are resolved individually. "
+                f"{n} file(s) matched here.")
         if entry["on_disk"].get("cross_scope"):
             base += " ⚠ " + _cross_scope_basis(entry)
         return base
@@ -637,37 +802,87 @@ def _on_disk_basis(entry):
             "(evicted, or not captured by the extraction).")
 
 
-def _links_html(entry, rel_prefix):
-    """Cross-report link chips (Memory / chat) plus the on-disk found/missing chip, each with a
-    clickable '?' explaining how the association was derived."""
+def _decrypted_basis(entry):
+    """Explanation for the link to a Memories-report copy of an encrypted cache file."""
+    snaps = sorted({d.get("snap_id", "") for d in entry.get("decrypted") or []})
+    return ("The bytes cached here are encrypted, so they cannot be displayed as they are stored. "
+            "The Memories report decrypted this exact CACHE_KEY with the AES-256-CBC key/IV of "
+            f"Memory {', '.join(s for s in snaps if s) or '(unknown)'} (from ZGALLERYSNAP / "
+            "gallery.encrypteddb) and wrote the plaintext media beside its report; this links to "
+            "that decrypted copy, which is a derived file — the original cached bytes' hashes are "
+            "shown above.")
+
+
+def _links_html(entry, rel_prefix, compact=False):
+    """Cross-report link chips (Memory / chat) plus the on-disk found/missing chip.
+
+    ``compact`` is the index-row form: only the cross-report links, without the "?" explanations
+    (which are long) and without the on-disk/cross-scope chips, which would duplicate the row's File
+    cell and overflow the row. The row's expanded detail repeats all of it with the explanations.
+    """
+    def why(text):
+        return "" if compact else _info(text)
+
     chips = []
     if entry["memory"]:
         sid = entry["memory"]["snap_id"]
         page = entry["memory"].get("page")
         chips.append(f'<a class="chip mem" target="scauto_memories" '
                      f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
-                     f'🧠 Memory {_esc(sid[:8])}… (index)</a>' + _info(entry.get("memory_basis")))
+                     f'🧠 Memory {_esc(sid[:8])}… (index)</a>' + why(entry.get("memory_basis")))
         if page:
             chips.append(f'<a class="chip mem" target="scauto_memories" '
                          f'href="{rel_prefix}Memories/{_esc(page)}#mem-{_esc(sid)}">📄 detail</a>')
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
-        basis = ("This CACHE_KEY is the attachment file the Communications report recorded for "
-                 f"message {smid or '(unknown)'} in conversation {conv or '(unknown)'} "
-                 "(via its local_message_references / content-type mapping, exported to "
-                 "cache_links.json).")
+        label = f' {_esc(conv[:8])}… msg {_esc(smid)}' if conv else ""
         chips.append(f'<a class="chip chat" target="scauto_comms" '
-                     f'href="{rel_prefix}Communications/Communications_report.html#cf-{_esc(entry["cache_key"])}">'
-                     f'💬 Chat{" " + _esc(conv[:8]) + "…" if conv else ""}</a>' + _info(basis))
-    if entry["on_disk"]["found"]:
-        chips.append('<span class="chip ok">📁 on disk</span>' + _info(_on_disk_basis(entry)))
-    elif entry["claims"]:
-        chips.append('<span class="chip miss">— not on disk</span>' + _info(_on_disk_basis(entry)))
-    if entry["on_disk"].get("cross_scope"):
-        chips.append('<span class="chip warn">⚠ cross-scope copy</span>'
-                     + _info(_cross_scope_basis(entry)))
+                     f'href="{rel_prefix}Communications/Communications_report.html'
+                     f'#{_esc(ch.get("anchor") or ("cf-" + entry["cache_key"]))}">'
+                     f'💬 Chat{label}</a>' + why(ch.get("basis")))
+    if not compact:
+        if entry["on_disk"]["found"]:
+            chips.append('<span class="chip ok">📁 on disk</span>' + why(_on_disk_basis(entry)))
+        elif entry["claims"]:
+            chips.append('<span class="chip miss">— not on disk</span>' + why(_on_disk_basis(entry)))
+        if entry["on_disk"].get("cross_scope"):
+            chips.append('<span class="chip warn">⚠ cross-scope copy</span>'
+                         + why(_cross_scope_basis(entry)))
     return "".join(chips)
+
+
+def _file_cell(entry, rel_prefix):
+    """The index row's file cell: a real preview / play button for the bytes, not a tiny glyph.
+
+    Order of preference — the plaintext cached file itself, then the copy the Memories report
+    decrypted, then a plain statement of why there is nothing to open.
+    """
+    if entry.get("view"):
+        ext = entry.get("view_ext") or ""
+        if entry.get("view_is_image"):
+            return (f'<a class="filebtn img" href="{_esc(entry["view"])}" target="_blank" '
+                    f'title="open the cached {_esc(ext)}">'
+                    f'<img src="{_esc(entry["view"])}" loading="lazy">'
+                    f'<span class="lbl">{_esc(ext)}</span></a>')
+        return (f'<a class="filebtn play" href="{_esc(entry["view"])}" target="_blank" '
+                f'title="open the cached {_esc(ext)}">▶ <span class="lbl">{_esc(ext)}</span></a>')
+    dec = (entry.get("decrypted") or [])
+    if dec:
+        best = max(dec, key=lambda d: d.get("bytes") or 0)
+        url = f'{rel_prefix}Memories/{best.get("path", "")}'
+        if best.get("ext") in ("jpg", "png", "webp"):
+            return (f'<a class="filebtn img dec" href="{_esc(url)}" target="scauto_memories" '
+                    f'title="decrypted by the Memories report"><img src="{_esc(url)}" loading="lazy">'
+                    f'<span class="lbl">🔓 {_esc(best.get("ext"))}</span></a>')
+        return (f'<a class="filebtn play dec" href="{_esc(url)}" target="scauto_memories" '
+                f'title="decrypted by the Memories report">🔓 <span class="lbl">'
+                f'{_esc(best.get("ext"))}</span></a>')
+    if not entry["on_disk"]["found"]:
+        return '<span class="filenone">not on disk</span>'
+    if entry.get("ondisk_bytes") == 0:
+        return '<span class="filenone">0 bytes</span>'
+    return '<span class="filenone">🔒 encrypted</span>'
 
 
 def _detail_html(entry, rel_prefix, src_root, manifest):
@@ -751,13 +966,29 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
         # a viewer when the bytes are recognizable plaintext media.
         hview = []
         if e.get("ondisk_sha256"):
+            if e.get("ondisk_type"):
+                type_txt = _esc(e["ondisk_type"])
+            elif e["meta"]["type"] == 3:
+                type_txt = ("not media — the file named after the CACHE_KEY of a bundle holds only "
+                            "the CHILDREN descriptor; the content is in the child files below"
+                            + _info("A bundle (CACHE_FILE_METADATA.TYPE = 3) is a container: the "
+                                    "<CACHE_KEY> file itself is a small protobuf listing the "
+                                    "children, and each child is stored on disk as "
+                                    "<CACHE_KEY>_<child name>. The hashes on this line are of the "
+                                    "descriptor, not of any media — see the per-child hashes below."))
+            else:
+                type_txt = "not a recognized plaintext media (encrypted or other)"
             hview.append(f"<div class='grid'>"
                          f"<div class='k'>cached file MD5</div><div class='v hex'>{_esc(e['ondisk_md5'])}</div>"
                          f"<div class='k'>cached file SHA-256</div><div class='v hex'>{_esc(e['ondisk_sha256'])}</div>"
-                         f"<div class='k'>detected type</div><div class='v'>"
-                         f"{_esc(e.get('ondisk_type') or 'not a recognized plaintext media (encrypted or other)')}</div></div>")
+                         f"<div class='k'>cached file size</div><div class='v'>{_fmt_bytes(e.get('ondisk_bytes'))}</div>"
+                         f"<div class='k'>detected type</div><div class='v'>{type_txt}</div></div>")
         note = f" <span class='muted'>({_esc(e['view_note'])})</span>" if e.get("view_note") else ""
-        if e.get("view"):
+        if str(e.get("view_note", "")).startswith("bundle child"):
+            # the bytes worth opening are the children's, listed with their own hashes just below
+            hview.append("<div class='muted'>▶ the viewable content of this bundle is in its child "
+                         "files, listed below with their own type and hashes</div>")
+        elif e.get("view"):
             if e.get("view_is_image"):
                 hview.append(f"<a href='{_esc(e['view'])}' target='_blank'>"
                              f"<img class='cacheview' src='{_esc(e['view'])}' loading='lazy'></a>{note}")
@@ -770,6 +1001,55 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
     else:
         parts.append("<div class='sect'>Cache file(s) on disk</div>"
                      "<div class='muted'>no matching file found in the SCContent folders</div>")
+
+    # bundle children present on disk — each is a real file with its own type/hashes/viewer
+    if e.get("child_files"):
+        krows = []
+        for k in e["child_files"]:
+            if k.get("view"):
+                if k.get("view_is_image"):
+                    view = (f"<a href='{_esc(k['view'])}' target='_blank'>"
+                            f"<img class='childview' src='{_esc(k['view'])}' loading='lazy'></a>")
+                else:
+                    view = (f"<a class='filebtn play' href='{_esc(k['view'])}' target='_blank'>"
+                            f"▶ <span class='lbl'>{_esc(k['type'])}</span></a>")
+                view += f" <span class='muted'>{_esc(k.get('note') or '')}</span>"
+            else:
+                view = ("<span class='muted'>not a recognized plaintext media "
+                        "(encrypted or other)</span>")
+            krows.append(f"<tr><td class='mono'>{_esc(k['name'])}</td>"
+                         f"<td>{_esc(k.get('type') or '')}</td>"
+                         f"<td>{_fmt_bytes(k.get('bytes'))}</td>"
+                         f"<td class='hex'>{_esc(k.get('md5'))}<br>{_esc(k.get('sha256'))}</td>"
+                         f"<td>{view}</td></tr>")
+        parts.append("<div class='sect'>Bundle child files on disk"
+                     + _info("A bundle's children are stored as separate files named "
+                             "<CACHE_KEY>_<child name>. Each is hashed and typed on its own — this "
+                             "is where a bundle's actual media (e.g. the .mp4 of a chat video and "
+                             "its .webp overlay) lives, since the <CACHE_KEY> file itself is only "
+                             "the descriptor.")
+                     + "</div><table class='sub'><tr><th>child</th><th>detected type</th>"
+                       "<th>size</th><th>MD5 / SHA-256 of the child</th><th>view</th></tr>"
+                     + "".join(krows) + "</table>")
+
+    # decrypted copy produced by the Memories report (encrypted cache bytes)
+    if e.get("decrypted"):
+        drows = []
+        for d in e["decrypted"]:
+            url = f"{rel_prefix}Memories/{d.get('path', '')}"
+            thumb = (f"<a href='{_esc(url)}' target='_blank'>"
+                     f"<img class='childview' src='{_esc(url)}' loading='lazy'></a>"
+                     if d.get("ext") in ("jpg", "png", "webp") else
+                     f"<a class='filebtn play' href='{_esc(url)}' target='_blank'>▶ "
+                     f"<span class='lbl'>{_esc(d.get('ext'))}</span></a>")
+            drows.append(f"<tr><td>{_esc(d.get('role'))}</td><td>{_esc(d.get('ext'))}</td>"
+                         f"<td>{_fmt_bytes(d.get('bytes'))}</td>"
+                         f"<td class='hex'>{_esc(d.get('md5'))}<br>{_esc(d.get('sha256'))}</td>"
+                         f"<td class='mono'>{_esc(d.get('snap_id'))}</td><td>{thumb}</td></tr>")
+        parts.append("<div class='sect'>Decrypted copy (Memories report)" + _info(_decrypted_basis(e))
+                     + "</div><table class='sub'><tr><th>role</th><th>type</th><th>size</th>"
+                       "<th>MD5 / SHA-256 of the decrypted media</th><th>Memory (ZSNAPID)</th>"
+                       "<th>view</th></tr>" + "".join(drows) + "</table>")
 
     # tombstones
     if e["tombstones"]:
@@ -801,7 +1081,7 @@ def _external_key_summary(claims):
 
 
 def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, manifest,
-                    db_display):
+                    db_display, run_id="default"):
     total = len(entries)
     on_disk = sum(1 for e in entries if e["on_disk"]["found"])
     mem_linked = sum(1 for e in entries if e["memory"])
@@ -810,8 +1090,16 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     xscope = sum(1 for e in entries if e["on_disk"].get("cross_scope"))
     categories = sorted({e["category"] for e in entries})
 
+    # Row data + per-row detail go to sibling data/*.js files, and only the rows in the viewport are
+    # ever built into the DOM (see scripts/report_ui.py). The document below stays a few KB whatever
+    # the number of cache entries.
+    data_dir = os.path.join(outdir, "data")
+    details = [(f"ck-{e['cache_key']}", _detail_html(e, rel_prefix, src_root, manifest))
+               for e in entries]
+    chunk_of = report_ui.write_details(data_dir, details)
+
     rows = []
-    for i, e in enumerate(entries):
+    for e in entries:
         m = e["meta"]
         anchor = f"ck-{e['cache_key']}"
         # sharded files report FILE_SIZE_BYTES=0; fall back to the known content length / disk use
@@ -823,26 +1111,48 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             linkbits.append("Memory")
         if e["chats"]:
             linkbits.append("Chat")
-        links_col = ", ".join(linkbits)
         is_xscope = bool(e["on_disk"].get("cross_scope"))
-        disk_cell = ('📁' + (" 👁" if e.get("view") else "")
-                     + (" <span class='xwarn'>⚠</span>" if is_xscope else "")) if e["on_disk"]["found"] \
-                    else ('—' if e["claims"] else '')
-        detail = _detail_html(e, rel_prefix, src_root, manifest)
-        rows.append(
-            f"<tr class='row' id='{anchor}' data-cat='{_esc(e['category'])}' "
-            f"data-disk='{disk}' data-link='{_esc(links_col)}' data-xscope='{'yes' if is_xscope else 'no'}' "
-            f"onclick='tog(this)'>"
-            f"<td class='tog'>▸</td>"
-            f"<td>{_esc(e['category'])}</td>"
-            f"<td class='mono key'>{_esc(e['cache_key'])}</td>"
-            f"<td class='mono'>{_esc(', '.join(u[:8] + '…' for u in e['users']))}</td>"
-            f"<td class='ek'>{_external_key_summary(e['claims'])}</td>"
-            f"<td>{_esc(type_lbl)}</td>"
-            f"<td data-sort='{eff_size}'>{_fmt_bytes(eff_size)}</td>"
-            f"<td class='c'>{disk_cell}</td>"
-            f"<td>{_links_html(e, rel_prefix)}</td></tr>"
-            f"<tr class='detail' id='d-{i}'><td></td><td colspan='8'>{detail}</td></tr>")
+        users = ", ".join(u[:8] + "…" for u in e["users"])
+        # cells carry as little markup as possible — per-column styling is in the CSS (.vc.cN),
+        # because every byte here is multiplied by the number of cache entries in data/index.js
+        cells = [
+            "▸",
+            _esc(e["category"]),
+            _esc(e["cache_key"]),
+            _esc(users),
+            _external_key_summary(e["claims"]),
+            _esc(type_lbl),
+            _fmt_bytes(eff_size),
+            _file_cell(e, rel_prefix) + (" <span class='xwarn' title='a copy sits in another "
+                                         "account&#39;s SCContent scope'>⚠</span>" if is_xscope else ""),
+            _links_html(e, rel_prefix, compact=True),
+        ]
+        # what the search box matches on: everything identifying, without the HTML around it
+        searchable = [e["cache_key"], e["category"], type_lbl, users,
+                      e.get("ondisk_md5", ""), e.get("ondisk_sha256", ""),
+                      e.get("ondisk_type") or "", e["retrieval"].get("url") or "",
+                      str(e["retrieval"].get("content_ref") or "")]
+        searchable += [c["external_key"] for c in e["claims"]]
+        searchable += [c["user_id"] for c in e["claims"]]
+        if e["memory"]:
+            searchable.append(e["memory"]["snap_id"])
+        for ch in e["chats"]:
+            searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
+        for k in e.get("child_files") or []:
+            searchable += [str(k.get("name") or ""), k.get("md5") or "", k.get("sha256") or ""]
+        for p in e["on_disk"]["paths"]:
+            searchable.append(os.path.basename(p))
+        rows.append([
+            anchor, cells,
+            " ".join(s for s in searchable if s).lower(),
+            {"1": e["category"], "2": e["cache_key"], "3": users,
+             "4": _external_key_summary(e["claims"]), "5": type_lbl, "6": eff_size,
+             "7": ("2" if e.get("view") else "1" if e["on_disk"]["found"] else "0")},
+            chunk_of.get(anchor),
+            {"cat": e["category"], "disk": disk,
+             "link": ",".join(linkbits), "xs": "yes" if is_xscope else "no"},
+        ])
+    report_ui.write_rows(data_dir, rows)
 
     # virtualization section (unconfirmed semantics — listed only)
     virt_html = ""
@@ -866,33 +1176,40 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
  .note{{background:#fff8e0;border:1px solid #e6d48a;color:#6a5300;padding:8px 24px;font-size:12.5px}}
- .toolbar{{position:sticky;top:0;background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
-   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px;z-index:5}}
+ .toolbar{{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
+   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px}}
  .toolbar input,.toolbar select{{font-size:13px;padding:5px 8px;border:1px solid #bcbcd0;border-radius:5px}}
  .toolbar input[type=search]{{min-width:280px}}
  .toolbar label{{color:#555;font-weight:600}}
  .toolbar button{{font-size:13px;padding:5px 10px;border:1px solid #bcbcd0;border-radius:5px;background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}}
  .toolbar button:hover{{background:#e7e7f4}}
  img.cacheview{{max-width:220px;max-height:300px;border-radius:5px;box-shadow:0 1px 4px rgba(0,0,0,.25);margin-top:6px}}
- table.main{{border-collapse:collapse;width:100%;font-size:12.5px}}
- table.main th{{background:#1f1f52;color:#fff;text-align:left;padding:7px 10px;position:sticky;top:53px;cursor:pointer;white-space:nowrap}}
- table.main th .ar{{opacity:.5;font-size:10px}}
- table.main td{{border-bottom:1px solid #e2e2ea;padding:6px 10px;vertical-align:top}}
- tr.row{{cursor:pointer}} tr.row:hover{{background:#eef0ff}}
- td.tog{{color:#2d2d71;font-weight:700;width:14px}} tr.row.open td.tog{{color:#8a1f5a}}
- td.c{{text-align:center}} .key{{color:#33367a}}
+ img.childview{{max-width:120px;max-height:90px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25);vertical-align:middle}}
  .mono{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}}
- .ek{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;max-width:360px;overflow-wrap:anywhere}}
- .ek .more{{background:#d7d7ee;color:#33367a;border-radius:8px;padding:0 6px;font-size:10px}}
- tr.detail{{display:none;background:#fafaff}} tr.detail.show{{display:table-row}}
- tr.detail td{{padding:10px 16px 16px}}
+ .more{{background:#d7d7ee;color:#33367a;border-radius:8px;padding:0 6px;font-size:10px}}
+ /* per-column styling for the index rows (keeps the row data in data/index.js markup-free) */
+ .vcells>.vc.c0{{color:#2d2d71;font-weight:700}} .vr.open .vc.c0{{color:#8a1f5a}}
+ .vcells>.vc.c2{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#33367a}}
+ .vcells>.vc.c3{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}}
+ .vcells>.vc.c4{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;overflow-wrap:anywhere}}
+ .filebtn{{display:inline-flex;align-items:center;gap:5px;text-decoration:none;font-weight:700;
+   font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:6px;
+   padding:2px 7px;max-width:100%}}
+ .filebtn:hover{{background:#d5deff}}
+ .filebtn img{{width:34px;height:34px;object-fit:cover;border-radius:4px;display:block}}
+ .filebtn.img{{padding:2px;gap:4px}} .filebtn.img .lbl{{padding-right:5px;text-transform:uppercase}}
+ .filebtn.play{{padding:5px 9px;font-size:12px}}
+ .filebtn.dec{{background:#e7f6ea;border-color:#b3ddc0;color:#1f6b39}}
+ .filebtn.dec:hover{{background:#d3ecda}}
+ .filenone{{color:#999;font-size:11px}}
  .sect{{margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;
    font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}}
  .grid{{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12px;margin-top:4px;max-width:900px}}
  .grid .k{{color:#666}} .grid .v{{overflow-wrap:anywhere}}
  table.sub{{border-collapse:collapse;margin-top:5px;font-size:11.5px}}
  table.sub th{{background:#e7e7f2;color:#2d2d71;text-align:left;padding:3px 8px}}
- table.sub td{{border:1px solid #e0e0e8;padding:3px 8px;overflow-wrap:anywhere}}
+ table.sub td{{border:1px solid #e0e0e8;padding:3px 8px;overflow-wrap:anywhere;vertical-align:middle}}
+ table.sub td.hex{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7a1f5a}}
  .paths{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;margin-top:4px;overflow-wrap:anywhere}}
  .muted{{color:#999}}
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
@@ -914,15 +1231,23 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  h2{{margin:24px 0 0;padding:10px 24px;background:#1f1f52;color:#fff;font-size:15px}}
  table.vtab{{border-collapse:collapse;width:100%;font-size:12px}} table.vtab td{{border-bottom:1px solid #e2e2ea;padding:5px 24px}}
  table.vtab th{{background:#1f1f52;color:#fff;text-align:left;padding:6px 24px}}
-</style></head><body>
+{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}
+ .vcells>.vc{{font-size:12.5px}}
+</style>
+<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="cc";</script>
+<script>{report_ui.SELECT_JS}</script>
+<script src="{rel_prefix}selection.js"></script>
+<script>{report_ui.VTABLE_JS}</script></head><body>
 <header><h1>Snapchat cache_controller.db</h1>
  <div class="sum">{total} physical cache files &middot; <b>{on_disk}</b> present on disk &middot;
  <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat &middot;
  <b>{xscope}</b> with a cross-scope copy &middot; {deleted} with a deletion record &middot;
  times in <b>{html.escape(tz_label)}</b></div>
  <div class="sum">Source: {html.escape(db_display)}</div></header>
+{report_ui.missing_data_banner('CacheController_report.html')}
+<div class="stickytop">
 <div class="toolbar">
- <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, category, user…" oninput="flt()">
+ <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, user…" oninput="flt()">
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
@@ -933,69 +1258,64 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  <button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>
  <span id="count" style="color:#555"></span>
 </div>
-<table class="main" id="tbl">
- <thead><tr>
-  <th></th>
-  <th onclick="srt(1)">Category <span class="ar">↕</span></th>
-  <th onclick="srt(2)">CACHE_KEY <span class="ar">↕</span></th>
-  <th onclick="srt(3)">User <span class="ar">↕</span></th>
-  <th onclick="srt(4)">EXTERNAL_KEY <span class="ar">↕</span></th>
-  <th onclick="srt(5)">Type <span class="ar">↕</span></th>
-  <th onclick="srt(6)">Size <span class="ar">↕</span></th>
-  <th onclick="srt(7)">On disk <span class="ar">↕</span></th>
-  <th>Links</th>
- </tr></thead>
- <tbody>{''.join(rows)}</tbody>
-</table>
+<div class="toolbar">{report_ui.selection_toolbar('cache entry')}</div>
+<div class="pager" id="pager"></div>
+<div class="vhdr" id="vhdr" style="grid-template-columns:30px {CC_COLS}">
+ <div class="vc sel"><input type="checkbox" class="selall"
+   title="Select / unselect every entry matching the current filters"
+   onclick="SCV.selectShown(this.checked)"></div>
+ <div class="vc nosort"></div>
+ <div class="vc" onclick="SCV.setSort(1)">Category <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(2)">CACHE_KEY <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(3)">User <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(4)">EXTERNAL_KEY <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(5)">Type <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(6)">Size <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(7)">File <span class="ar">↕</span></div>
+ <div class="vc nosort">Links</div>
+</div>
+</div>
+<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div><div class="vwin" id="vwin"></div></div>
+<div class="vempty" id="vempty" style="display:none">No cache entry matches the current filters.</div>
 {virt_html}
+<script src="data/index.js"></script>
 <script>
-function hint(ev,el){{ev.stopPropagation();
- var h=el.parentNode,was=h.classList.contains('open');
- document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});
- if(!was)h.classList.add('open');}}
-document.addEventListener('click',function(){{
- document.querySelectorAll('.hint.open').forEach(function(x){{x.classList.remove('open');}});}});
-function tog(r){{r.classList.toggle('open');var d=r.nextElementSibling;
- if(d&&d.classList.contains('detail'))d.classList.toggle('show');}}
-function xall(btn){{var op=btn.dataset.o==='1';
- document.querySelectorAll('#tbl tbody tr.row').forEach(function(r){{
-  if(r.style.display==='none')return;
-  var d=r.nextElementSibling;
-  if(op){{r.classList.remove('open');if(d&&d.classList.contains('detail'))d.classList.remove('show');}}
-  else{{r.classList.add('open');if(d&&d.classList.contains('detail'))d.classList.add('show');}}}});
+{report_ui.HINT_JS}
+{report_ui.NAV_JS}
+{report_ui.SELECT_TOOLBAR_JS}
+var flt_t=0;
+function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
+function xall(btn){{
+ var op=btn.dataset.o==='1';
+ if(!SCV.expandAll(!op,500)){{
+  alert('Too many rows on this page to expand at once. Narrow the filters or use a smaller '
+        +'"rows per page" first.');
+  return;}}
  btn.dataset.o=op?'0':'1';btn.textContent=op?'Expand all':'Collapse all';}}
-function flt(){{
- var q=document.getElementById('q').value.toLowerCase();
- var cat=document.getElementById('cat').value, disk=document.getElementById('disk').value,
-     lk=document.getElementById('link').value, xs=document.getElementById('xscope').checked;
- var rows=document.querySelectorAll('#tbl tbody tr.row'), n=0;
- rows.forEach(function(r){{
-  var d=r.nextElementSibling;
-  var txt=r.textContent.toLowerCase()+' '+(d?d.textContent.toLowerCase():'');
-  var ok=(!q||txt.indexOf(q)>-1)&&(!cat||r.dataset.cat===cat)&&(!disk||r.dataset.disk===disk)
-       &&(!lk||(r.dataset.link||'').indexOf(lk)>-1)&&(!xs||r.dataset.xscope==='yes');
-  r.style.display=ok?'':'none';
-  if(d&&d.classList.contains('detail')&&!ok){{d.classList.remove('show');r.classList.remove('open');}}
-  if(ok)n++;
- }});
- document.getElementById('count').textContent=n+' shown';
-}}
-function srt(col){{
- var tb=document.querySelector('#tbl tbody');
- var pairs=[];var rows=tb.querySelectorAll('tr.row');
- rows.forEach(function(r){{pairs.push([r,r.nextElementSibling]);}});
- var dir=tb.getAttribute('data-dir')==='asc'?1:-1;tb.setAttribute('data-dir',dir===1?'desc':'asc');
- pairs.sort(function(a,b){{
-  var ca=a[0].children[col],cb=b[0].children[col];
-  var va=ca.getAttribute('data-sort'),vb=cb.getAttribute('data-sort');
-  if(va!==null&&vb!==null){{return (Number(va)-Number(vb))*dir;}}
-  return ca.textContent.localeCompare(cb.textContent)*dir;
- }});
- pairs.forEach(function(p){{tb.appendChild(p[0]);if(p[1])tb.appendChild(p[1]);}});
-}}
-flt();
-if(location.hash){{var el=document.querySelector(location.hash.replace(/[^#\\w-]/g,''));
- if(el&&el.classList.contains('row')){{tog(el);el.scrollIntoView();}}}}
+SCV.init({{
+ mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
+ pager:'pager',pageSize:500,selKind:'cc',
+ rowHeight:{CC_ROW_H},estDetail:320,cols:'{CC_COLS}',detailBase:'data/detail-',
+ query:function(){{return document.getElementById('q').value;}},
+ match:function(m,r){{
+  var cat=document.getElementById('cat').value,disk=document.getElementById('disk').value,
+      lk=document.getElementById('link').value,xs=document.getElementById('xscope').checked;
+  return (!cat||m.cat===cat)&&(!disk||m.disk===disk)&&(!lk||(m.link||'').indexOf(lk)>-1)
+       &&(!xs||m.xs==='yes')
+       &&(!document.getElementById('selonly').checked||SCSel.get('cc',r[0]));}},
+ selectedOnly:function(){{return document.getElementById('selonly').checked;}},
+ selCount:function(n){{document.getElementById('selcount').textContent=n+' selected';
+   scSelNote();}},
+ count:function(n,t){{document.getElementById('count').textContent=
+   n===t?(n+' entries'):(n+' of '+t+' shown');}},
+ reset:function(){{
+  document.getElementById('q').value='';document.getElementById('cat').value='';
+  document.getElementById('disk').value='';document.getElementById('link').value='';
+  document.getElementById('xscope').checked=false;
+  document.getElementById('selonly').checked=false;}}
+}});
+scSelNote();
+scConsumeHash();
 </script>
 </body></html>"""
 
@@ -1034,25 +1354,31 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     mem_index = load_memory_index(app)
     # report_dir defaults to the parent of outdir when the report is placed under …/Reports/CacheController
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
-    chat_links = load_chat_links(rdir)
+    chat_links, chat_by_message = load_chat_links(rdir)
     memory_pages = load_memory_pages(rdir)
+    memory_media = load_memory_media(rdir)
+    # the shared, examiner-owned selection file every report of this run loads
+    report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
     # links to the sibling reports are relative to CacheController_report.html (…/Reports/CacheController/)
     rel_prefix = "../"
 
     all_entries, virtual = [], []
     for db in dbs:
         entries, virt = build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt,
-                                      memory_pages)
+                                      memory_pages, chat_by_message)
         all_entries.extend(entries)
         virtual.extend(virt)
 
-    # hash the actual cached bytes and make viewable plaintext media openable (copied when small,
-    # linked in place when large); paths in the "link in place" case are relative to outdir.
+    # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
+    # always under a name with a real extension so browsers open it).
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
+    # for entries whose cached bytes are encrypted, point at the copy the Memories report decrypted
+    for e in all_entries:
+        e["decrypted"] = memory_media.get(e["cache_key"].lower(), [])
 
     db_display = device_path(dbs[0], src_root, manifest) if dbs else ""
     report, stats = generate_report(all_entries, virtual, outdir, tz_label, rel_prefix,
-                                    src_root, manifest, db_display)
+                                    src_root, manifest, db_display, report_ui.run_id(rdir))
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "

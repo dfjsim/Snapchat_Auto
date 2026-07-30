@@ -53,10 +53,6 @@
   excluded). Writes `memory_pages.json` (snap_id -> sub-page) so the cache_controller report links
   to both the index row and the detail page. Verified on the 2023 GK device: 80 memories -> 66
   groups, and 80/80 index<->subpage + 77/77 cache->index + 77/77 cache->detail links resolve.
-- [DONE-v1.3.1] Fix ".pack" files not being decoded and associated to Snapchat Memories anymore.
-  (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
-  Snapchat's app/app-group containers from container metadata plists and extracts within them.)
-  (commit 775abb843347a6f6d9c6daf6dcc9b8c97adc4f36)
 - [DONE-v1.3.3] Geolocations now include a Google Maps link on the same line as the OSM link.
 - [DONE-v1.3.3] Memories sharing the same cache media + AES key/IV are grouped; media, encryption and
   timestamps are shown once per group (see `_render_group`).
@@ -68,14 +64,17 @@
   column set across all Memories artifacts.
 - [DONE-v1.3.3] Surfaced extra ZGALLERYSNAP / ZGALLERYENTRY fields (`SNAP_OTHER_LABELS` / `ENTRY_OTHER_LABELS`),
   kept in separate sections so a column name present in both tables shows both values.
+- [DONE-v1.3.1] Fix ".pack" files not being decoded and associated to Snapchat Memories anymore.
+  (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
+  Snapchat's app/app-group containers from container metadata plists and extracts within them.)
+  (commit 775abb843347a6f6d9c6daf6dcc9b8c97adc4f36)
 
+# cache_controller.db report
 - [DONE-v1.3.3] cache_controller.db lookup now treats the `CACHE_KEY` as the *start* of the on-disk filename:
   media stored split into `<cache_key>_<start>-<end>` parts is discovered, concatenated in offset
   order, and decrypted (same reconstruction as `SnapFixedVideos`, but decrypted from the parts and
   hash-verified). All full copies + parts show as source paths. See `index_sccontent` /
   `_resolve_sccontent` in `scripts/memories_media_report.py`.
-
-# cache_controller.db report
 - [DONE-v1.3.3] New `Reports/CacheController/CacheController_report.html` (`scripts/cache_controller_report.py`).
   One row per physical cache file (`CACHE_KEY`), aggregating all of its `CACHE_FILE_CLAIM` rows and
   joining `CACHE_FILE_METADATA` (size/type/shard, the `CHILDREN` protobuf = byte-range parts or
@@ -120,6 +119,93 @@
 - [DONE-v1.4.0] Added an **Expand all** / Collapse all button.
 - [DONE-v1.4.0] Memories index: ZMEDIAID/ZSNAPID/ZENTRYID combined into one labelled column;
   geolocation shows OSM **and** Google links; the Detail column shows each group's snap count.
+- [DONE-v1.4.0] View unlinked cached files; real DB field names; the "SHA-256" field-8 finding
+  (source hash, may not match cached bytes) + actual cached-file hashes; "Expand all" button.
+
+# Report UI bugs (v1.4.2)
+- [DONE-v1.4.2] **Big index tables are now virtualized** (new `scripts/report_ui.py`). Rows live in
+  `data/index.js`, each cache_controller row's detail HTML in a `data/detail-<n>.js` chunk fetched
+  only when that row is expanded, and only the rows in the viewport are put in the DOM. The
+  cache_controller document went from 1.9 MB to 20 KB on the test extraction; a synthetic
+  101 200-row index opens in **0.70 s** (search 0.18 s, sort 0.04 s, ~180 MB heap) where the old
+  one-big-table layout was unusable. Search/sort/filters still cover the full index (each row
+  carries a pre-built search string). Data files are loaded with `<script src>` because `file://`
+  pages may not `fetch` their siblings; a red banner appears if `data/` was left behind.
+- [DONE-v1.4.2] **Anchors work on repeat clicks into an already-open tab.** Reports open each other
+  in named tabs, and a click whose URL (fragment included) equals the tab's current URL fires no
+  event at all — which is why a cache_controller link only expanded its target the first time.
+  `NAV_JS` now consumes the fragment (`location.hash='_'`, a sentinel that does not scroll to top;
+  `history.replaceState` throws on `file://`) so the next click is always a real `hashchange`.
+- [DONE-v1.4.2] Anchor targets are scrolled **clear of the sticky toolbar + column titles** (the
+  Memories index bug) and highlighted, in every report — including the plain Communications report
+  and the Memory detail sub-pages.
+- [DONE-v1.4.2] Clicking a **link or "?" inside a cache_controller row no longer toggles the row**,
+  so following a cross-report link no longer leaves the row you left behind expanded/collapsed.
+- [DONE-v1.4.2] **Chat → cache_controller links from saved media resolved.** `SCPersistentMedia`
+  attachments are not named after a cache key, so they produced a dead `#ck-<filename>` link; they
+  are now matched to the claim carrying the same `<conversation>:<message>:<part>` triple
+  (`mapPersistentMediaToCacheKeys`). Verified: 19/19 links in the test report resolve to a row.
+- [DONE-v1.4.2] **A message with two attachments links back from both.** `cache_links.json` is now
+  version 2 with a `by_message` index, and cache_controller matches claims by the conversation +
+  message in their `EXTERNAL_KEY`, so a message's full-media, thumbnail and content claims all link
+  back (chat-linked entries went from 17 to 33 on the test extraction).
+- [DONE-v1.4.2] **Extensionless media no longer breaks the browser.** Every viewable file is
+  published under a name ending in its real extension — as a **hard link** (same bytes, no data
+  duplicated; 113/113 published files on the test extraction are links) — in both the
+  cache_controller `files/` folder and the Communications `cacheFiles/` folder.
+- [DONE-v1.4.2] **Bundle children are resolved and viewable.** For `TYPE=3` the `<CACHE_KEY>` file
+  is only the CHILDREN descriptor; children are stored as `<CACHE_KEY>_<child name>` and were never
+  located. They are now hashed, typed and published individually — this is what makes the chat video
+  of message 12.0 (a 219 KB `.mp4` + 40 KB `.webp` overlay) viewable, and the descriptor's
+  "detected type" now says so instead of reading as unrecognized.
+- [DONE-v1.4.2] **Encrypted cache files link to their decrypted copy.** The Memories report writes
+  `media_by_cache_key.json`, and the cache_controller report shows/links that plaintext copy
+  (labelled derived, with both files' hashes and the Memory's ZSNAPID). Openable on-disk entries:
+  109 → 199 of 228, with 14 zero-byte and 15 still-encrypted entries now labelled as such.
+- [DONE-v1.4.2] The cache_controller "on disk" glyphs were replaced by a real **preview thumbnail /
+  ▶ play button** per row.
+- [DONE-v1.4.2] **Each attachment of a message links to its own cache entry** (follow-up: the first
+  fix made both attachments of message 12.0 point at the thumbnail's entry). Two causes:
+  - the saved-media mapping ran against the `mergeCache`-filtered frame, which keeps only claims
+    whose `CACHE_KEY` file is directly recognizable media — that drops exactly the full-media claim
+    of a chat video, whose `CACHE_KEY` file is the 90-byte bundle descriptor. It now uses the raw
+    `CACHE_FILE_CLAIM` rows;
+  - the claim preference ignored the file's own type. `_rank_claim` now prefers an exact type
+    match, sends `thumbnail…` files to `thumbnail~1:` and everything else to the full media `1:`.
+  Verified byte for byte: every one of the 19 attachments' SHA-256 equals the linked entry's bytes
+  or one of its bundle children's — message 12.0's PNG → `thumbnail~1:…12:0:0`, its .mov →
+  `1:…12:0:0` whose child `z2a132f1f…` *is* that video.
+
+# Report UI: paging, selection, MEO indicator, offline maps (v1.4.2)
+- [DONE-v1.4.2] **My Eyes Only indicator** in the Memories index: a red MEO badge in the Kind
+  column, matched by a search for "meo"/"my eyes only", plus a My Eyes Only filter
+  (any / only / exclude).
+- [DONE-v1.4.2] **Paging** on both index tables — rows per page (100/250/500/1000/5000/all,
+  default 500) and first/prev/page-picker/next/last. Paging applies after filtering and sorting, so
+  search, filters and "select all shown" still cover the whole index; following an `#anchor` turns
+  to the page holding the target first.
+- [DONE-v1.4.2] **Row selection** in both index tables and on the Memory detail sub-pages: a
+  checkbox per row/memory, a "Selected only" filter, select/unselect everything matching the current
+  filters, and a selected count.
+  - The storage problem, measured in Chrome: `localStorage` on a `file://` page is partitioned per
+    browsing context — a second tab on the *same* file starts empty, another page in the same folder
+    starts empty, and an iframe bridge is partitioned too; it only survives a reload of that tab.
+    There is therefore **no browser storage the index and a sub-page can share, and none that
+    outlives the tab**.
+  - So selections live in **`Reports/selection.js`**, written empty at generation (and never
+    overwritten afterwards) and loaded by every page of the run. Ticks are held in memory, flagged
+    "unsaved" (with a leave-page confirmation), and **💾 Save selections** downloads a new
+    `selection.js` to drop next to the reports and file with the case; **Load…** reads one back.
+    `localStorage` is kept only as a same-tab safety net for accidental reloads.
+- [DONE-v1.4.2] **Offline map tile server support** (`scripts/offline_maps.py`). A tile server URL
+  (server root or a `{z}/{x}/{y}` template) can be set in the GUI, with a **Test** button that
+  fetches a tile immediately and a re-test before the run starts. When set, each geolocated Memory's
+  detail page gets a stitched 3x3-tile map with a marker at the recovered coordinates and a link
+  that opens the tile server at the same place. Nothing is ever fetched when it is empty — the
+  reports never reach the network on their own. Tiles are cached and memories at the same
+  coordinates share one image (22 geolocated memories → 3 images / 27 requests on the test set); the
+  map is labelled a derived artifact, with a "?" recording the server, zoom and tile count; a server
+  that stops answering degrades to a warning instead of failing the run.
 
 # Analysis / Reverse engineering
 - [DONE-v1.4.0] Check if we have metadata in `cache_controller.db` for all files in `Documents/com.snap.file_manager_3_SCContent_...`.

@@ -62,21 +62,51 @@ necessarily match the bytes actually cached on disk** — verified on an `app_in
 ### The bytes actually on disk (hash + view)
 `materialize_ondisk` **streams** each on-disk entry's logical bytes (a whole `<CACHE_KEY>` file, or
 its byte-range parts in order) to compute the **cached file's real MD5/SHA-256** — chunked, so any
-size is safe. When the bytes are recognizable **plaintext** media (magic bytes) the file is made
-viewable so it can be opened **even when it links to no Memory or conversation** (e.g. an
-"App install" screenshot). To avoid duplicating data already in the extraction, nothing is copied
-unless it must be:
+size is safe. When the bytes are recognizable **plaintext** media (magic bytes) `publish_view` makes
+the file openable as `files/<CACHE_KEY>.<ext>` so it can be opened **even when it links to no Memory
+or conversation** (e.g. an "App install" screenshot):
 
-* a **whole** file → **linked in place** to the original extracted file (any size, no copy).
-  Extensionless originals still render because `<img>` content-sniffs;
-* a **split** file (byte-range parts) → reconstructed into `files/<CACHE_KEY>.<ext>` (the only way
-  to view it as one file) when ≤ 1 GB (so we essentially never leave a file unviewable); larger
-  split files are hashed and noted.
+* a **whole** file → a **hard link** to the original extracted file. Same bytes, no copy, and —
+  unlike the previous "link in place to the extensionless original" — the published name ends in
+  the real extension. Browsers handle an extensionless `file://` link inconsistently (Chrome
+  downloads it, `<video>` refuses it), which is why every viewable file now gets a real extension.
+  A real copy is made only when the filesystem refuses to link (different volume, no hard-link
+  support);
+* a **split** file (byte-range parts) → concatenated into `files/<CACHE_KEY>.<ext>` (the only way to
+  view it as one file) when ≤ 1 GB; larger split files are hashed and noted.
 
-Links resolve while the report stays beside the extraction (both under the same run folder).
-Encrypted cache bytes are still hashed (as stored) but never copied. All field labels use the
-**real DB column names with the description in parentheses**, and an **Expand all** button opens
-every row's detail at once.
+The note next to each viewer states exactly which of these happened. Encrypted cache bytes are still
+hashed (as stored) but never published — see *Encrypted and bundled files* below. All field labels
+use the **real DB column names with the description in parentheses**.
+
+### Bundles: the child files are the content
+For a bundle (`TYPE = 3`) the file named after the `CACHE_KEY` is **only the CHILDREN descriptor**
+(90 bytes on the test device), and the content sits in one file per child, named
+`<CACHE_KEY>_<child name>` (e.g. `4bfc4bba…_z2a132f1f…`). `child_ondisk_paths` resolves those (the
+child's own cache key is also tried, for other layouts), and each child is hashed and typed
+**separately** and published with its own extension. The row's file button shows the bundle's
+largest recognizable child.
+
+This is what makes a chat video viewable: message *12.0* of the test extraction is a bundle whose
+children are the 219 KB `.mp4` and its 40 KB `.webp` overlay — neither of which was reachable when
+only the descriptor was hashed (its "detected type" then read as *not recognized*, which now says
+explicitly that a bundle's parent file is a descriptor).
+
+### Encrypted and bundled files — what the examiner sees
+Every on-disk entry ends up in exactly one of these states, stated plainly in the row and the
+detail:
+
+| State | Shown as |
+|---|---|
+| plaintext media on disk | thumbnail / ▶ button opening `files/<key>.<ext>` |
+| encrypted, but decrypted by the Memories report | 🔓 button opening the decrypted copy in `../Memories/media/…`, with the decrypted file's own MD5/SHA-256, its Memory's `ZSNAPID`, and a "?" explaining it is a **derived** file |
+| a bundle | the child table (type + size + hashes + viewer per child) |
+| 0 bytes on disk | "0 bytes" — the index entry exists but no content was stored/captured |
+| still encrypted | 🔒 encrypted (no key available for it) |
+
+On the 2023 test extraction that takes the openable share of the 228 on-disk entries from 109 to
+199 (90 via decrypted Memory copies), with 14 zero-byte and 15 still-encrypted entries labelled as
+such rather than silently blank.
 
 ## Categorisation
 
@@ -93,7 +123,7 @@ from the Memories report):
 
 * a whole `<CACHE_KEY>` file, and/or
 * its `<CACHE_KEY>_<start>-<end>` byte-range parts (+ `PREFETCH`), concatenated conceptually, and
-* for bundles, each child's own cache key.
+* for bundles, each child file — `<CACHE_KEY>_<child name>` first, then the child's own cache key.
 
 It reports the source path(s) (archive-relative, via `device_path`) and total bytes present. This
 is the answer to the TODO question *"can we link each cache_controller entry to an extracted cache
@@ -101,10 +131,22 @@ file?"* — yes, by `CACHE_KEY` as the filename, with parts/children resolved to
 
 ## The UI
 One sortable table, one row per file, with a global search and Category / On-disk / Linked filters.
-Clicking a row expands a detail panel (all claims, full metadata, children, on-disk paths, CDN URL
-+ hash, deletion record, links). Every link and the on-disk status carry a **“?”** explaining how
-they were derived. Timestamps are Unix-epoch-ms, formatted in the chosen timezone (DST-aware) via
-`make_ms_formatter` (which reuses the Memories timezone formatter by converting ms → Cocoa seconds).
+Clicking a row expands a detail panel (all claims, full metadata, children, on-disk paths + hashes
++ viewer, bundle children, decrypted copies, CDN URL, deletion record, links). Clicking a **link**
+or a **“?”** inside a row does *not* toggle it. Every link and the on-disk status carry a **“?”**
+explaining how they were derived. Timestamps are Unix-epoch-ms, formatted in the chosen timezone
+(DST-aware) via `make_ms_formatter` (which reuses the Memories timezone formatter by converting
+ms → Cocoa seconds).
+
+The table is **virtualized**: rows live in `data/index.js`, each row's detail HTML in a
+`data/detail-<n>.js` chunk loaded only when that row is expanded, and only the visible rows are put
+in the DOM — so the report opens instantly no matter how many entries `cache_controller.db` has
+(measured: ~0.7 s for 101 200 rows). Search covers the whole index, not just what is on screen.
+A **pager** (rows per page + page navigation) sits under the toolbar, and **Expand all** applies to
+the current page and refuses more than 500 rows at once. Entries can be **ticked as relevant to the
+case**, filtered with **Selected only** and saved with **💾 Save selections** — shared with the
+Memories report through `Reports/selection.js`. See [report_ui.md](report_ui.md). Keep the `data/`
+and `files/` folders next to the HTML file.
 
 ## Coverage caveats (does every SCContent file have a claim?)
 
@@ -132,7 +174,9 @@ Implications for the report / examiner:
 ## Cross-report links
 See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory** by snap UUID in the
 `EXTERNAL_KEY` (primary), then `SHA-256(url token)[:16] == CACHE_KEY` (fallback), then `ZMEDIAID`
-(fallback); **→ chat** via the Communications report's `cache_links.json` manifest.
+(fallback); **→ chat** via the Communications report's `cache_links.json` manifest, by `CACHE_KEY`
+and — so that every cache entry of a message links back, not only the file the chat report showed —
+by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
 
 ## Standalone use
 ```

@@ -41,11 +41,46 @@ To keep the report usable with many Memories, it is split (`generate_report`):
   with: thumbnail, kind, user, `ZSNAPID` / `ZENTRYID` / `ZMEDIAID`, cache-file tokens, the media
   **MD5 / SHA-256**, created time, geolocation, and a link to the detail sub-page. Each row carries
   `id="mem-<ZSNAPID>"` (the anchor other reports link to).
+  The table is **virtualized** — rows live in `data/index.js` and only the visible ones are put in
+  the DOM, so the index opens instantly however many Memories there are, and search/sort still
+  cover all of them. Row cells are one fixed height (the full values are on the detail page; the
+  cache-token cell shows the first two and counts the rest). It also carries the **pager** and the
+  **selection** controls, and a **My Eyes Only** filter. Keep the `data/` and `media/` folders next
+  to the HTML file. See [report_ui.md](report_ui.md).
 * **`pages/<key>.html`** — one **detail sub-page per group**, holding the full detail (metadata,
   location, per-snap AES key/IV, ZGALLERYSNAP/ZGALLERYENTRY values, CDN URLs, timestamp tables, and
   the media-files table with hashes/paths and the 🗄 cache-entry links). MEDIA ID and SNAP IDs are
   shown prominently. Each member also carries an `id="mem-<ZSNAPID>"` anchor, and the page links
   back to the index.
+
+### My Eyes Only
+A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the
+index's Kind column (`m["is_meo"]`, set from `IS_ENCRYPTED` / the MEO key path — see
+[snapchat_ios_memories_decryption.md](snapchat_ios_memories_decryption.md)), matches a search for
+"meo" / "my eyes only", and can be isolated with the **My Eyes Only** filter (any / only / exclude).
+The detail page keeps its existing "My Eyes Only" label next to the kind.
+
+### Selecting memories for the case
+Each index row and each memory block on a detail sub-page carries the **same checkbox** — both
+pages load `Reports/selection.js`, so they always agree — plus **Selected only** filtering and a
+**💾 Save selections** button. Why the selection has to be saved to a file (and cannot simply live
+in the browser) is explained in [report_ui.md](report_ui.md#selecting-rows--and-where-a-file-report-can-keep-them).
+
+### Offline maps
+When the examiner configures an **offline map tile server** in the GUI (or passes `tile_server=` to
+`main`), `render_maps` renders a small static map for every geolocated Memory and the detail page
+shows it under the location, with a link that opens the tile server centred on the same
+coordinates. Implementation: [`scripts/offline_maps.py`](../scripts/offline_maps.py).
+
+* Nothing is fetched when no server is configured — the reports never reach the network on their own,
+  and the server is one the examiner runs.
+* Tiles are cached in memory and memories at the same coordinates share one image (on the test set:
+  22 geolocated memories → 3 images, 27 tile requests).
+* The image is a **derived artifact** and is labelled as such: the imagery is the examiner's tile
+  server's, only the marker position comes from `gallery.encrypteddb`'s `snap_location_table`. The
+  caption's "?" records the server, the zoom and how many tiles were stitched.
+* A server that stops answering degrades gracefully: the report is still produced, with a warning in
+  the log and a note of the missing tiles.
 
 ### Two-level grouping (`assign_groups`, union-find)
 1. **ZMEDIAID** — memories referencing the same media object.
@@ -55,10 +90,18 @@ To keep the report usable with many Memories, it is split (`generate_report`):
 Both relations are unioned (connected components), so "same bytes, different ZMEDIAID" — even on two
 different accounts — land on one sub-page. Group key = a short stable hash of the member snap ids.
 
-### Manifest for cross-report links
-`generate_report` writes `memory_pages.json` (`snap_id → pages/<key>.html`). The cache_controller
-report reads it (it runs after Memories) to offer **both** an index-row link and a direct
-detail-page link per memory-linked entry. See [cross_report_linking.md](cross_report_linking.md).
+### Manifests for cross-report links
+`generate_report` writes two files the cache_controller report reads (it runs after Memories):
+
+* **`memory_pages.json`** (`snap_id → pages/<key>.html`) — so a memory-linked cache entry can offer
+  **both** an index-row link and a direct detail-page link.
+* **`media_by_cache_key.json`** (`CACHE_KEY → [{path, role, ext, bytes, snap_id, md5, sha256}]`) —
+  every media file decrypted *from a cache key*. Memory media is cached **encrypted**, so the
+  cache_controller report cannot display those bytes; this manifest lets it link to the plaintext
+  copy recovered here (labelled as derived, with both files' hashes side by side) instead of
+  showing an unopenable blob. `.pack` files are excluded — they have no cache key.
+
+See [cross_report_linking.md](cross_report_linking.md).
 
 ## Cross-scope on-disk copies
 Each recovered media file's source paths are grouped by the account `SCContent_<userId>` scope

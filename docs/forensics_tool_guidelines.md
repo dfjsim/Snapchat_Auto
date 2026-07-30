@@ -12,6 +12,7 @@ This is a draft for a list of guidelines that I think are important in a forensi
 - The tool UI should be intuitive, _bug-free_ and use proper standard shortcuts like CTRL-W to close a tab, etc.
 - Avoid misleading names or descriptions when labeling different values (timestamps, geolocation, etc.).
 - If a value name is an educated guess, label it as such. If it has been documented in a forensics paper or blog, provide the link to it.
+- The tool should be transparent and provide the information required to evaluate the reliability of presented artifacts.
 
 # Hashing
 
