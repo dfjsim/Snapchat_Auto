@@ -4,6 +4,7 @@ from scripts import ParseSnapchat_iOS
 from scripts import getCacheAndroid
 from scripts.data import extract_zip
 from scripts import parseSnapvideos_PREFETCH
+from scripts import offline_maps
 import os
 import json
 import logging
@@ -246,6 +247,13 @@ def main(args):
          sg.Text('(or type an IANA name / ±HH:MM)')],
         [sg.Text('Daylight saving time is applied automatically for named zones (e.g. America/Toronto).',
                  font=("", 8), text_color="gray")],
+        [sg.Text('Offline map tile server (optional)')],
+        [sg.In(cfg.get("tile_server", ""), key="tile_server"),
+         sg.Button('Test', key="tile_test")],
+        [sg.Text('Your own XYZ tile server, e.g. http://localhost:8080 or '
+                 'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
+                 'map on its detail page. Nothing is downloaded when this is empty.',
+                 font=("", 8), text_color="gray")],
         [sg.Button('Ok'), sg.Button('Cancel')]]
 
     window = sg.Window(f'Snapchat Auto v{get_version()}', layout)
@@ -270,6 +278,14 @@ def main(args):
                                        file_types=(("Keychain (plist/json)", "*.plist *.json"), ("All Files", "*.*")))
             if picked:
                 window["keychain"].update(picked)
+        elif event == "tile_test":
+            if not values["tile_server"].strip():
+                sg.popup("Enter a tile server URL first (or leave it empty for no maps).",
+                         title="Offline map tile server", keep_on_top=True)
+                continue
+            ok, message = offline_maps.test_server(values["tile_server"])
+            (sg.popup if ok else sg.popup_error)(message, title="Offline map tile server",
+                                                 keep_on_top=True)
         elif event == "Ok":
             if not values["zip"] or not os.path.isfile(values["zip"]):
                 sg.popup_error("Please select a valid extraction ZIP file.")
@@ -277,13 +293,25 @@ def main(args):
             if not values["workdir"]:
                 sg.popup_error("Please select a Working/Temp/Report directory (required).")
                 continue
+            # A tile server is tested before the run starts, so a typo is caught now rather than
+            # after a long extraction — but the examiner stays in charge of continuing without maps.
+            if values["tile_server"].strip():
+                ok, message = offline_maps.test_server(values["tile_server"])
+                logger.info(f"Offline map tile server: {message}")
+                if not ok and sg.popup_yes_no(
+                        message + "\n\nRun anyway, without offline maps?",
+                        title="Offline map tile server", keep_on_top=True) != "Yes":
+                    continue
+                if not ok:
+                    values["tile_server"] = ""
             break
     window.close()
 
     # merge into cfg so other saved settings (e.g. hide_disclaimer) are preserved
     cfg.update({"zip": values["zip"], "keychain": values["keychain"], "workdir": values["workdir"],
                 "padding": values.get("padding", PADDING_OPTIONS[0]),
-                "timezone": values.get("timezone", "Local time")})
+                "timezone": values.get("timezone", "Local time"),
+                "tile_server": values.get("tile_server", "").strip()})
     save_config(cfg)
 
     padding = PADDING_MAP.get(values.get("padding"), "both")
@@ -308,7 +336,8 @@ def main(args):
         else:
             logger.info("Found SnapFixedVideos folder, skipping that step")
         ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], values["keychain"],
-                               padding=padding, tz=tz, report_dir="./Reports")
+                               padding=padding, tz=tz, report_dir="./Reports",
+                               tile_server=values.get("tile_server", "").strip())
         # Write the report index BEFORE the pause, so index.html exists when the "press any key"
         # prompt appears (previously the pause lived inside the parser and blocked this step).
         write_index(".", "Reports", zip_path=values["zip"], keychain_path=values["keychain"])

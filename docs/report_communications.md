@@ -33,21 +33,48 @@ logged-in `USER_ID`; `mergeCache` merges in the `contentManagerDb` rows and **co
 `CACHE_KEY` file into `cacheFiles/`**. `path_to_image_html` then renders it (video/image/sticker)
 by file type.
 
-## Two-way link with the cache_controller report
-Because attachments are named by `CACHE_KEY`, each rendered attachment:
+## Attachment files and their names
+Two kinds of file end up in `cacheFiles/`:
 
-* gets an `id="cf-<CACHE_KEY>"` anchor (so the cache_controller report can jump to it), and
-* shows a 🗄 `cclink` back to `../CacheController/CacheController_report.html#ck-<CACHE_KEY>`.
+* **SCContent copies**, named after their `CACHE_KEY` — no extension;
+* **`SCPersistentMedia` copies** ("media saved in chat"), named
+  `<type>_<conversation>_<message>_<part>_<n>.<ext>`.
+
+Because a browser handles an extensionless `file://` link inconsistently (Chrome downloads it,
+Firefox may show it as text, `<video>` refuses it), `namedWithExtension` gives every rendered
+attachment a name ending in its real extension — as a **hard link** beside the original (same
+bytes, no copy), leaving the original `CACHE_KEY`-named file in place. Files that already carry a
+media extension are left alone.
+
+## Two-way link with the cache_controller report
+Each rendered attachment:
+
+* gets an `id="cf-<attachment filename>"` anchor (so the cache_controller report can jump to it), and
+* shows a 🗄 `cclink` back to `../CacheController/CacheController_report.html#ck-<CACHE_KEY>`, where
+  the key comes from `cacheControllerKey`: the filename itself for SCContent copies, and — for
+  `SCPersistentMedia` copies, whose name is *not* a cache key — the `CACHE_KEY` of the claim
+  carrying the same `<conversation>:<message>:<part>` triple (`mapPersistentMediaToCacheKeys`).
+  Before this, saved-media attachments produced a dead `#ck-<filename>` link.
+
+  A message can carry several claims on that triple (`1:` full media, `thumbnail~1:`, `content~1:`),
+  so the mapping picks the one matching the file's own type, and runs against **all** claims rather
+  than the `mergeCache`-filtered set — otherwise a saved video's full-media claim is missing (its
+  `CACHE_KEY` file is a bundle descriptor, not media) and both the thumbnail and the video would
+  point at the thumbnail's entry. See
+  [cross_report_linking.md](cross_report_linking.md#communications--cache_controller).
 
 Before the message contents are turned into HTML, `main` writes
-`Reports/Communications/cache_links.json` — `CACHE_KEY → [{conversation_id, server_message_id}]`
-for every file present in `cacheFiles/` — which the cache_controller report reads to link its
-entries back to the exact conversation/message. See
-[cross_report_linking.md](cross_report_linking.md).
+`Reports/Communications/cache_links.json` (version 2) with a `by_key` **and** a `by_message` index;
+the cache_controller report uses the second to link back **all** of a message's cache entries (full
+media, thumbnail, raw content claim), which is what a message with two attachments needs. Format and
+rules: [cross_report_linking.md](cross_report_linking.md).
+
+The report also loads the shared `NAV_JS`, so a `#cf-…` link from another report scrolls the
+attachment into view, highlights it, and keeps working when the same link is clicked again into the
+already-open tab. See [report_ui.md](report_ui.md).
 
 ## Notes / caveats
 * The report renders with pandas `DataFrame.to_html`; per-conversation tables come from
   `groupby('Client Conversation ID')`.
-* `path_to_image_html` uses the module global `platform` to pick the path separator. It is set at
-  import (`platform = system()`) and re-set by `main()` at startup, so it is always defined before
-  any attachment is rendered.
+* The HTML file is written as **cp1252**, so anything injected into it (including the shared JS)
+  must stay ASCII; emoji are written as HTML entities.

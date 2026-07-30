@@ -5,10 +5,13 @@ Snapchat Auto produces several sibling HTML reports under `Reports/`:
 ```
 Reports/
   index.html
-  Communications/Communications_report.html
-  Memories/Memories_report.html
+  run_id.txt                                  identifies this set of reports
+  selection.js                                the examiner's row selections, shared by every report
+  Communications/Communications_report.html   + cacheFiles/, cache_links.json
+  Memories/Memories_report.html               + pages/, media/, maps/, data/,
+                                                memory_pages.json, media_by_cache_key.json
   LocalMemories_legacy/LocalMemories_legacy_report.html
-  CacheController/CacheController_report.html
+  CacheController/CacheController_report.html + files/, data/
 ```
 
 Wherever the same underlying artifact appears in more than one report, the reports link to each
@@ -41,6 +44,14 @@ so other reports can resolve a snap to its detail page.
 32-hex `cache_controller.db` key, which is also the on-disk filename in the `SCContent` folder.
 Links are relative between siblings, e.g. `../Memories/Memories_report.html#mem-<ZSNAPID>`.
 
+In the Communications report the anchor id is the **attachment filename**, which is the `CACHE_KEY`
+for files copied out of `SCContent` but *not* for `SCPersistentMedia` copies (see below) — so the
+`cf-…` anchor is taken from the manifest rather than assumed.
+
+**How the jump behaves** (scrolling clear of the sticky toolbar, expanding the target row in a
+virtualized table, and working on repeat clicks into an already-open tab) is documented in
+[report_ui.md](report_ui.md#cross-report-navigation-nav_js).
+
 ## The links, and how each is derived
 
 ### cache_controller → Memory
@@ -71,17 +82,70 @@ either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target
 `.pack` files are *not* indexed by `cache_controller.db`, so they get no such link.)
 
 ### cache_controller → Communications (chat)
-The Communications report writes `Reports/Communications/cache_links.json`, mapping
-`CACHE_KEY → [{conversation_id, server_message_id}]` for every cached file it attached to a
-message. The cache_controller report loads that manifest and links matching entries to
-`#cf-<CACHE_KEY>`.
+The Communications report writes `Reports/Communications/cache_links.json` (version 2) with **two**
+indexes over the attachments it rendered:
+
+```json
+{"version": 2,
+ "by_key":     {"<CACHE_KEY>": [{"conversation_id": …, "server_message_id": …, "anchor": "cf-…"}]},
+ "by_message": {"<conversation id>|<server message id>": [ …the same records… ]}}
+```
+
+The cache_controller report links an entry to a chat message by, in order:
+
+1. **`by_key`** — this physical file *is* the attachment the chat report displayed.
+2. **`by_message` (fallback).** A chat claim's `EXTERNAL_KEY` is
+   `<type>:<conversation id>:<message id>:<part>[:…]` (e.g. `thumbnail~1:19e0693c-…:12:0:0`), so the
+   conversation + `<message>.<part>` it carries is matched against the manifest. This is what links
+   **every** cache entry of a message — full media (`1:…`), thumbnail (`thumbnail~1:…`) and raw
+   content claim (`content~1:…`) — and not just the one file the chat report happened to display.
+   A message with two attachments (e.g. a thumbnail and a video) therefore links back from both.
+   The "?" spells out that such a link points at the *message*, not at that exact file.
+
+Chips are deduplicated per (conversation, message).
 
 ### Communications → cache_controller
-Each cached attachment links back to `#ck-<CACHE_KEY>` (the `cclink` in `path_to_image_html`).
+Each cached attachment links back to `#ck-<CACHE_KEY>` (the `cclink` in `path_to_image_html`), where
+the key comes from `cacheControllerKey`:
+
+* attachments copied out of `SCContent` are **named after their `CACHE_KEY`** — used directly;
+* **`SCPersistentMedia`** copies ("media saved in chat") are named
+  `<type>_<conversation>_<message>_<part>_<n>.<ext>`, which is *not* a cache key. They are matched
+  to a claim carrying the same `<conversation>:<message>:<part>` triple
+  (`mapPersistentMediaToCacheKeys`), and the link uses that claim's `CACHE_KEY`. Previously these
+  produced a dead `#ck-<filename>` link. The link's `title` states which `EXTERNAL_KEY` made the
+  match.
+
+  Two details matter here, because a message has **several** claims on the same triple:
+
+  1. **Which claim.** The claim whose type equals the file's own wins; otherwise a `thumbnail…`
+     file takes `thumbnail~1:…` and anything else takes the full media `1:…` (then `content~1:…`).
+     So a message with a thumbnail and a video produces **two different** links — the PNG to
+     `thumbnail~1:<conv>:<msg>:<part>` and the video to `1:<conv>:<msg>:<part>` — rather than both
+     landing on the thumbnail's entry.
+  2. **Matched against every claim**, not the filtered set. `mergeCache` keeps only claims whose
+     `CACHE_KEY` file is directly recognizable media, which drops exactly the full-media claim of a
+     saved video: a chat video is a **bundle**, so the file named after its `CACHE_KEY` is the small
+     CHILDREN descriptor and the video is a child file. The mapping therefore uses the raw
+     `CACHE_FILE_CLAIM` rows.
+
+  This is verifiable byte for byte, and worth doing when validating on a new extraction: the
+  attachment's SHA-256 must equal the linked entry's bytes, or one of its bundle children's. On the
+  2023 test device all 19 attachments match — e.g. message 12.0's video equals bundle child
+  `z2a132f1f…` of `4bfc4bba…`.
+
+### cache_controller → the decrypted copy of an encrypted cache file
+Memory media is cached **encrypted**, so its bytes cannot be displayed from the cache entry itself.
+The Memories report writes `Reports/Memories/media_by_cache_key.json`
+(`CACHE_KEY → [{path, role, ext, bytes, snap_id, md5, sha256}]`) for every media file it decrypted
+from a cache key, and the cache_controller report links/embeds that decrypted copy — clearly
+labelled as a derived file, with the original cached bytes' hashes shown next to it.
 
 ## Ordering / dependency
 `ParseSnapchat_iOS.main` runs the reports in the order **Communications → Memories →
 cache_controller**. That matters: the cache_controller report reads the chat manifest the
-Communications report just wrote, and reads each `scdb-27.sqlite3` directly for the Memory index —
-so there is no circular dependency, and the back-links from Communications/Memories are static URLs
-that resolve to anchors the cache_controller report emits.
+Communications report just wrote (`cache_links.json`) and the two manifests the Memories report
+just wrote (`memory_pages.json`, `media_by_cache_key.json`), and reads each `scdb-27.sqlite3`
+directly for the Memory index — so there is no circular dependency, and the back-links from
+Communications/Memories are static URLs that resolve to anchors the cache_controller report emits.
+Running cache_controller alone still produces the full index; only the cross-links are missing.

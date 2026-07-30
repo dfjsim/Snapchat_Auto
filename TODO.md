@@ -3,8 +3,6 @@
 
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
-- [DONE-v1.4.0 — see DONE.md] Split into a lightweight sortable/filterable index + per-group detail
-  sub-pages, with second-level merging by media MD5/SHA-256 (0-byte excluded, cross-user).
 
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.. 
@@ -41,17 +39,32 @@
 # Code cleanup and optimization
 - Fix Pylance/Pyright/Ruff warnings/errors.
 
-# Analysis / Reverse engineering
-- Figure out how Cellebrite decides which "File Uploads" get the "My Story" flag.
-
 # New report for `cache_controller.db` data. [DONE — see DONE.md]
 - Remaining/uncertain: `CACHE_KEY_VIRTUALIZATION` was empty in every test extraction, so the
   `VIRTUAL_CACHE_KEY` ↔ `CACHE_KEY` semantics are unconfirmed — its rows are listed but no linking
   logic depends on them. Revisit once a populated sample is available.
-- [DONE-v1.4.0] View unlinked cached files; real DB field names; the "SHA-256" field-8 finding
-  (source hash, may not match cached bytes) + actual cached-file hashes; "Expand all" button.
 
-# Add support for offline tile map server
-- If a tile server server is provided in the initial GUI (tested right away when specified),
-  use it to generate small embedded maps for each Memory (in the detailed Memory pages)
-  and include a URL to the tile server at the right coordinates.
+# Add support for offline tile map server [DONE — see DONE.md]
+- Remaining ideas (not done):
+  - A map on the Memories *index* (the index only shows coordinates + OSM/Google links today).
+  - One overview map plotting every geolocated Memory of the case.
+  - Configurable zoom / map size (currently zoom 15, 3x3 tiles).
+- Example URL: http://hostname:port/#map=15/40.000000/-70.000000
+  - With our OSM tile server, this URL brings us to the Ubuntu Apache2 default page.
+    https://github.com/dfjsim/osm-tirex
+
+# UI bugs [DONE — see DONE.md "Report UI bugs (v1.4.2)"]
+- The whole list (tab reuse / anchors, extensionless media, small view icons, big-table performance,
+  unviewable encrypted + bundled cache files, two attachments in one message) was fixed in v1.4.2.
+  Shared UI code now lives in `scripts/report_ui.py`; see `docs/report_ui.md`.
+- Selections (v1.4.2): a `file://` page has no storage that survives closing the tab or that two
+  pages of the same run can share (measured — see `docs/report_ui.md`), so selections live in
+  `Reports/selection.js`, which the examiner saves from the report. Worth revisiting if we ever
+  ship a small local server or a desktop shell, which would allow silent persistence.
+- Still worth re-checking on other extractions:
+  - The 15 cache entries that remain "🔒 encrypted" on the 2023 test device — are any of them
+    decryptable from a source we already have (chat media keys)?
+  - Row cells in the virtualized index tables have a fixed height and clip long values (the full
+    value is always in the row detail / detail page). Confirm that reads well on other datasets,
+    e.g. accounts with many cache tokens per Memory.
+

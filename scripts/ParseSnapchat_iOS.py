@@ -16,6 +16,7 @@ from platform import system
 import blackboxprotobuf
 import hashlib
 from scripts import DecryptLocalMemories_iOS
+from scripts import report_ui
 import math
 import logging
 import numpy as np
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 SCContentFolder = ""
 outputDir = ""
 memories_cache_df = pd.DataFrame()
+# cacheFiles basename -> {"key": CACHE_KEY, "external_key": …} for attachments that are NOT named
+# after a cache key (SCPersistentMedia copies). Filled by mapPersistentMediaToCacheKeys() so the
+# link to the cache_controller report points at a row that actually exists.
+persistent_cache_keys = {}
 # Module-level default so path_to_image_html never depends on main() having run first (main()
 # re-assigns this same global at startup and logs it).
 platform = system()
@@ -98,6 +103,7 @@ th {
     color: white;
     text-align: left;
 }
+""" + report_ui.NAV_CSS + """
 </style>
     """
     for index, clientConversationID in final_df.groupby('Client Conversation ID'):
@@ -115,14 +121,134 @@ th {
     html = html.replace('<th>Message Content</th>', '<th style="min-width: 200px;">Message Content</th>')
     html = html.replace(r'\n', '<br>')
 
+    # Cross-report anchor handling: scroll a #cf-<file> target clear of the page top, highlight it,
+    # and keep working when the same link is clicked again into this already-open tab.
+    html = html + "<script>" + report_ui.NAV_JS + "scConsumeHash();</script>"
+
     return html
     
+
+# An SCPersistentMedia filename ("media saved in chat") encodes the same tuple a
+# CACHE_FILE_CLAIM.EXTERNAL_KEY does, with "_" instead of ":" and an extension appended:
+#   cm-chat-media-video-1_<conversationId>_<messageId>_<part>_<n>.mov
+#   1                    :<conversationId>:<messageId>:<part>:<n>
+_PERSISTENT_NAME_RE = re.compile(
+    r"^(?P<type>[^_]+)_(?P<conv>[0-9a-fA-F-]{36})_(?P<msg>\d+)_(?P<part>\d+)(?:_(?P<n>\d+))?"
+    r"(?P<ext>\.[A-Za-z0-9]+)?$")
+
+# Preference between the several claims a chat message can have on one (conversation, message,
+# part): the full media first, then the raw content claim, and the thumbnail only as a last resort.
+# A saved-media file whose own name says "thumbnail" flips that around (see _rank_claim).
+_CLAIM_TYPE_RANK = {"1": 0, "content~1": 1, "thumbnail~1": 3}
+
+
+def _rank_claim(claim_type, file_type):
+    """Order the claims of one (conversation, message, part) for a saved-media file.
+
+    An exact type match wins; otherwise a thumbnail file takes the thumbnail claim and anything
+    else takes the full media claim.
+    """
+    if claim_type == file_type:
+        return -1
+    wants_thumb = "thumbnail" in (file_type or "").lower()
+    if wants_thumb:
+        return 0 if claim_type == "thumbnail~1" else 2
+    return _CLAIM_TYPE_RANK.get(claim_type, 2)
+
+_CONV_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def mapPersistentMediaToCacheKeys(cache_df, persistent_df):
+    """Map each SCPersistentMedia attachment filename to its cache_controller ``CACHE_KEY``.
+
+    Those files are copies Snapchat keeps outside the SCContent cache, so their name is *not* a
+    cache key and a ``#ck-<filename>`` link would point at a row that does not exist. Both names
+    carry the same ``<conversation>:<message>:<part>`` triple, so the claim can be matched on it —
+    which is also what lets the cache_controller report link that cache entry back to the message.
+    """
+    resolved = {}
+    if cache_df is None or persistent_df is None or len(persistent_df) == 0:
+        return resolved
+    by_triple = {}
+    for _index, row in cache_df.iterrows():
+        ek = row.get("EXTERNAL_KEY")
+        if not isinstance(ek, str) or ":" not in ek:
+            continue
+        bits = ek.split(":")
+        if len(bits) < 4 or not _CONV_ID_RE.match(bits[1] or ""):
+            continue
+        by_triple.setdefault((bits[1], bits[2], bits[3]), []).append((bits[0], row["CACHE_KEY"], ek))
+    for name in persistent_df["CACHE_KEY"]:
+        mo = _PERSISTENT_NAME_RE.match(str(name))
+        if not mo:
+            continue
+        cands = by_triple.get((mo.group("conv"), mo.group("msg"), mo.group("part")))
+        if not cands:
+            continue
+        kind, key, ek = sorted(cands, key=lambda c: _rank_claim(c[0], mo.group("type")))[0]
+        resolved[str(name)] = {"key": key, "external_key": ek, "claim_type": kind}
+    if resolved:
+        logger.info(f"Matched {len(resolved)} saved-media file(s) to their cache_controller entry")
+    return resolved
+
+
+def cacheControllerKey(basename):
+    """The CACHE_KEY the cache_controller report has a row for, for one cacheFiles attachment.
+
+    Returns ``(cache_key, explanation)``. Files copied out of SCContent are already named after
+    their cache key; SCPersistentMedia copies are resolved through
+    :func:`mapPersistentMediaToCacheKeys`. ``cache_key`` is None when neither applies.
+    """
+    hit = persistent_cache_keys.get(basename)
+    if hit:
+        return hit["key"], (
+            f"This attachment is a saved copy from Library/Caches/SCPersistentMedia, so its "
+            f"filename is not a cache key. It was matched to CACHE_KEY {hit['key']} through the "
+            f"CACHE_FILE_CLAIM EXTERNAL_KEY \"{hit['external_key']}\", which carries the same "
+            f"conversation / message / part identifiers as the filename. That cache entry is often "
+            f"a bundle: the media then sits in one of its child files, whose hash the "
+            f"cache_controller report lists so this copy can be corroborated byte for byte.")
+    key = basename.split(".")[0]
+    if re.fullmatch(r"[0-9a-fA-F]{32}", key):
+        return key, ("This attachment was copied out of the SCContent cache folder, where the "
+                     "filename IS the cache_controller CACHE_KEY.")
+    return None, ""
+
+
+def namedWithExtension(folder, basename, extension):
+    """Return a filename inside *folder* that carries a real ``.<extension>``.
+
+    Cache files are named after their CACHE_KEY, with no extension, and browsers handle an
+    extensionless ``file://`` link inconsistently (some download it, some render it as text). A
+    sibling ``<basename>.<extension>`` is created as a **hard link** when the filesystem allows it
+    — same bytes, no copy — so the original name is still there for the examiner while every link
+    in the report points at a name the browser understands.
+    """
+    existing = os.path.splitext(basename)[1].lower().lstrip(".")
+    if existing in ("mp4", "mov", "m4v", "jpg", "jpeg", "png", "webp", "gif"):
+        return basename                                        # already a name the browser handles
+    target = basename + "." + extension
+    source_path = os.path.join(folder, basename)
+    target_path = os.path.join(folder, target)
+    if os.path.exists(target_path):
+        return target
+    try:
+        os.link(source_path, target_path)
+        return target
+    except OSError:
+        try:
+            shutil.copy2(source_path, target_path)
+            return target
+        except OSError as Error:
+            logger.debug(f"Could not give {basename} a .{extension} name: {Error}")
+            return basename
+
 
 def path_to_image_html(filename):
     global attachmentPath_relative
     global outputDir_name
     dots_regex = re.compile(r"^\.+$")
-    
+
     try:
         path = Path(outputDir + "/cacheFiles/" + filename)
     except TypeError:
@@ -132,38 +258,34 @@ def path_to_image_html(filename):
         path = path.replace("\\", "/")
     except Exception:
         pass
-        
+
     try:
         if os.path.exists(path):
             try:
                 basename = ntpath.basename(path)
-                realpath = os.path.abspath(path)
                 kind = filetype.guess(path)
-                if platform == "Windows":
-                    relpath = realpath.split("\\")[-2:]
-                else:
-                    relpath = realpath.split("/")[-2:]
-                relpath = str(Path(relpath[0] + "/" + relpath[1]))
+                if kind.extension not in ("mp4", "png", "jpg", "webp"):
+                    return filename + " - Unknown extension: " + kind.extension
+                # link to a name that ends in the real extension (see namedWithExtension)
+                viewname = namedWithExtension(outputDir + "/cacheFiles", basename, kind.extension)
+                relpath = "cacheFiles/" + viewname
                 if kind.extension == "mp4":
                     result = ('<video width="320" height="240" controls> <source src="' + (
                         relpath) + '" type="video/mp4"> Your browser does not support the video tag. </video> <a href="' + (
                                 relpath) + '"><br>' + basename + '</a>')
-                elif kind.extension == "png":
-                    result = ('<a href="' + (relpath) + '"><img src="' + (
-                        relpath) + '" width="150" ><br>' + basename + '</a>')
-                elif kind.extension == "jpg":
-                    result = ('<a href="' + (relpath) + '"><img src="' + (
-                        relpath) + '" width="150" ><br>' + basename + '</a>')
-                elif kind.extension == "webp":
-                    result = ('<a href="' + (relpath) + '"><img src="' + (
-                        relpath) + '" width="150" ><br>' + basename + '</a>')
                 else:
-                    return filename + " - Unknown extension: " + kind.extension
-                # basename == the CACHE_KEY: expose a stable anchor the cache_controller report can
-                # jump to, plus a two-way link back to that report's entry for this file.
-                cc_link = ('<br><a class="cclink" target="scauto_cache" '
-                           'href="../CacheController/CacheController_report.html#ck-'
-                           + basename + '">&#128451; cache_controller entry</a>')
+                    result = ('<a href="' + (relpath) + '"><img src="' + (
+                        relpath) + '" width="150" ><br>' + basename + '</a>')
+                # Stable anchor the cache_controller report can jump to, plus the link back to that
+                # report's row for this file — via the CACHE_KEY, which for a saved-media copy is
+                # not the filename (see cacheControllerKey).
+                cache_key, how = cacheControllerKey(basename)
+                if cache_key:
+                    cc_link = ('<br><a class="cclink" target="scauto_cache" title="' + how + '" '
+                               'href="../CacheController/CacheController_report.html#ck-'
+                               + cache_key + '">&#128451; cache_controller entry</a>')
+                else:
+                    cc_link = ''
                 return ('<span id="cf-' + basename + '">' + result + '</span>' + cc_link)
             except PermissionError as Error:
                 if dots_regex.match(filename):
@@ -1337,7 +1459,8 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
             logger.warning(f"Could not find Display name for local user {row['User ID']}, {Error}")
     return friends_df
 
-def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None):
+def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
+         tile_server=""):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1487,10 +1610,17 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     chats_df = getChats(arroyo[0])
     chats_df = fixSenders(chats_df, friends_df, df_snapchatter)
     cache_df = getCache(cacheController[0])
+    all_claims_df = cache_df.copy()                            # before mergeCache filters it
     content_df = getContentmanager(contentmanager)
     cache_df = mergeCache(cache_df, content_df)
     cache_arroyo_df = getCacheArroyo(arroyo[0], cache_df)
     persistent_df = getSCPersistentMedia()
+    global persistent_cache_keys
+    # Matched against *all* claims, not the merged frame: mergeCache keeps only claims whose
+    # CACHE_KEY file is directly recognizable media, which drops exactly the full-media claim a
+    # saved video needs — a chat video is a bundle, and the file named after its CACHE_KEY is the
+    # small CHILDREN descriptor (the video itself is a child file).
+    persistent_cache_keys = mapPersistentMediaToCacheKeys(all_claims_df, persistent_df)
     final_df = mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df)
     final_df = final_df.drop_duplicates()
     final_df = final_df.sort_values(by=['Client Conversation ID', 'Server Message ID'])
@@ -1505,18 +1635,30 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         if file not in messages:
             os.remove(f"{outputDir}/cacheFiles/{file}")
 
-    # Manifest of chat cache attachments for the cache_controller report's two-way links:
-    # CACHE_KEY -> [{conversation_id, server_message_id}]. Built while Message Content still holds
-    # the raw cache key (the cacheFiles filename), before it is turned into HTML just below.
-    cache_links = {}
+    # Manifest of chat cache attachments for the cache_controller report's two-way links. Built
+    # while Message Content still holds the raw attachment filename, before it is turned into HTML
+    # just below. Two indexes, because a cache entry can be recognised either way:
+    #   by_key     : CACHE_KEY -> [{conversation_id, server_message_id, anchor}]
+    #   by_message : "<conversation>|<server message id>" -> the same records
+    # by_message is what lets the cache_controller report link back *every* cache entry of a
+    # message (full media, thumbnail, raw content claim), not only the one file this report
+    # happened to display — a message with two attachments has several.
+    cache_links = {"version": 2, "by_key": {}, "by_message": {}}
     cachefiles_dir = outputDir + "/cacheFiles/"
     for index, row in final_df.iterrows():
         mc = row["Message Content"]
-        if isinstance(mc, str) and mc and os.path.exists(cachefiles_dir + mc):
-            cache_links.setdefault(mc, []).append({
-                "conversation_id": row["Client Conversation ID"],
-                "server_message_id": str(row["Server Message ID"]),
-            })
+        if not (isinstance(mc, str) and mc and os.path.exists(cachefiles_dir + mc)):
+            continue
+        record = {
+            "conversation_id": row["Client Conversation ID"],
+            "server_message_id": str(row["Server Message ID"]),
+            "anchor": "cf-" + mc,
+        }
+        cache_key, _how = cacheControllerKey(mc)
+        if cache_key:
+            cache_links["by_key"].setdefault(cache_key, []).append(record)
+        cache_links["by_message"].setdefault(
+            f"{record['conversation_id']}|{record['server_message_id']}", []).append(record)
     try:
         with open(outputDir + "/cache_links.json", "w", encoding="utf-8") as manifest:
             json.dump(cache_links, manifest)
@@ -1559,7 +1701,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         # archive root, so source paths in the report show as "/Application/<UUID>/Documents/...".
         memories_media_report.main(snapchatFolder, keychain_file, report_dir + "/Memories",
                                    padding=padding, tz=tz,
-                                   src_root=os.path.dirname(Application))
+                                   src_root=os.path.dirname(Application),
+                                   tile_server=tile_server)
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 

@@ -14,6 +14,11 @@ Memories / My Eyes Only.
 - iOS `cache_controller.db` report: `scripts/cache_controller_report.py` (one row per cached file,
   linked to on-disk cache files and two-way to the Memories / Communications reports).
 - Android: `scripts/getCacheAndroid.py`.
+- Shared report UI: `scripts/report_ui.py` (virtualized index tables, paging, row selection,
+  cross-report anchor navigation, "?" popovers) — used by the Memories and cache_controller
+  reports, with its `NAV_JS`/`NAV_CSS` also injected into the Communications report.
+- Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
+  **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`).
 - Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd`.
@@ -34,7 +39,9 @@ Memories / My Eyes Only.
   [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
   [report_cache_controller.md](docs/report_cache_controller.md),
   [report_memories.md](docs/report_memories.md),
-  [report_communications.md](docs/report_communications.md).
+  [report_communications.md](docs/report_communications.md),
+  [report_ui.md](docs/report_ui.md) (why the index tables are virtualized, how the data files are
+  laid out, and the anchor/named-tab navigation rules — read before touching report HTML/JS).
 - [Decrypting & linking Snapchat Memories media](docs/snapchat_ios_memories_decryption.md)
   — full method for recovering Memories media (`SCContent` + `caching-media/**/*.pack`) and
   geolocation, and linking each media file to its `scdb-27.sqlite3` Memory. Covers both storage

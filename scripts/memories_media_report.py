@@ -45,6 +45,8 @@ from PIL import Image
 
 from scripts.data import ccl_bplist
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
+from scripts import report_ui
+from scripts import offline_maps
 
 logger = logging.getLogger(__name__)
 
@@ -1254,6 +1256,31 @@ def _shared_location(members, keychain_available):
     return [_geo_html(m, keychain_available) for m in members], False
 
 
+def _map_html(members, media_prefix="../"):
+    """The offline-tile-server map for a memory/group, or nothing when maps were not rendered.
+
+    Labelled as a **derived** artifact: the imagery comes from the examiner's own tile server, only
+    the marker position comes from the device.
+    """
+    info = next((m["map"] for m in members if m.get("map")), None)
+    if not info:
+        return ""
+    lat, lon = info["center"]
+    partial = ("" if info["fetched"] == info["expected"] else
+               f" &middot; {info['expected'] - info['fetched']} tile(s) missing")
+    note = _info(
+        f"Derived artifact — not device data. The imagery is {info['fetched']} map tile(s) fetched "
+        f"from the offline tile server you configured ({info['template']}) at zoom {info['zoom']}, "
+        f"stitched together; only the marker position ({lat:.5f}, {lon:.5f}) comes from the "
+        f"device (gallery.encrypteddb snap_location_table).")
+    return (f"<div class='mapbox'><a href='{html.escape(media_prefix + info['path'])}' "
+            f"target='_blank' title='open the full-size map'>"
+            f"<img src='{html.escape(media_prefix + info['path'])}' loading='lazy'></a>"
+            f"<div class='mapcap'>offline tile server &middot; zoom {info['zoom']}{partial}{note}"
+            f"<br><a href='{html.escape(info['viewer'])}' target='_blank'>open on the tile "
+            f"server</a></div></div>")
+
+
 def _dedup_media(members):
     """Union of all members' media files, de-duplicated by content hash. Members of a group share
     the same ZMEDIAID, so the same media recovered under two snaps is the same bytes."""
@@ -1295,14 +1322,29 @@ def _enc_html(members):
 # --------------------------------------------------------------------------- shared assets
 
 # Interrogation-mark popover behaviour, shared by the index and every detail sub-page.
-_HINT_JS = """
-function hint(ev,el){ev.stopPropagation();
- var h=el.parentNode,was=h.classList.contains('open');
- document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});
- if(!was)h.classList.add('open');}
-document.addEventListener('click',function(){
- document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});});
+_HINT_JS = report_ui.HINT_JS
+
+# The detail sub-page's selection bar (the index has the full toolbar).
+_SUBSEL_CSS = """
+ .subsel{display:flex;align-items:center;gap:10px;margin:10px 24px 0;font-size:12.5px}
+ .subsel button{font-size:12.5px;padding:5px 9px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}
+ .subsel button:hover{background:#e7e7f4}
+ .subsel .selhint{color:#999}
 """
+
+# Offline map imagery on the detail sub-pages (only rendered when a tile server is configured).
+_MAP_CSS = """
+ .mapbox{margin-top:8px}
+ .mapbox img{width:100%;max-width:330px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.25);display:block}
+ .mapcap{font-size:10.5px;color:#777;margin-top:3px;max-width:330px}
+ .mapcap a{color:#2d2d71}
+"""
+
+# Index-table geometry (the virtual table uses one fixed row height and one column track list for
+# the header and every row; the thumbnail column sets the height).
+MEM_COLS = "86px 78px 118px 236px 152px 288px 128px 144px 116px"
+MEM_ROW_H = 130
 
 # Styling shared by the detail sub-pages (single-braced: inserted as a value into the f-string).
 _BASE_CSS = """
@@ -1488,7 +1530,8 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
 
     left = f"<div class='sect'>Metadata</div><div class='grid'>{meta if meta_shared else varies}</div>"
     loc_block = (f"<div class='sect'>Location (gallery.encrypteddb)</div>"
-                 f"<div class='geo'>📍 {loc}</div>" if loc_shared else
+                 f"<div class='geo'>📍 {loc}</div>{_map_html(members, media_prefix)}"
+                 if loc_shared else
                  f"<div class='sect'>Location (gallery.encrypteddb)</div>{varies}")
     enc_block = (f"<div class='sect'>Encryption (per-snap AES key)</div>"
                  f"<div class='grid'>{_enc_html(members)}</div>")
@@ -1512,7 +1555,13 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             parts.append(f"<div class='sect'>Metadata</div><div class='grid'>{meta[idx]}</div>")
         if not loc_shared:
             parts.append(f"<div class='sect'>Location (gallery.encrypteddb)</div>"
-                         f"<div class='geo'>📍 {loc[idx]}</div>")
+                         f"<div class='geo'>📍 {loc[idx]}</div>{_map_html([m], media_prefix)}")
+        # the examiner's own selection — the same checkbox as the index row, same stored state
+        parts.append(
+            f"<label class='selrow' title='Mark this Memory as relevant. Shared with the Memories "
+            f"index; saved in this browser, and exportable from the index toolbar.'>"
+            f"<input type='checkbox' class='selbox' data-kind='mem' "
+            f"data-id='mem-{html.escape(m['snap_id'])}'>Selected for the case</label>")
         mem_blocks.append("<div class='mem'>" + "".join(parts) + "</div>")
 
     frows = []
@@ -1562,18 +1611,32 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
 
 
 def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                   src_root, manifest, userids, tz_label):
+                   src_root, manifest, userids, tz_label, run_id="default"):
     """Write ``pages/<key>.html`` for one group and return its path relative to the Memories dir."""
     lead = members[0]
     body = _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                                 src_root, manifest, userids)
     back = (f'<a class="back" href="../Memories_report.html#mem-{html.escape(lead["snap_id"])}">'
             '← Back to Memories index</a>')
+    # The selection controls: the same store as the index (both load ../selection.js), saved back
+    # to a file the examiner keeps — see report_ui.SELECT_JS for why that is the durable route.
+    selbar = ('<div class="subsel"><button onclick="scSelSave()" title="Download selection.js — '
+              'put it next to the reports so every report of this run loads it">💾 Save selections'
+              '</button><span class="selnote" id="selnote"></span>'
+              '<span class="selhint">ticking a Memory below marks it for the case; it is shared '
+              'with the Memories index</span></div>')
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
-           f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title><style>{_BASE_CSS}</style></head><body>'
+           f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
+           f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}</style>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>{report_ui.SELECT_JS}</script>'
+           f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
-           f'{back}{body}<script>{_HINT_JS}</script></body></html>')
+           f'{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
+           f'{report_ui.SELECT_TOOLBAR_JS}'
+           f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
+           f'scConsumeHash();</script></body></html>')
     os.makedirs(pages_dir, exist_ok=True)
     with open(os.path.join(pages_dir, f"{key}.html"), "w", encoding="utf-8") as fh:
         fh.write(doc)
@@ -1608,8 +1671,79 @@ def _cache_tokens(m):
     return toks
 
 
+def render_maps(memories, outdir, tile_server):
+    """Render a small static map for every geolocated Memory, from the examiner's tile server.
+
+    Does nothing unless ``tile_server`` is set — a forensic report never reaches out on its own.
+    Memories at the same coordinates share one image. Each memory gets ``m["map"]`` = the render
+    details (path, zoom, how many tiles came back, a link to the server at those coordinates), which
+    the detail page shows, clearly labelled as imagery from the examiner's server rather than
+    device data.
+    """
+    for m in memories.values():
+        m["map"] = None
+    if not tile_server:
+        return 0
+    fetcher = offline_maps.TileFetcher(tile_server)
+    if not fetcher.ok():
+        logger.warning(f"Unusable map tile server '{tile_server}' — no maps will be rendered")
+        return 0
+    maps_dir = os.path.join(outdir, "maps")
+    os.makedirs(maps_dir, exist_ok=True)
+    by_coord, made = {}, 0
+    for sid, m in sorted(memories.items()):
+        if m["latitude"] is None:
+            continue
+        key = (round(m["latitude"], 5), round(m["longitude"], 5))
+        if key in by_coord:
+            m["map"] = by_coord[key]
+            continue
+        name = f"{key[0]:.5f}_{key[1]:.5f}.png".replace("-", "m")
+        info = fetcher.static_map(m["latitude"], m["longitude"], os.path.join(maps_dir, name))
+        if not info:
+            continue
+        info["path"] = "maps/" + name
+        by_coord[key] = info
+        m["map"] = info
+        made += 1
+    if made:
+        logger.info(f"Rendered {made} offline map(s) from {fetcher.template} "
+                    f"({len(fetcher.cache)} tiles fetched)")
+    else:
+        logger.warning(f"No map could be rendered from {fetcher.template}")
+    return made
+
+
+def write_media_manifest(memories, outdir):
+    """Write ``media_by_cache_key.json``: CACHE_KEY -> the decrypted media file(s) recovered from it.
+
+    Memory media is stored **encrypted** in the SCContent cache, so the cache_controller report
+    cannot display those bytes; this manifest lets it link to the plaintext copy decrypted here
+    instead of leaving the examiner with an unopenable blob. Only files that came from a cache key
+    are listed (``caching-media`` packs are not indexed by ``cache_controller.db``).
+    """
+    out = {}
+    for sid, m in memories.items():
+        for f in m["media_files"]:
+            key = f.get("cache_key")
+            if not key or f.get("generated"):
+                continue
+            hashes = f.get("hashes") or [("", "", "")]
+            out.setdefault(key.lower(), []).append({
+                "path": f["path"], "role": f.get("role", ""), "ext": f.get("ext", ""),
+                "bytes": f.get("bytes", 0), "snap_id": sid,
+                "md5": hashes[0][1], "sha256": hashes[0][2],
+            })
+    try:
+        with open(os.path.join(outdir, "media_by_cache_key.json"), "w", encoding="utf-8") as fh:
+            json.dump(out, fh)
+    except Exception as error:
+        logger.debug(f"Could not write media_by_cache_key.json: {error}")
+    return out
+
+
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
-                    src_root=None, manifest=None):
+                    src_root=None, manifest=None, run_id="default"):
     """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
 
     Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
@@ -1628,7 +1762,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     pages_dir = os.path.join(outdir, "pages")
     for key, members in groups:
         render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                       src_root, manifest, userids, tz_label)
+                       src_root, manifest, userids, tz_label, run_id)
 
     # manifest for the cache_controller report's direct-to-detail links
     page_manifest = {m["snap_id"]: f"pages/{key}.html" for key, members in groups for m in members}
@@ -1638,7 +1772,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     except Exception as error:
         logger.debug(f"Could not write memory_pages.json: {error}")
 
-    # one row per memory, ordered by group then creation
+    write_media_manifest(memories, outdir)
+
+    # One row per memory, ordered by group then creation. Rows live in data/index.js and are drawn
+    # by the virtual table (scripts/report_ui.py), so the index opens instantly whatever its size.
     rows = []
     n_users = len({m["user_hash"] for m in memories.values()})
     for key, members in groups:
@@ -1658,27 +1795,49 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             zsnap = m["snap_id"]
             zentry = m["entry_other"].get("ZENTRYID") or ""
             zmedia = m["ids"].get("ZMEDIAID") or ""
-            toks = "<br>".join(html.escape(t) for t in _cache_tokens(m)) or ""
+            is_meo = bool(m["is_meo"])
+            tokens = _cache_tokens(m)
+            # the index row is one fixed-height line-up: show the first two tokens and count the
+            # rest (the detail page lists them all)
+            toks = "<br>".join(html.escape(t) for t in tokens[:2])
+            if len(tokens) > 2:
+                toks += f"<br><span class='muted'>+{len(tokens) - 2} more</span>"
             is_video = m["media_type"] == 1
             kind = "🎬" if is_video else "🖼️"
-            rows.append(
-                f"<tr class='row' id='mem-{html.escape(zsnap)}' data-hasimg='{'y' if has_img else 'n'}' "
-                f"data-user='{html.escape(str(uid))}'>"
-                f"<td class='thumb'>{thumb}</td>"
-                f"<td>{kind}</td>"
-                f"<td class='mono'>{html.escape(str(uid))}</td>"
-                f"<td class='mono idcell'>"
-                f"<div><span class='idk'>ZMEDIAID</span> {html.escape(str(zmedia))}</div>"
-                f"<div><span class='idk'>ZSNAPID</span> {html.escape(zsnap)}</div>"
-                f"<div><span class='idk'>ZENTRYID</span> {html.escape(str(zentry))}</div></td>"
-                f"<td class='mono tok'>{toks}</td>"
-                f"<td class='mono hashcell'><span class='hl'>MD5</span> {html.escape(md5)}<br>"
-                f"<span class='hl'>SHA-256</span> {html.escape(sha)}</td>"
-                f"<td data-sort='{m['created_sort']}'>{html.escape(m['create_utc'])}</td>"
-                f"<td>{_geo_compact(m)}</td>"
-                f"<td><a class='detail' href='{page_href}'>open ▸</a>"
-                f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>"
-                f"</td></tr>")
+            if is_meo:                                     # My Eyes Only — the private album
+                kind += "<div class='meo' title='My Eyes Only'>MEO</div>"
+            # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
+            # since every byte here is multiplied by the number of memories in data/index.js
+            cells = [
+                thumb,
+                kind,
+                html.escape(str(uid)),
+                f"<div><i>ZMEDIAID</i> {html.escape(str(zmedia))}</div>"
+                f"<div><i>ZSNAPID</i> {html.escape(zsnap)}</div>"
+                f"<div><i>ZENTRYID</i> {html.escape(str(zentry))}</div>",
+                toks,
+                f"<i>MD5</i> {html.escape(md5)}<br><i>SHA-256</i> {html.escape(sha)}",
+                html.escape(m["create_utc"]),
+                _geo_compact(m),
+                f"<a class='detail' href='{page_href}'>open ▸</a>"
+                f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>",
+            ]
+            searchable = [zsnap, str(zentry), str(zmedia), str(uid), md5, sha,
+                          m["create_utc"]] + list(tokens)
+            if is_meo:
+                searchable.append("meo my eyes only")
+            if m["latitude"] is not None:
+                searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
+            rows.append([
+                f"mem-{zsnap}", cells,
+                " ".join(s for s in searchable if s).lower(),
+                {"1": ("video" if is_video else "image") + ("+meo" if is_meo else ""),
+                 "2": str(uid), "3": f"{zmedia}|{zsnap}", "6": m["created_sort"]},
+                None,
+                {"user": str(uid), "img": "y" if has_img else "n",
+                 "meo": "y" if is_meo else "n"},
+            ])
+    report_ui.write_rows(os.path.join(outdir, "data"), rows)
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -1689,68 +1848,90 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
         'and My Eyes Only memories cannot be recovered, and old-schema imagery cannot be decrypted.</div>')
 
     index_css = """
- .toolbar{position:sticky;top:0;background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
-   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px;z-index:5}
+ .toolbar{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
+   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px}
  .toolbar input,.toolbar select{font-size:13px;padding:5px 8px;border:1px solid #bcbcd0;border-radius:5px}
  .toolbar input[type=search]{min-width:280px} .toolbar label{color:#555;font-weight:600}
- table.main{border-collapse:collapse;width:100%;font-size:12px}
- table.main th{background:#1f1f52;color:#fff;text-align:left;padding:7px 9px;position:sticky;top:53px;cursor:pointer;white-space:nowrap}
- table.main th .ar{opacity:.5;font-size:10px}
- table.main td{border-bottom:1px solid #e2e2ea;padding:6px 9px;vertical-align:top}
- tr.row:hover{background:#eef0ff}
- td.thumb{width:90px} td.thumb img{max-width:80px;max-height:130px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+ .vcells>.vc{font-size:12px}
+ .vc img{max-width:74px;max-height:118px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
  .nothumb{color:#bbb} .mono{font-family:ui-monospace,Consolas,monospace;font-size:11px}
- td.idcell{color:#33367a;overflow-wrap:anywhere;max-width:230px} td.idcell div{margin:1px 0}
- td.idcell .idk{color:#8a8aa0;font-weight:700;font-size:9px;letter-spacing:.03em;margin-right:5px}
- td.tok{color:#555;max-width:150px;overflow-wrap:anywhere}
- td.hashcell{color:#555;max-width:300px;overflow-wrap:anywhere} td.hashcell .hl{color:#2d2d71;font-weight:700}
+ /* per-column styling for the index rows (keeps the row data in data/index.js markup-free) */
+ .vcells>.vc.c1{font-size:16px;line-height:1.1}
+ .vcells>.vc.c1 .meo{background:#8a1f1f;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
+   letter-spacing:.04em;padding:1px 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2,.vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5{
+   font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
+ .vcells>.vc.c3{color:#33367a} .vcells>.vc.c3 div{margin:1px 0}
+ .vcells>.vc.c3 i{color:#8a8aa0;font-weight:700;font-size:9px;letter-spacing:.03em;
+   margin-right:5px;font-style:normal}
+ .vcells>.vc.c4,.vcells>.vc.c5{color:#555}
+ .vcells>.vc.c5 i{color:#2d2d71;font-weight:700;font-style:normal}
  a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap} a.detail:hover{text-decoration:underline}
  .nsnaps{color:#888;font-size:10.5px;white-space:nowrap} .muted{color:#999}
 """
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
-           f'<style>{_BASE_CSS}{index_css}</style></head><body>'
+           f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
+           f'{report_ui.SELECT_CSS}</style>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>{report_ui.SELECT_JS}</script>'
+           f'<script src="../selection.js"></script>'
+           f'<script>{report_ui.VTABLE_JS}</script></head><body>'
            f'<header><h1>Snapchat Memories — index</h1>'
            f'<div class="sum">{n_users} user profile(s) &middot; {total} memories &middot; {linked} with '
            f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
            f'times in <b>{html.escape(tz_label)}</b></div></header>'
            f'{banner}'
-           f'<div class="toolbar">'
+           f'{report_ui.missing_data_banner("Memories_report.html")}'
+           f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, user…" oninput="flt()">'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
            f'<label>Thumbnail <select id="img" onchange="flt()"><option value="">any</option>'
            f'<option value="y">with</option><option value="n">without</option></select></label>'
+           f'<label title="My Eyes Only — Snapchat&#39;s private, separately-encrypted album">'
+           f'My Eyes Only <select id="meo" onchange="flt()"><option value="">any</option>'
+           f'<option value="y">only MEO</option><option value="n">exclude MEO</option>'
+           f'</select></label>'
            f'<span id="count" style="color:#555"></span></div>'
-           f'<table class="main" id="tbl"><thead><tr>'
-           f'<th>Thumb</th><th onclick="srt(1)">Kind <span class="ar">↕</span></th>'
-           f'<th onclick="srt(2)">User <span class="ar">↕</span></th>'
-           f'<th onclick="srt(3)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></th>'
-           f'<th>Cache tokens</th>'
-           f'<th>Media MD5 / SHA-256</th>'
-           f'<th onclick="srt(6)">Created <span class="ar">↕</span></th>'
-           f'<th>Geolocation</th><th>Detail</th></tr></thead>'
-           f'<tbody>{"".join(rows)}</tbody></table>'
-           f'<script>{_HINT_JS}'
-           'function flt(){'
-           'var q=document.getElementById("q").value.toLowerCase();'
-           'var u=document.getElementById("user").value,im=document.getElementById("img").value;'
-           'var rows=document.querySelectorAll("#tbl tbody tr.row"),n=0;'
-           'rows.forEach(function(r){'
-           'var ok=(!q||r.textContent.toLowerCase().indexOf(q)>-1)&&(!u||r.dataset.user===u)'
-           '&&(!im||r.dataset.hasimg===im);'
-           'r.style.display=ok?"":"none";if(ok)n++;});'
-           'document.getElementById("count").textContent=n+" shown";}'
-           'function srt(col){var tb=document.querySelector("#tbl tbody");'
-           'var rows=Array.prototype.slice.call(tb.querySelectorAll("tr.row"));'
-           'var dir=tb.getAttribute("data-dir")==="asc"?1:-1;tb.setAttribute("data-dir",dir===1?"desc":"asc");'
-           'rows.sort(function(a,b){var ca=a.children[col],cb=b.children[col];'
-           'var va=ca.getAttribute("data-sort"),vb=cb.getAttribute("data-sort");'
-           'if(va!==null&&vb!==null)return (Number(va)-Number(vb))*dir;'
-           'return ca.textContent.localeCompare(cb.textContent)*dir;});'
-           'rows.forEach(function(r){tb.appendChild(r);});}'
-           'flt();'
-           'if(location.hash){var el=document.querySelector(location.hash.replace(/[^#\\w-]/g,""));'
-           'if(el){el.scrollIntoView();el.style.background="#fff6cc";}}'
+           f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
+           f'<div class="pager" id="pager"></div>'
+           f'<div class="vhdr" id="vhdr" style="grid-template-columns:30px {MEM_COLS}">'
+           f'<div class="vc sel"><input type="checkbox" class="selall"'
+           f' title="Select / unselect every memory matching the current filters"'
+           f' onclick="SCV.selectShown(this.checked)"></div>'
+           f'<div class="vc nosort">Thumb</div>'
+           f'<div class="vc" onclick="SCV.setSort(1)">Kind <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(2)">User <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(3)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></div>'
+           f'<div class="vc nosort">Cache tokens</div>'
+           f'<div class="vc nosort">Media MD5 / SHA-256</div>'
+           f'<div class="vc" onclick="SCV.setSort(6)">Created <span class="ar">↕</span></div>'
+           f'<div class="vc nosort">Geolocation</div><div class="vc nosort">Detail</div></div></div>'
+           f'<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div>'
+           f'<div class="vwin" id="vwin"></div></div>'
+           f'<div class="vempty" id="vempty" style="display:none">No memory matches the current filters.</div>'
+           f'<script src="data/index.js"></script>'
+           f'<script>{_HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
+           'var flt_t=0;'
+           'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
+           'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
+           f'empty:"vempty",pager:"pager",pageSize:500,selKind:"mem",'
+           f'rowHeight:{MEM_ROW_H},cols:"{MEM_COLS}",detailBase:null,'
+           'query:function(){return document.getElementById("q").value;},'
+           'match:function(m,r){var u=document.getElementById("user").value,'
+           'im=document.getElementById("img").value,mo=document.getElementById("meo").value;'
+           'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)'
+           '&&(!document.getElementById("selonly").checked||SCSel.get("mem",r[0]));},'
+           'selectedOnly:function(){return document.getElementById("selonly").checked;},'
+           'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
+           'scSelNote();},'
+           'count:function(n,t){document.getElementById("count").textContent='
+           'n===t?(n+" memories"):(n+" of "+t+" shown");},'
+           'reset:function(){document.getElementById("q").value="";'
+           'document.getElementById("user").value="";document.getElementById("img").value="";'
+           'document.getElementById("meo").value="";'
+           'document.getElementById("selonly").checked=false;}});'
+           'scSelNote();scConsumeHash();'
            '</script></body></html>')
 
     report = os.path.join(outdir, "Memories_report.html")
@@ -1761,7 +1942,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 
 # --------------------------------------------------------------------------- entry
 
-def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None):
+def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
+         tile_server=""):
     """
     Build a Memories media report.
 
@@ -1776,6 +1958,9 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     src_root    : the extraction root the files were unzipped under. Source paths in the report
                   are shown relative to it (as they appear inside the extraction archive). When
                   omitted, paths fall back to anchoring on a known device-tree root.
+    tile_server : URL of an **offline** XYZ map tile server the examiner runs (server root or a
+                  ``{z}/{x}/{y}`` template). Only when given, each geolocated Memory's detail page
+                  gets a small map rendered from it. Nothing is fetched otherwise.
     """
     app = find_app_container(app_or_root)
     # When no src_root is given (e.g. the standalone CLI), device_path() falls back to anchoring
@@ -1815,9 +2000,14 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
         for f in m["media_files"]:
             f["path"] = "media/" + f["out"]
 
+    render_maps(all_memories, outdir, tile_server)
+
+    reports_root = os.path.dirname(os.path.abspath(outdir))
+    run = report_ui.run_id(reports_root)
+    report_ui.write_selection_stub(reports_root, run)       # shared by every report of the run
     report, linked, located = generate_report(all_memories, outdir, keychain_available,
                                               userids=map_userids(app), tz_label=tz_label,
-                                              src_root=src_root, manifest=manifest)
+                                              src_root=src_root, manifest=manifest, run_id=run)
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 
