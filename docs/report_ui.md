@@ -92,6 +92,15 @@ ellipsize) and what a virtual row does — the popover came out cut off, or invi
 is not clipped by an overflow ancestor. It is closed on any click, and on scroll or resize, since a
 fixed popover would otherwise stay put while the page moves under it.
 
+## Media inside an expanded row
+
+An expanded row is measured as soon as it is in the DOM, so media that resizes the row *after* it
+loads leaves every offset below it wrong — the symptom is scrolling that jumps. Media in a detail
+panel therefore calls `SCV.remeasure()` when it loads, and previews are capped so an expanded row
+stays a sensible size. `remeasure()` only measures: re-rendering would rewrite the window's
+`innerHTML`, which recreates those media elements, which fire their load event again — an endless
+loop. `measure()` rebuilds only when a height really changed, so it settles after one round.
+
 ## Clicking inside a row
 
 In the cache_controller table a row toggles its detail when clicked, but clicks on a **link**, a

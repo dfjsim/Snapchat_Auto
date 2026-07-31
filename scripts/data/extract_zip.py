@@ -1,4 +1,5 @@
 from zipfile import ZipFile
+import fnmatch
 import sys
 import glob
 import os
@@ -50,6 +51,22 @@ def discover_snapchat_containers(zip1, names):
     return data_uuids, group_guids
 
 
+def wanted(path, patterns):
+    """Whether a ZIP entry is one we extract.
+
+    A pattern is matched as a plain substring, or — when it contains ``*`` — as a glob against the
+    whole path, so a folder whose name varies (``com.snap.file_manager_*_SCContent_*``) can be
+    named once instead of being spelled out.
+    """
+    for pattern in patterns:
+        if "*" in pattern:
+            if fnmatch.fnmatch(path.replace("\\", "/"), f"*{pattern}*"):
+                return True
+        elif pattern in path:
+            return True
+    return False
+
+
 def extract(file_name, mode, dest="."):
 
     def _out(rel):
@@ -58,7 +75,14 @@ def extract(file_name, mode, dest="."):
     ios_files = [
         "Documents/user_scoped",  ### Filer som behövs från iOS
         "Documents/global_scoped",
-        "Documents/com.snap.file_manager_3_SCContent_",
+        # Every SCContent cache folder, not just one. The folder name varies: the number is a
+        # file-manager generation (3, 4, …) and the suffix is usually — but NOT always — the
+        # account's user id, so a device can carry e.g. both
+        # "com.snap.file_manager_3_SCContent_<uuid>" and "com.snap.file_manager_4_SCContent_".
+        # Matching only the first spelling left those files in the ZIP, which made their
+        # cache_controller entries look like files that were not on the device.
+        "Documents/com.snap.file_manager_*_SCContent_*",
+        "Library/Caches/com.snap.file_manager_*_SCContent_*",
         "Documents/user.plist",
         "Documents/contentmanagerV3_",
         "Library/Caches/SCPersistentMedia",
@@ -112,7 +136,7 @@ Rename the folder and run again to extract Snapchat data from zip
         if mode == "android":
             try:
                 for i in files_in_zip:
-                    if any(int_file in i for int_file in files_to_extract):
+                    if wanted(i, files_to_extract):
                         try:
                             index = i.find("com.snapchat.android")
                             if index == -1:
@@ -168,7 +192,7 @@ Rename the folder and run again to extract Snapchat data from zip
                 for i in files_in_zip:
                     if not _in_snapchat(i):
                         continue
-                    if any(int_file in i for int_file in files_to_extract):
+                    if wanted(i, files_to_extract):
                         try:
                             try:
                                 index = i.find("Application")

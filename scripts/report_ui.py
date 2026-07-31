@@ -426,6 +426,12 @@ PAGE_CSS = """
  .chip.warn{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983}
  a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap}
  a.detail:hover{text-decoration:underline}
+ /* "open" is an action, not a word in a sentence: it reads as a button, like the cache_controller
+    report's chips, so it is obvious the row has a page behind it */
+ a.openbtn{display:inline-flex;align-items:center;gap:4px;text-decoration:none;font-weight:700;
+   font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:10px;
+   padding:3px 9px;white-space:nowrap}
+ a.openbtn:hover{background:#d5deff;border-color:#8f9fe0}
 """
 
 # --------------------------------------------------------------------------- virtual table
@@ -607,11 +613,19 @@ function render(){
  win.style.top=cum[a]+'px';
  win.innerHTML=h.join('');
  lastA=a;lastB=b;dirty=false;
- measure(a,b);}
+ measure();}
+
+/* Re-measure the open rows after something inside one changed size — an image or a video that
+   finished loading, say. Without this the row keeps the height it had while the media was still
+   blank, and every offset below it is wrong, which is what makes scrolling jump.
+   It must only *measure*: re-rendering unconditionally would rewrite the window's innerHTML, which
+   recreates those media elements, which fire their load event again — an endless loop. measure()
+   rebuilds only when a height really changed, so this settles after one round. */
+function remeasure(){measuring=0;measure();}
 
 /* An expanded row's real height is only known once it is in the DOM: measure it, remember it and
    rebuild the offsets when it differs from what we assumed. */
-function measure(a,b){
+function measure(){
  if(measuring>3)return;
  var changed=false,kids=win.children;
  for(var j=0;j<kids.length;j++){
@@ -724,7 +738,7 @@ function scrollTo(i){
  dirty=true;render();}
 
 return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
-        expandAll:expandAll,goTo:goTo,hasRow:hasRow,selectShown:selectShown,
+        expandAll:expandAll,goTo:goTo,hasRow:hasRow,selectShown:selectShown,remeasure:remeasure,
         setPage:setPage,setPageSize:setPageSize,page:function(){return page;},
         pages:pageCount,count:function(){return view.length;}};
 })();

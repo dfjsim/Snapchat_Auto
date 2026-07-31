@@ -162,6 +162,14 @@ accounts):
   virtualization row anywhere. It is an orphan: most likely a consolidated ("defragmented") copy
   materialized in the active account's file-manager scope during playback/use, not a second Memory.
 
+**Those files are now listed.** Any cache file on disk that no row of `cache_controller.db` leads to
+gets its own entry, in the category **"Not in the index"** (`orphan_entries`): the report would
+otherwise only show what the index remembers, and a recovered file it has forgotten would be
+invisible. Such an entry has no `EXTERNAL_KEY`, no owning account and no timestamps — only the
+bytes, their hashes and what the content itself shows — and says so. A file is only an orphan when
+**none** of the indexed entries resolved to it, so a bundle's children and a sharded file's
+byte-range parts stay under their parent.
+
 Implications for the report / examiner:
 
 * The report's **on-disk resolution lists every matching copy** across all SCContent folders
