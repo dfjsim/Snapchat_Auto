@@ -11,8 +11,9 @@
     `ParseSnapchat_iOS.main` (move the attachment copying to the Conversations report), the
     "Communications (legacy)" entry in `write_index`, and the v2 branch of
     `cache_controller_report.load_chat_links`.
-- Known limitation inherited from the parser: when a message has an attachment its text is
-  replaced by that attachment, so text sent *with* media is not shown by either report.
+- [FIXED-v1.5.0] Text sent *with* media used to be lost (the parser replaced the message content
+  with the attachment). The parsed content is now preserved as "Message Text" and the Conversations
+  report shows it; the legacy report still shows only the attachment.
 
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.

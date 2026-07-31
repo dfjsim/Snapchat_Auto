@@ -18,7 +18,9 @@ def mergeFiles(files, directory):
 
 
 def getCache(folder):
-    foundDir = glob.glob(folder + "/Documents/com.snap.file_manager_3_SCContent_*")
+    # every SCContent cache folder — the generation number and the account suffix both vary
+    foundDir = (glob.glob(folder + "/Documents/com.snap.file_manager_*_SCContent_*")
+                + glob.glob(folder + "/Library/Caches/com.snap.file_manager_*_SCContent_*"))
     for dir in foundDir:
         fileList = list(filter(pattern.match, os.listdir(dir)))
         for file in fileList:

@@ -50,9 +50,9 @@ by the **message table**, which is the same virtual table as the index:
 | Msg ID | `server_message_id` + `.` + the part index (e.g. `12.0`), with the device's own `client_message_id` under it |
 | Read | the read timestamp, empty when the message was never read |
 
-Expanding a row shows the full text, **each** attachment full size (image or `<video>`) with its
-name, detected type, size, **MD5 and SHA-256**, where it was published from and the link to its
-`cache_controller` entry, and every raw row value — including **both** message identifiers, both
+Expanding a row shows the full text, **each** attachment as a capped preview (150 px tall, with a
+link to open it full size) plus its name, detected type, size, **MD5 and SHA-256**, where it was
+published from and the link to its `cache_controller` entry, and every raw row value — including **both** message identifiers, both
 conversation identifiers, and both the stored UTC timestamp and the converted one, so the
 conversion can be checked. The sender links to that contact's record.
 
@@ -153,9 +153,21 @@ whose claim has no renderable file is one of those duplicates and is dropped, ex
 report drops it. Every other row is kept even when its file is missing: a message whose media was
 not recovered is a finding, not noise.
 
-**Known limitation (inherited).** When a message has an attachment, the parser replaces its content
-with that attachment, so any text the same message carried is not shown. The "?" on the Content
-column says so.
+### Text sent with media
+The parser replaces a message's content with its attachment, which used to destroy any text the
+message also carried. `mergeCacheChats` now keeps a copy of the parsed content first
+(`Message Text`), so a caption sent with a photo appears next to it in the row and in the expanded
+detail.
+
+Most media rows carry a *technical* value there rather than anything the user typed — the parser
+lifts whatever string it finds in the protobuf, which for media is the media id or the cache claim's
+`EXTERNAL_KEY` — so `_own_text` drops values that are a cache key, an `EXTERNAL_KEY`, a bare UUID or
+the attachment's own file name. Nothing is hidden: the expanded row always lists the raw value as
+`message_content (parsed)`.
+
+A message whose protobuf `getChats` could not parse is marked **⚠ not parsed** instead of showing
+the parser's error string as if it were the message; the expanded row explains it and gives the ids
+to check in `arroyo.db`.
 
 ## Cross-report links
 

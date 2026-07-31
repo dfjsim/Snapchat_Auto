@@ -85,6 +85,39 @@ COL_CREATED = "Creation Timestamp UTC+0"
 COL_READ = "Read Timestamp UTC+0"
 COL_SMID = "Server Message ID"
 COL_CMID = "Client Message ID"                                 # optional
+COL_TEXT = "Message Text"                                      # the parsed text, kept by the parser
+                                                               # before the attachment replaced it
+
+# What getChats writes when a message's protobuf could not be parsed.
+_PARSE_ERROR = "ERROR - Something went wrong when parsing this message"
+
+# An EXTERNAL_KEY-shaped value: "<type>:<conversation uuid>:<message>:<part>".
+_EXTKEY_RE = re.compile(r"^[^:]*:[0-9a-fA-F-]{36}:\d+")
+
+
+def _own_text(raw, atts, conv_id):
+    """The message's **own** text, or "" when the parsed value is not text at all.
+
+    When a message has a cached attachment the parser replaces its content with that attachment, so
+    the only surviving copy of what the message said is the parsed value kept alongside it — but for
+    most media rows that value is a technical token rather than anything the user typed (the parser
+    lifts whatever string it finds in the protobuf, which for media is the media id or the cache
+    claim's EXTERNAL_KEY). Those are recognised and dropped here rather than shown as if they were
+    the message; the raw value is still listed in the row's detail, so nothing is hidden.
+    """
+    text = cell(raw)
+    if not text or text.startswith(_PARSE_ERROR):
+        return ""
+    low = text.strip()
+    if any(low == a["name"] for a in atts):                    # the attachment's own file name
+        return ""
+    if re.fullmatch(r"[0-9a-fA-F]{32}", low):                  # a cache key
+        return ""
+    if _EXTKEY_RE.match(low) or (conv_id and conv_id.lower() in low.lower()):
+        return ""                                              # a cache claim's EXTERNAL_KEY
+    if _UUID_RE.match(low):                                    # a bare media / message id
+        return ""
+    return text
 
 # Index-table geometry (one fixed row height + one column track list for the header and every row).
 CONV_COLS = ("86px minmax(160px,1.1fr) minmax(170px,1.2fr) 66px 66px 152px 152px 250px 96px")
@@ -300,10 +333,10 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
     dropped = skipped_conv = 0
     if msg_df is None or len(msg_df) == 0:
         return by_conv, {"dropped": 0, "skipped_conv": 0}
-    if COL_CONV not in getattr(msg_df, "columns", []):
+    columns = list(getattr(msg_df, "columns", []))
+    if COL_CONV not in columns:
         logger.warning(f"Conversations: the message frame has no '{COL_CONV}' column "
-                       f"({list(getattr(msg_df, 'columns', []))}) — no conversation can be built "
-                       f"from it")
+                       f"({columns}) — no conversation can be built from it")
         return by_conv, {"dropped": 0, "skipped_conv": len(msg_df)}
     for _index, row in msg_df.iterrows():
         conv_id = cell(row.get(COL_CONV))
@@ -331,6 +364,9 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         outgoing = bool(sender != sender_plain
                         or (sender_plain and (sender_plain.lower() in owner_lc
                                               or sender_plain.lower() == owner_id_lc)))
+        # the parsed message content: kept by the parser before the attachment overwrote it, and
+        # equal to the content itself for a row that has no attachment
+        raw_text = cell(row.get(COL_TEXT)) if COL_TEXT in columns else ("" if att else content)
         by_conv.setdefault(conv_id, []).append({
             "smid": cell(row.get(COL_SMID)),
             "cmid": _id_str(row.get(COL_CMID)),
@@ -338,7 +374,9 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "sender_bold": sender != sender_plain,
             "direction": "Sent" if outgoing else ("Received" if sender_plain else ""),
             "types": [ctype] if ctype else [],
-            "text": None if att else content,
+            "text": _own_text(raw_text, [att] if att else [], conv_id),
+            "raw_text": raw_text,
+            "parse_error": bool(raw_text.startswith(_PARSE_ERROR)),
             "atts": [att] if att else [],
             "created_utc": created_utc,
             "created": timefmt(created_unix - _COCOA_EPOCH) if created_unix else "",
@@ -397,8 +435,11 @@ def _merge_rows(rows):
                 first["types"].append(ctype)
         # a row that carried the text keeps it (the row a claim was joined onto has the file
         # instead), and a row that actually has a timestamp beats a cache-only row's "Unknown"
-        if first["text"] in (None, "") and row["text"]:
+        if not first["text"] and row["text"]:
             first["text"] = row["text"]
+        if not first["raw_text"] and row["raw_text"]:
+            first["raw_text"] = row["raw_text"]
+        first["parse_error"] = first["parse_error"] and row["parse_error"]
         if not first["created_unix"] and row["created_unix"]:
             for key in ("created_utc", "created", "created_unix", "read_utc", "read"):
                 first[key] = row[key]
@@ -462,7 +503,9 @@ def load_arroyo_conversations(arroyo, msg_df=None):
     return out
 
 
-_OWNER_BADGE = ('<span class="ownerdot" title="the account this extraction came from">'
+# The leading space is deliberate: without whitespace in the text, a double-click on the name next
+# to the badge selects into the badge's words too (the same reason the Memories ID labels carry one).
+_OWNER_BADGE = (' <span class="ownerdot" title="the account this extraction came from">'
                 'device owner</span>')
 
 
@@ -674,13 +717,21 @@ _REPORT_CSS = """
  .multi{background:#eef0ff;border:1px solid #c9cdf0;color:#2d2d71;border-radius:5px;
    padding:5px 9px;font-size:12px;margin-top:6px}
  .cmid{color:#8a8aa0;font-size:10px}
+ .parsefail{color:#8a5a00;background:#fff3d6;border:1px solid #e6c983;border-radius:8px;
+   padding:0 6px;font-size:10.5px;font-weight:600;white-space:nowrap;margin-left:4px}
+ .warn-inline{background:#fff3d6;border-color:#e6c983;color:#8a5a00}
  .vcells>.vc.c5 .filebtn{margin-right:4px}
  .mdet{font-size:12.5px}
- .mdet .body{background:#fff;border:1px solid #e2e2ea;border-radius:6px;padding:8px 10px;
+ .body{background:#fff;border:1px solid #e2e2ea;border-radius:6px;padding:8px 10px;
    margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:900px}
- .mdet video{max-width:420px;max-height:320px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
- .mdet img.full{max-width:420px;max-height:420px;border-radius:6px;
-   box-shadow:0 1px 4px rgba(0,0,0,.25)}
+ /* The preview is capped rather than shown full size: an expanded message has to stay small enough
+    to read the conversation around it, and a row whose height changes after the media loads is what
+    made scrolling jump (the media tells the table to re-measure — see SCV.remeasure). */
+ .shot{max-height:150px;margin-top:6px;display:flex;align-items:flex-start}
+ .shot img,.shot video{max-height:150px;max-width:280px;border-radius:6px;
+   box-shadow:0 1px 4px rgba(0,0,0,.25);object-fit:contain}
+ .shotcap{font-size:11px;margin-top:3px}
+ .shotcap a{color:#2d2d71}
  .foot{padding:14px 24px;color:#777;font-size:11.5px}
 """
 
@@ -734,10 +785,20 @@ _TYPE_HINT = ("\"Text\" is arroyo.db conversation_message.content_type = 1. The 
               "3 (video of unknown source) / 5 (sticker). \"local_message_reference\" means the "
               "attachment was resolved through the row's local_message_references plist.")
 
-_CONTENT_HINT = ("Text comes from the parsed conversation_message.message_content protobuf. When a "
-                 "message has a cached attachment, the parser replaces the content with that "
-                 "attachment, so the row shows the file rather than any text the message also "
-                 "carried — open the row for the file's name, type, size and hashes.")
+_PARSE_FAIL_HINT = (
+    "getChats could not read this message's conversation_message.message_content protobuf, so the "
+    "parser stored an error marker in place of the text. The row is still listed with everything "
+    "else that is known about it (sender, timestamps, ids, any attachment). Verify the message "
+    "directly in arroyo.db with the conversation and message ids shown below.")
+
+_TEXT_HINT = (
+    "The message text as the parser read it. When a message has a cached attachment the parser "
+    "replaces the message content with that attachment, so the text shown here is the copy taken "
+    "before that happened. Values that are not text at all — a cache key, a cache claim's "
+    "EXTERNAL_KEY, a bare media id — are not shown as a message; the raw parsed value is always in "
+    "the expanded row under \"message_content (parsed)\".")
+
+_CONTENT_HINT = "The message text and every cached file the message carries. " + _TEXT_HINT
 
 _SENDER_HINT = ("arroyo.db conversation_message.sender_id, replaced with the matching contact's "
                 "username by the parser (fixSenders) when the friends list has one — otherwise the "
@@ -760,13 +821,20 @@ def _attachment_detail(att, prefix, index=None, total=1):
     parts.append(f'<div class="sect">{label}</div>')
     if att["rel"] and att["bytes"]:
         url = _esc(prefix + att["rel"])
+        # The preview sits in a box of a **fixed height**, and tells the table to re-measure once it
+        # has loaded. An expanded row is measured as soon as it is in the DOM, so media that resizes
+        # the row after loading leaves every offset below it wrong — which is what made scrolling
+        # jump — and a full-size preview pushed the rest of the conversation off the screen.
         if att["kind"] == "image":
-            parts.append(f'<div><a href="{url}" target="_blank">'
-                         f'<img class="full" src="{url}" loading="lazy"></a></div>')
+            parts.append(f'<div class="shot"><a href="{url}" target="_blank">'
+                         f'<img src="{url}" loading="lazy" onload="SCV.remeasure()"></a></div>'
+                         f'<div class="shotcap"><a href="{url}" target="_blank">'
+                         f'open the full-size {_esc(att["ext"])} &#8599;</a></div>')
         elif att["kind"] == "video":
-            parts.append(f'<div><video controls preload="metadata" src="{url}"></video>'
-                         f'<div><a href="{url}" target="_blank">open {_esc(att["ext"])} in a '
-                         f'new tab</a></div></div>')
+            parts.append(f'<div class="shot"><video controls preload="metadata" src="{url}" '
+                         f'onloadedmetadata="SCV.remeasure()"></video></div>'
+                         f'<div class="shotcap"><a href="{url}" target="_blank">'
+                         f'open the {_esc(att["ext"])} in a new tab &#8599;</a></div>')
         else:
             parts.append(f'<div><a class="filebtn" href="{url}" target="_blank">'
                          f'open {_esc(att["ext"] or "file")}</a>'
@@ -804,9 +872,12 @@ def _attachment_detail(att, prefix, index=None, total=1):
 def _message_detail(msg, conv, prefix="../", contact_links=None):
     """The expandable per-message block: full text / media, hashes, provenance."""
     parts = []
-    if msg["text"] is not None and cell(msg["text"]):
+    if msg["text"]:
         parts.append('<div class="sect">Message text</div>'
                      f'<div class="body">{text_html(msg["text"])}</div>')
+    if msg["parse_error"]:
+        parts.append('<div class="multi warn-inline">The message body could not be parsed'
+                     + report_ui.info_icon(_PARSE_FAIL_HINT) + '</div>')
     atts = msg["atts"]
     if len(atts) > 1:
         parts.append(f'<div class="multi">This message carries <b>{len(atts)} cached files</b> — '
@@ -819,7 +890,7 @@ def _message_detail(msg, conv, prefix="../", contact_links=None):
                      + '</div>')
     for n, att in enumerate(atts, 1):
         parts.append(_attachment_detail(att, prefix, n, len(atts)))
-    if not atts and (msg["text"] is None or not cell(msg["text"])):
+    if not atts and not msg["text"] and not msg["parse_error"]:
         parts.append('<div class="muted">This row carries neither text nor a recovered '
                      'attachment.</div>')
 
@@ -841,6 +912,8 @@ def _message_detail(msg, conv, prefix="../", contact_links=None):
         ("client_message_id", _esc(msg["cmid"]), "mono"),
         ("sender_id", sender, ""),
         ("content_type", _esc(" + ".join(msg["types"])), ""),
+        ("message_content (parsed)", text_html(msg["raw_text"]) if msg["raw_text"]
+         else '<span class="muted">empty</span>', ""),
         ("creation_timestamp (UTC, as stored)", _esc(msg["created_utc"]), "mono"),
         ("creation_timestamp (report timezone)", _esc(msg["created"]), ""),
         ("read_timestamp (UTC, as stored)", _esc(msg["read_utc"]), "mono"),
@@ -858,13 +931,16 @@ def _message_rows(conv, chunk_of):
         atts = msg["atts"]
         # every file of the message, side by side — a message is one row however many it carries
         content = "".join(_attachment_cell(a) for a in atts)
-        text = cell(msg["text"])
+        text = msg["text"]
         if text:
             # the row is one fixed height, so only about this much of a message is ever visible:
             # keep the cell small and leave the full text to the expanded detail (every byte here
             # is multiplied by the message count)
             clipped = text[:200] + " …" if len(text) > 200 else text
             content = f'<span class="msgtext">{text_html(clipped)}</span>' + content
+        if msg["parse_error"]:
+            content += ('<span class="parsefail" title="the message body could not be parsed — '
+                        'open the row">&#9888; not parsed</span>')
         if not content:
             content = '<span class="muted">—</span>'
         direction = msg["direction"]
@@ -889,7 +965,7 @@ def _message_rows(conv, chunk_of):
             _esc(msg["read"]),
         ]
         searchable = [msg["sender"], types, msg["smid"], msg["cmid"], msg["created_utc"],
-                      msg["read_utc"], msg["created"], text]
+                      msg["read_utc"], msg["created"], text, msg["raw_text"]]
         for att in atts:
             searchable += [att["name"], att["ext"], att["md5"], att["sha256"],
                            att["cache_key"] or ""]
@@ -1088,7 +1164,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
             _esc(_first_last(conv, "first")),
             _esc(_first_last(conv, "last")),
             f'<span class="cid">{_esc(conv["id"])}</span>',
-            f'<a class="detail" href="{_esc(conv["page"])}#conv-{_esc(conv["id"])}">open &#9656;</a>',
+            f'<a class="openbtn" target="scauto_conv_page" title="open this conversation in its '
+            f'own tab" href="{_esc(conv["page"])}#conv-{_esc(conv["id"])}">open &#9656;</a>',
         ]
         labels = [p["label"] for p in parts]
         searchable = [conv["id"], conv["server_id"], conv["title"], conv["kind"]] + labels

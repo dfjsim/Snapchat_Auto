@@ -1515,9 +1515,9 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     media_id = lead["ids"].get("ZMEDIAID")
     idrows = []
     if media_id:
-        idrows.append(f"<div class='idrow'><span class='idlab'>Media ID</span>"
+        idrows.append(f"<div class='idrow'><span class='idlab'>Media ID</span> "
                       f"<span class='idval'>{html.escape(str(media_id))}</span></div>")
-    idrows.append(f"<div class='idrow'><span class='idlab'>Memories</span>"
+    idrows.append(f"<div class='idrow'><span class='idlab'>Memories</span> "
                   f"<span class='idval'>{len(members)}</span></div>")
     idband = f"<div class='idband'>{''.join(idrows)}</div>"
     sharebar = ("" if single else
@@ -1542,7 +1542,7 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     for idx, m in enumerate(members):
         uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:12] + "…")
         parts = [f"<div id='mem-{html.escape(m['snap_id'])}'>"
-                 f"<span class='snaplab'>Snap ID</span>"
+                 f"<span class='snaplab'>Snap ID</span> "
                  f"<span class='snapid'>{html.escape(m['snap_id'])}</span></div>"
                  f"<div class='mono' style='font-size:11px;color:#666;margin:2px 0 4px'>user {html.escape(str(uid))}</div>",
                  f"<div class='cols2'>"
@@ -1819,7 +1819,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 f"<i>MD5</i> {html.escape(md5)}<br><i>SHA-256</i> {html.escape(sha)}",
                 html.escape(m["create_utc"]),
                 _geo_compact(m),
-                f"<a class='detail' href='{page_href}'>open ▸</a>"
+                f"<a class='openbtn' target='scauto_memory_page' "
+                f"title='open this memory in its own tab' href='{page_href}'>open ▸</a>"
                 f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>",
             ]
             searchable = [zsnap, str(zentry), str(zmedia), str(uid), md5, sha,
@@ -1867,6 +1868,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .vcells>.vc.c4,.vcells>.vc.c5{color:#555}
  .vcells>.vc.c5 i{color:#2d2d71;font-weight:700;font-style:normal}
  a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap} a.detail:hover{text-decoration:underline}
+ a.openbtn{display:inline-flex;align-items:center;gap:4px;text-decoration:none;font-weight:700;
+   font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:10px;
+   padding:3px 9px;white-space:nowrap}
+ a.openbtn:hover{background:#d5deff;border-color:#8f9fe0}
  .nsnaps{color:#888;font-size:10.5px;white-space:nowrap} .muted{color:#999}
 """
 

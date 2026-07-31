@@ -299,6 +299,26 @@ def path_to_image_html(filename):
         return
 
 
+def sccontent_folders(app, user_id=""):
+    """Every ``com.snap.file_manager_*_SCContent_*`` cache folder under the app container.
+
+    The folder name varies in two ways: ``file_manager_<n>`` is a generation (3, 4, …) and the
+    suffix after ``SCContent_`` is *usually* the account's user id but can be empty. A device can
+    therefore hold several of them at once, and matching only one spelling loses whatever is in the
+    others. The folder belonging to ``user_id`` is returned first so it wins any lookup by name.
+    """
+    found = []
+    for pattern in ("/Documents/com.snap.file_manager_*_SCContent_*",
+                    "/Library/Caches/com.snap.file_manager_*_SCContent_*"):
+        for path in glob.glob(app + pattern):
+            if os.path.isdir(path):
+                found.append(path.replace("\\", "/") + "/")
+    found.sort(key=lambda p: (0 if user_id and user_id in p else 1, p))
+    if found:
+        logger.info(f"SCContent cache folder(s): {', '.join(ntpath.basename(p.rstrip('/')) for p in found)}")
+    return found
+
+
 def getUserID(userPlist):
     try:
         if os.path.exists(userPlist):
@@ -1093,27 +1113,22 @@ def mergeCache(df_cache, df_content):
         # con = sqlite3.connect("merge.db")
         # df_merge.to_sql("test", con)
         
-        sccontent_folder = SCContentFolder or ""
         output_directory = outputDir or "."
         cache_output_dir = os.path.join(output_directory, "cacheFiles")
         os.makedirs(cache_output_dir, exist_ok=True)
 
-        foundFiles = []
-        if isinstance(SCContentFolder, list):
-            logger.info(f"Getting cache files from {len(SCContentFolder)} SCContent folders")
-            for folder in SCContentFolder:
-                if folder:
-                    files = glob.glob(os.path.join(folder, "*"))
-                    foundFiles.extend(files)
-        else:
-            folder_name = os.path.basename(os.path.dirname(sccontent_folder.rstrip("/"))) if sccontent_folder else "unknown"
-            logger.info(f"Getting cache files from {folder_name}")
-            foundFiles = glob.glob(os.path.join(sccontent_folder, "*")) if sccontent_folder else []
-        tmp = []
-        for item in foundFiles:
-            item = item.replace("\\", "/")
-            tmp.append(item)
-        foundFiles = tmp
+        # A device can have several SCContent cache folders (the file-manager generation and the
+        # account suffix both vary — see sccontent_folders()), and a chat attachment may live in any
+        # of them, so they are indexed by filename and looked up by CACHE_KEY. Previously only one
+        # folder was searched, and the multi-folder branch never actually resolved a file.
+        folders = SCContentFolder if isinstance(SCContentFolder, list) else [SCContentFolder]
+        folders = [f for f in folders if f]
+        by_name = {}
+        for folder in folders:
+            for path in glob.glob(os.path.join(folder, "*")):
+                by_name.setdefault(os.path.basename(path), path.replace("\\", "/"))
+        logger.info(f"Getting cache files from {len(folders)} SCContent folder(s) "
+                    f"({len(by_name)} file(s))")
         for index, row in df_merge.iterrows():
             try:
                 # CACHE_KEY was normalized to str above (empty string == missing/NaN),
@@ -1121,13 +1136,12 @@ def mergeCache(df_cache, df_content):
                 if not row["CACHE_KEY"]:
                     df_merge = df_merge.drop(index)
                     continue
-                file = os.path.join(sccontent_folder, str(row["CACHE_KEY"])).replace("\\", "/")
-                if file in foundFiles:
-                    fileIndex = foundFiles.index(file)
-                    kind = filetype.guess(foundFiles[fileIndex])
-                    if os.stat(foundFiles[fileIndex]).st_size != 0 and kind is not None:
+                source = by_name.get(str(row["CACHE_KEY"]))
+                if source:
+                    kind = filetype.guess(source)
+                    if os.stat(source).st_size != 0 and kind is not None:
                         if kind.extension == "mp4" or kind.extension == "jpg" or kind.extension == "png" or kind.extension == "webp":
-                            shutil.copy(foundFiles[fileIndex], cache_output_dir)
+                            shutil.copy(source, cache_output_dir)
                         else:
                             df_merge = df_merge.drop(index)  # ("dropping because of invalid type")
                     else:
@@ -1218,6 +1232,12 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     # store a string in an int column, so widen it to object up front.
     if 'content_type' in chats_df.columns:
         chats_df['content_type'] = chats_df['content_type'].astype(object)
+    # Keep what getChats parsed out of message_content before the three loops below overwrite it
+    # with the attachment's cache key. Without this copy, any text a message carried alongside its
+    # media is destroyed and no report can show it. (For most media rows this holds a technical
+    # token rather than user text — the Conversations report decides what is worth displaying.)
+    if 'message_content' in chats_df.columns:
+        chats_df['message_text'] = chats_df['message_content']
     for index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
         for index_chat, row_chat in chats_df.iterrows():
             if row_chat['client_conversation_id'] == row_arroyo['client_conversation_id'] and \
@@ -1383,7 +1403,7 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
         merge_df.loc[index, 'content_type'] = "Sending Message"
     renames = {'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
                'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID',
-               'server_conversation_id': 'Server Conversation ID'}
+               'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text'}
     # the device-side message id, under whichever name this app version uses (only one is renamed,
     # so two present columns can never collide on the same output name)
     for candidate in ('client_message_id', 'local_message_id'):
@@ -1583,14 +1603,13 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                     logger.info("SCDB-27 database could not be found, will not decrypt memories")
                     scdb = ""
         keychain_file = keychain
-        if uuid != "":
-            SCContentFolder = snapchatFolder + "/Documents/com.snap.file_manager_3_SCContent_" + uuid + "/"
-        else:
-            SCContentFolder = glob.glob(snapchatFolder + "/Documents/com.snap.file_manager_3_SCContent_*")
-            if len(SCContentFolder) == 1:
-                SCContentFolder = SCContentFolder[0] + "/"
-            else:
-                logger.warning("Could not find correct SCContent Folder - Collecting cached files might take a while")
+        # Every SCContent cache folder, the logged-in account's first. A chat attachment can sit in
+        # any of them — the folder name carries a file-manager generation (3, 4, …) and usually,
+        # but not always, the account's user id — so pinning one folder silently lost attachments.
+        SCContentFolder = sccontent_folders(snapchatFolder, uuid)
+        if not SCContentFolder:
+            logger.warning("No com.snap.file_manager_*_SCContent_* folder found - cached chat "
+                           "media will be missing from the reports")
         
     except SystemExit:
         sys.exit()
@@ -1662,7 +1681,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # The device-side ids are only present when this app version's conversation_message has them
     # (see getChats), so the column list is filtered rather than fixed.
     wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Message Content",
-              "Content Type", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
+              "Message Text", "Content Type", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
               "Server Message ID", "Client Message ID"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
      
@@ -1706,6 +1725,9 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # per-conversation pages), so it needs them while Message Content still holds the raw attachment
     # filename — the loop below replaces it with the legacy report's HTML in place.
     msg_df = final_df.copy()
+    # "Message Text" is the parsed content the merge would otherwise have thrown away; only the
+    # Conversations report uses it, so the legacy report's table is left exactly as it was.
+    final_df = final_df.drop(columns=["Message Text"], errors="ignore")
 
     for index, row in final_df.iterrows():
         final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
@@ -1757,7 +1779,10 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
 
     #final_df.to_excel("test.xlsx")
     if keychain_file != "" and scdb != "":
-        df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df, SCContentFolder,
+        # The legacy report takes a single folder path; give it the logged-in account's, which
+        # sccontent_folders() sorts first. (The new reports index every folder — see index_sccontent.)
+        df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df,
+                                                 SCContentFolder[0] if SCContentFolder else "",
                                                  out_dir=report_dir + "/LocalMemories_legacy")
 
     # Memories media report: links every Memory to all its media (SCContent + caching-media

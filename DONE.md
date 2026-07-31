@@ -96,6 +96,42 @@
   manifests, and stamps those with the document they belong to. Chat chips now open the message's
   conversation page in the `scauto_convs` tab.
 
+# Coverage and report UI fixes (v1.5.0)
+- [DONE-v1.5.0] **Every SCContent cache folder is extracted and searched.** `extract_zip` filtered
+  ZIP entries on the literal string `com.snap.file_manager_3_SCContent_`, so a device with e.g.
+  `com.snap.file_manager_4_SCContent_` (a different generation, and no user id suffix) had those
+  files left in the archive — their cache_controller entries then looked like files that were not on
+  the device. The extraction list now takes glob patterns (`wanted()`), covering
+  `Documents/` **and** `Library/Caches/com.snap.file_manager_*_SCContent_*`. `ParseSnapchat_iOS`
+  resolves all of them too (`sccontent_folders`, logged-in account first) instead of pinning
+  `_3_<uuid>`, and `mergeCache` looks a CACHE_KEY up across all of them — its multi-folder branch
+  never actually resolved a file. `parseSnapvideos_PREFETCH` matches all folders as well.
+- [DONE-v1.5.0] **Cache files the index does not know about are listed.** The cache_controller
+  report was built only from `cache_controller.db`, so a file on disk that no claim / metadata /
+  tombstone row leads to had no row at all. `orphan_entries` adds one per such file, in the category
+  **"Not in the index"**, counted in the header and explained in a "?": no EXTERNAL_KEY, no owner, no
+  timestamps — only the bytes and their hashes. A file counts as an orphan only when no indexed
+  entry resolved to it, so bundle children and byte-range parts stay under their parent.
+- [DONE-v1.5.0] **Text sent with media is no longer lost.** `mergeCacheChats` overwrote the parsed
+  message content with the attachment's cache key; it now keeps a copy first (`Message Text`), and
+  the Conversations report shows a real caption next to its media. Values that are not text (a cache
+  key, an EXTERNAL_KEY, a bare media id, the attachment's own name) are not shown as a message, and
+  the raw parsed value is always in the expanded row as `message_content (parsed)`. A message whose
+  protobuf could not be parsed is marked "⚠ not parsed" instead of showing the parser's error string
+  as the message body.
+- [DONE-v1.5.0] **Expanded messages no longer take over the page, and scrolling stopped jumping.**
+  Attachment previews are capped (150 px) with a link to the full-size file, and media tells the
+  virtual table to re-measure when it loads (`SCV.remeasure`) — a row measured while its media was
+  still blank left every offset below it wrong. `remeasure()` only measures: re-rendering would
+  recreate the media and re-fire its load event forever.
+- [DONE-v1.5.0] "**open**" is a chip that opens in its own tab (`scauto_conv_page` /
+  `scauto_memory_page`) in the Conversations, Contacts and Memories indexes, instead of a plain link
+  that replaced the index.
+- [DONE-v1.5.0] Double-clicking the start of a **Snap ID / Media ID** in the Memories report no
+  longer selects the label's last word with it: a label and its value were adjacent inline spans, so
+  the text ran together ("Snap ID8BA4C50C…"). Verified in Chrome with Selection.modify: before
+  "ID8BA4C50C", after "8BA4C50C".
+
 # Report structure and directory paths
 - [DONE-v1.3.3] Add "/Report" to "Working/Temp" in the GUI.
 - [DONE-v1.3.3] Make the Working/Temp/Report directory path selection mandatory.

@@ -424,9 +424,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
         owner = (' <span class="ownerbadge" title="the account this extraction came from">'
                  'device owner</span>') if contact["is_owner"] else ""
         if conv_id and conv.get("page"):
-            conv_cell = (f'<a class="detail" target="scauto_convs" '
+            conv_cell = (f'<a class="openbtn" target="scauto_conv_page" '
                          f'href="{rel_prefix}Conversations/{_esc(conv["page"])}'
-                         f'#conv-{_esc(conv_id)}" title="open this conversation">'
+                         f'#conv-{_esc(conv_id)}" title="open this conversation in its own tab">'
                          f'{text_html(conv.get("title") or conv_id)} &#9656;</a>'
                          f'<div class="cid">{_esc(conv_id)}</div>')
         elif conv_id:

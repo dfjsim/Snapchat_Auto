@@ -748,6 +748,64 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     return entries, virtual
 
 
+# The category given to a cache file that is on disk but that no row of cache_controller.db
+# references. They are real recovered files and must not be invisible just because the index has
+# forgotten them.
+ORPHAN_CATEGORY = "Not in the index"
+
+ORPHAN_BASIS = (
+    "This file is in an SCContent cache folder but NOTHING in cache_controller.db refers to it — no "
+    "claim, no metadata, no deletion record and no virtualization row. cache_controller.db does not "
+    "index every physical file: copies get materialized or consolidated outside the index (an "
+    "example is documented in docs/report_cache_controller.md), and an index entry can be dropped "
+    "while its file stays on disk. So there is no EXTERNAL_KEY, no owning account and no timestamp "
+    "for it here — only the bytes, their hashes, and what the content itself shows. Its filename is "
+    "still treated as a CACHE_KEY, which is how it is matched to the Memories and chat reports.")
+
+
+def orphan_entries(scfull, scparts, claimed_paths, ms_fmt):
+    """One entry per on-disk cache file that no ``cache_controller.db`` row accounts for.
+
+    ``claimed_paths`` is every path the indexed entries already resolved to (including bundle
+    children and byte-range parts), so a file is only an orphan when nothing in the index led to it.
+    Byte-range parts of the same logical file are grouped back under their cache key.
+    """
+    seen, orphans = set(), []
+    def add(key, paths):
+        if not paths:
+            return
+        orphans.append({
+            "cache_key": key,
+            "category": ORPHAN_CATEGORY,
+            "claims": [], "users": [],
+            "meta": {"size": None, "disk_used": None, "type": None, "storage_type": None,
+                     "shard_index": None, "last_read": "", "known_len": None},
+            "children": [], "retrieval": {},
+            "on_disk": {"paths": paths, "bytes": sum(_size(p) for p in paths), "found": True,
+                        "scope_by_path": {p: _scope_user(p) for p in paths}, "cross_scope": []},
+            "memory": None, "memory_basis": None, "chats": [], "tombstones": [],
+            "created_sort": 0, "orphan": True,
+        })
+    for key, paths in scfull.items():
+        keep = [p for p in paths if p.replace("\\", "/") not in claimed_paths]
+        if keep and key not in seen:
+            seen.add(key)
+            add(key, keep)
+    for key, parts in scparts.items():
+        keep = [p for _off, p in sorted(parts) if p.replace("\\", "/") not in claimed_paths]
+        if keep and key not in seen:
+            seen.add(key)
+            add(key, keep)
+    return orphans
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
 # --------------------------------------------------------------------------- HTML
 
 TYPE_LABELS = {1: "file", 2: "sharded", 3: "bundle"}
@@ -802,6 +860,8 @@ def _cross_scope_basis(entry):
 
 def _on_disk_basis(entry):
     """Explanation text for how (and whether) the cache file was located on disk."""
+    if entry.get("orphan"):
+        return ORPHAN_BASIS
     if entry["on_disk"]["found"]:
         n = len(entry["on_disk"]["paths"])
         base = ("The CACHE_KEY is the on-disk filename inside a com.snap.file_manager_*_SCContent_* "
@@ -912,6 +972,11 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
     """Expandable detail block for one physical cache file."""
     e = entry
     parts = []
+
+    if e.get("orphan"):
+        parts.append('<div class="orphan">This file is <b>not referenced by cache_controller.db</b>'
+                     + _info(ORPHAN_BASIS)
+                     + '<br>Everything below comes from the bytes on disk, not from the index.</div>')
 
     # claims — headers are the real CACHE_FILE_CLAIM column names (description in parentheses)
     rows = []
@@ -1111,6 +1176,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     chat_linked = sum(1 for e in entries if e["chats"])
     deleted = sum(1 for e in entries if e["tombstones"])
     xscope = sum(1 for e in entries if e["on_disk"].get("cross_scope"))
+    orphans = sum(1 for e in entries if e.get("orphan"))
     categories = sorted({e["category"] for e in entries})
 
     # Row data + per-row detail go to sibling data/*.js files, and only the rows in the viewport are
@@ -1140,7 +1206,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
         # because every byte here is multiplied by the number of cache entries in data/index.js
         cells = [
             "▸",
-            _esc(e["category"]),
+            (f'<span class="orphanbadge">{_esc(e["category"])}</span>' if e.get("orphan")
+             else _esc(e["category"])),
             _esc(e["cache_key"]),
             _esc(users),
             _external_key_summary(e["claims"]),
@@ -1152,6 +1219,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
         ]
         # what the search box matches on: everything identifying, without the HTML around it
         searchable = [e["cache_key"], e["category"], type_lbl, users,
+                      "orphan unclaimed not indexed" if e.get("orphan") else "",
                       e.get("ondisk_md5", ""), e.get("ondisk_sha256", ""),
                       e.get("ondisk_type") or "", e["retrieval"].get("url") or "",
                       str(e["retrieval"].get("content_ref") or "")]
@@ -1242,6 +1310,10 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .chip.ok{{background:#eef7ee;color:#2f7d32}} .chip.miss{{background:#f6efef;color:#9a5a5a}}
  .chip.warn{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983}}
  .xwarn{{color:#b8860b;font-weight:700}}
+ .orphanbadge{{background:#f3e8f2;color:#8a1f5a;border:1px solid #e0c2d8;border-radius:8px;
+   padding:1px 6px;font-size:10.5px;font-weight:700;white-space:nowrap}}
+ .orphan{{background:#f3e8f2;border:1px solid #e0c2d8;color:#8a1f5a;border-radius:5px;
+   padding:6px 10px;font-size:12px;margin-bottom:6px}}
  .scopehdr{{margin-top:6px;font-size:11px;color:#444;font-weight:600}}
  .xscope{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;margin-left:6px}}
  .hint{{position:relative;display:inline-block}}
@@ -1267,6 +1339,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat &middot;
  <b>{xscope}</b> with a cross-scope copy &middot; {deleted} with a deletion record &middot;
  times in <b>{html.escape(tz_label)}</b></div>
+ <div class="sum"><b>{orphans}</b> file(s) on disk are not referenced by cache_controller.db
+ {_info(ORPHAN_BASIS) if orphans else ''}</div>
  <div class="sum">Source: {html.escape(db_display)}</div></header>
 {report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
@@ -1348,7 +1422,7 @@ scConsumeHash();
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, {"total": total, "on_disk": on_disk, "mem": mem_linked,
-                    "chat": chat_linked, "deleted": deleted}
+                    "chat": chat_linked, "deleted": deleted, "orphans": orphans}
 
 
 # --------------------------------------------------------------------------- entry
@@ -1392,6 +1466,16 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                       memory_pages, chat_by_message)
         all_entries.extend(entries)
         virtual.extend(virt)
+
+    # Files that are on disk but that the index does not account for. Without these the report only
+    # shows what cache_controller.db remembers, and a recovered file it has forgotten is invisible.
+    claimed = {p.replace("\\", "/") for e in all_entries for p in e["on_disk"]["paths"]}
+    orphans = orphan_entries(scfull, scparts, claimed, ms_fmt)
+    if orphans:
+        logger.info(f"  {len(orphans)} cache file(s) on disk are not referenced by "
+                    f"cache_controller.db — listed as \"{ORPHAN_CATEGORY}\"")
+        all_entries.extend(orphans)
+        all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
 
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
