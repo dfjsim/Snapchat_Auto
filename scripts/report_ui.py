@@ -18,7 +18,9 @@ This module provides the pieces both reports now share:
   ones (Communications, Memories detail sub-pages): scroll an ``#anchor`` into view **below** the
   sticky toolbar, highlight it, and — crucially — keep working when the link is clicked again into
   an already-open tab (see "Re-entrant anchors" below).
-* :data:`HINT_JS` — the "?" popover used by all reports.
+* :data:`HINT_JS` / :data:`HINT_CSS` / :func:`info_icon` — the "?" popover used by all reports.
+* :data:`PAGE_CSS` — the page chrome (header, toolbar, sections, key/value grids, media buttons)
+  the Conversations and Contacts reports share.
 
 Why ``data/*.js`` and not ``fetch()``/JSON: the reports are opened from ``file://``, where
 ``fetch``/``XMLHttpRequest`` are blocked by the browser's origin rules. A ``<script src=…>`` is a
@@ -36,6 +38,7 @@ browser fires **no** event at all, so the target row would never be expanded/scr
 
 import os
 import json
+import html
 import uuid
 import logging
 from datetime import datetime
@@ -72,14 +75,66 @@ def run_id(report_dir):
 
 # --------------------------------------------------------------------------- "?" popovers
 
+# The popover is placed with `position:fixed` while it is open, and only then. An absolutely
+# positioned tip is clipped by the first ancestor that hides its overflow — which is exactly what
+# happens to the "?" in a column header (`.vhdr .vc` clips so long titles can ellipsize) and inside
+# a virtual row: the popover appeared cut off, or not at all. A fixed element is not clipped by an
+# overflow ancestor, so the tip is measured, positioned next to its icon in viewport coordinates
+# and nudged back inside the window when it would fall off the right or bottom edge.
 HINT_JS = """
+function scHintPlace(tip,icon){
+ var r=icon.getBoundingClientRect(),pad=8;
+ tip.style.position='fixed';tip.style.left='0px';tip.style.top='0px';   // measure at a known origin
+ var w=tip.offsetWidth,h=tip.offsetHeight;
+ var left=r.right+6,top=r.top-4;
+ if(left+w>window.innerWidth-pad)left=Math.max(pad,r.left-w-6);         // flip to the icon's left
+ if(top+h>window.innerHeight-pad)top=Math.max(pad,window.innerHeight-h-pad);
+ tip.style.left=left+'px';tip.style.top=top+'px';}
+function scHintClose(){
+ document.querySelectorAll('.hint.open').forEach(function(x){
+  x.classList.remove('open');
+  var t=x.querySelector('.tip');
+  if(t){t.style.position='';t.style.left='';t.style.top='';}});}
 function hint(ev,el){ev.stopPropagation();
  var h=el.parentNode,was=h.classList.contains('open');
- document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});
- if(!was)h.classList.add('open');}
-document.addEventListener('click',function(){
- document.querySelectorAll('.hint.open').forEach(function(x){x.classList.remove('open');});});
+ scHintClose();
+ if(was)return;
+ h.classList.add('open');
+ var tip=h.querySelector('.tip');
+ if(tip)scHintPlace(tip,el);}
+document.addEventListener('click',scHintClose);
+// a fixed tip would stay behind while the page (or a virtual table) scrolls under it
+window.addEventListener('scroll',scHintClose,true);
+window.addEventListener('resize',scHintClose);
 """
+
+# The Memories and cache_controller reports carry their own copy of this inside their big CSS
+# f-strings; newer reports use this one.
+HINT_CSS = """
+ .hint{position:relative;display:inline-block}
+ .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;
+   border-radius:50%;background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;
+   margin:0 4px;user-select:none;vertical-align:middle}
+ .qm:hover{background:#2d2d71;color:#fff}
+ .tip{display:none;position:absolute;left:20px;top:-4px;z-index:9999;background:#1f1f52;color:#fff;
+   padding:8px 11px;border-radius:6px;font-size:11.5px;font-weight:400;width:340px;line-height:1.45;
+   box-shadow:0 3px 10px rgba(0,0,0,.35);text-transform:none;letter-spacing:normal;text-align:left;
+   white-space:normal}
+ .hint.open .tip{display:block}
+"""
+
+
+def info_icon(text):
+    """A small round "?" the examiner can click for an explanation of how something was derived.
+
+    Every association a report makes (which identifier matched, which artifact a value came from,
+    whether a value is interpreted or raw) should be explainable in place — see
+    ``docs/forensics_tool_guidelines.md``.
+    """
+    if not text:
+        return ""
+    return ('<span class="hint"><span class="qm" onclick="hint(event,this)">?</span>'
+            f'<span class="tip">{html.escape(str(text))}</span></span>')
 
 # --------------------------------------------------------------------------- anchor navigation
 
@@ -320,6 +375,59 @@ def write_selection_stub(report_dir, run_id_value):
         logger.debug(f"Could not write the selection stub in {report_dir}: {error}")
     return path
 
+# --------------------------------------------------------------------------- page chrome
+
+# The page furniture every report repeats: header band, toolbar, section headings, key/value grids,
+# sub-tables, media buttons and chips. The Memories and cache_controller reports predate this and
+# keep their own (identical-looking) copies inside their own CSS; the Conversations and Contacts
+# reports use this one so the two new reports cannot drift apart.
+PAGE_CSS = """
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}
+ header{background:#2d2d71;color:#fff;padding:16px 24px} header h1{margin:0;font-size:20px}
+ header a{color:#cfd3ff} .sum{opacity:.85;font-size:13px;margin-top:4px} .sum b{color:#fff}
+ .note{background:#fff8e0;border:1px solid #e6d48a;color:#6a5300;padding:8px 24px;font-size:12.5px}
+ .warn{background:#ffe8e8;border:1px solid #e0a0a0;color:#7a1f1f;padding:10px 24px;font-size:13px}
+ .toolbar{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
+   display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px}
+ .toolbar input,.toolbar select{font-size:13px;padding:5px 8px;border:1px solid #bcbcd0;
+   border-radius:5px}
+ .toolbar input[type=search]{min-width:280px} .toolbar label{color:#555;font-weight:600}
+ .toolbar button{font-size:13px;padding:5px 10px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}
+ .toolbar button:hover{background:#e7e7f4}
+ a.back{display:inline-block;margin:14px 24px 0;color:#2d2d71;font-weight:600;text-decoration:none;
+   font-size:13px} a.back:hover{text-decoration:underline}
+ .mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+ .muted{color:#999} .more{background:#d7d7ee;color:#33367a;border-radius:8px;padding:0 6px;
+   font-size:10px}
+ .sect{margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;
+   font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}
+ .grid{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12.5px;margin-top:4px;
+   max-width:1000px}
+ .grid .k{color:#666} .grid .v{overflow-wrap:anywhere}
+ .grid .v.hex{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#7a1f5a}
+ .grid .v.mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#33367a}
+ table.sub{border-collapse:collapse;margin-top:5px;font-size:11.5px}
+ table.sub th{background:#e7e7f2;color:#2d2d71;text-align:left;padding:3px 8px}
+ table.sub td{border:1px solid #e0e0e8;padding:3px 8px;overflow-wrap:anywhere;vertical-align:middle}
+ .filebtn{display:inline-flex;align-items:center;gap:5px;text-decoration:none;font-weight:700;
+   font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:6px;
+   padding:2px 7px;max-width:100%}
+ .filebtn:hover{background:#d5deff}
+ .filebtn img{max-width:96px;max-height:52px;object-fit:cover;border-radius:4px;display:block}
+ .filebtn.img{padding:2px;gap:4px} .filebtn.img .lbl{padding-right:5px;text-transform:uppercase}
+ .filebtn.play{padding:5px 9px;font-size:12px}
+ .filenone{color:#999;font-size:11px}
+ .chips{margin-top:4px}
+ .chip{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;font-size:11px;
+   text-decoration:none;font-weight:600}
+ .chip.cache{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}
+ .chip.ok{background:#eef7ee;color:#2f7d32} .chip.miss{background:#f6efef;color:#9a5a5a}
+ .chip.warn{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983}
+ a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap}
+ a.detail:hover{text-decoration:underline}
+"""
+
 # --------------------------------------------------------------------------- virtual table
 
 VTABLE_CSS = """
@@ -516,7 +624,9 @@ function measure(a,b){
 /* ---------- rows ---------- */
 function rowHtml(i){
  var r=rows[i],id=r[0],op=!!exp[id],cells=r[1],s='';
- s='<div class="vr'+(op?' open':'')+(C.detailBase?' clickable':'')+
+ /* optional per-row class from the row's own filter metadata, e.g. marking outgoing messages */
+ var extra=C.rowClass?(' '+C.rowClass(r[5]||{},r)):'';
+ s='<div class="vr'+(op?' open':'')+(C.detailBase?' clickable':'')+extra+
    (hlId===id?' schl':'')+'" id="'+id+'" data-i="'+i+'" style="height:'+
    (op?'auto':C.rowHeight+'px')+'"><div class="vcells" style="height:'+C.rowHeight+
    'px;grid-template-columns:'+(C.selKind?'30px ':'')+C.cols+'">';

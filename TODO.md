@@ -1,5 +1,18 @@
-# Snapchat Communications report
+# Snapchat Conversations / Contacts reports  [the reports themselves: DONE — see DONE.md]
 - Add a way to select only specific conversations or parts of conversations and their associated contacts and output them to PDF with attachments.
+  - The selection half exists: conversations are selectable on the index (kind `conv`) and
+    individual messages on a detail page (kind `msg`), shared with every other report through
+    `Reports/selection.js`. What is missing is the export.
+- Validate against the legacy report on more extractions, then remove the legacy one:
+  - message counts per conversation, and the rows each report drops (see `_drop_unrenderable`);
+  - that every attachment the legacy report inlined is also shown here, with the same bytes;
+  - contacts: that no row of the friends artifact is lost by the normalizers.
+  - Removal steps: drop the `getHtml` call + `outputDir`/`cacheFiles` handling in
+    `ParseSnapchat_iOS.main` (move the attachment copying to the Conversations report), the
+    "Communications (legacy)" entry in `write_index`, and the v2 branch of
+    `cache_controller_report.load_chat_links`.
+- Known limitation inherited from the parser: when a message has an attachment its text is
+  replaced by that attachment, so text sent *with* media is not shown by either report.
 
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.

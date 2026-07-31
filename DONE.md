@@ -31,6 +31,71 @@
   copy lives in a different account's scope than the Memory owner (`map_userids` owner lookup).
   Shared `_scope_user` helper (defined in `memories_media_report`, imported by the cache report).
 
+# Snapchat conversations / contacts reports
+- [DONE-v1.5.0] New **Conversations report** (`scripts/conversations_report.py`) —
+  `Reports/Conversations/`: an index with one row per conversation (type, title, participants,
+  message + attachment counts, first/last message, conversation id) plus **one detail page per
+  conversation** carrying its full message table. Both tables are the shared virtual table, so a
+  conversation with tens of thousands of messages opens as fast as an empty one and search / sort /
+  filter / paging still cover all of it. A message row expands to the full text, the attachment at
+  full size, the attachment's MD5/SHA-256 and every raw row value (including **both** the stored
+  UTC timestamp and the one converted to the report's timezone). Attachments are hard-linked into
+  `media/` under a name ending in their detected extension, and `mov`/`m4v`/`webm`/`gif` are
+  recognised in addition to the four types the legacy report handled.
+  - Conversations with **0 messages** are listed (a friend/group whose conversation id the app
+    knows but for which arroyo.db holds nothing), rather than dropped.
+  - Every derived value states its source in a "?": conversation type from
+    `user_conversation.conversation_type` (falling back to the groups/friends lists), the title from
+    `GROUP_NAME` / the contact's name / the first non-owner sender, participants from
+    `user_conversation` user ids / `GROUP_PARTICIPANTS_USER_NAMES` / the distinct senders.
+  - Documented in `docs/report_conversations.md`.
+- [DONE-v1.5.0] New **Contacts report** (`scripts/contacts_report.py`) — `Reports/Contacts/`: one
+  virtualized table of every contact (display name, username, user id, conversation link, message
+  count, first/last message), with a **device owner** badge and a banner naming the artifact the
+  contacts came from — including the warning that the `primary.docobjects` fallbacks are not the
+  friends list and contain users who are not friends. Documented in `docs/report_contacts.md`.
+- [DONE-v1.5.0] The original chats/contacts/groups report is now
+  `Reports/Communications_legacy/Communications_legacy_report.html` (same output, `_legacy` name,
+  like `LocalMemories_legacy`). Both chat reports render the **same** parsed rows: `main` copies the
+  message frame just before it turns each `Message Content` into the legacy report's HTML.
+- [DONE-v1.5.0] A message with **several cached files** is now one row, not one row per file. The
+  message/cache join emits one row per claim, so a video and its thumbnail read as two messages sent
+  in the same second; rows sharing a conversation + server message id are folded into one message
+  holding a list of attachments (`_merge_rows`). The row shows every file, the Type column shows the
+  combined types, and the expanded detail lists each file with its own hashes and cache link. Two
+  *parts* of one message (12.0 / 12.1) stay separate, and rows with no server message id are never
+  folded.
+- [DONE-v1.5.0] **The device owner is marked wherever they are named**: next to the sender of every
+  message they sent, in the participant list, next to their participant user id, and in the Contacts
+  table next to both their username and their user id.
+- [DONE-v1.5.0] **Contacts carry all three-or-four identifiers.** New *Legacy username* column (the
+  username a contact used before renaming), read from primary.docobjects — `snapchatter` joined on
+  rowid to `index_snapchatterusername` and `index_snapchatterlegacyUsername`, with the index tables'
+  column names looked up rather than assumed. Each identifier column has a "?" explaining what it is
+  worth (display name = local and free to change, username = changeable, user id = permanent), plus
+  a "Username changed" filter and a count in the header. Missing tables degrade to an empty column
+  and a note.
+- [DONE-v1.5.0] **Conversation participants show display name + username** and link to that
+  contact's record in the Contacts report, where all of their identifiers are together; the sender
+  of an expanded message links there too. The conversation header also lists the participants' user
+  ids, the only identifier that survives a rename.
+- [DONE-v1.5.0] **Both message and conversation identifiers are reported**: `client_message_id`
+  under the server message id in the table and in the raw values, and
+  `client_conversation_id` / `server_conversation_id` on the conversation page. `getChats` selects
+  those columns only when the app version's `conversation_message` has them, and the ids are
+  rendered without the `.0` pandas leaves on an integer column that also holds NULLs.
+- [DONE-v1.5.0] **"?" popovers are no longer clipped.** They are placed with `position:fixed` next
+  to their icon and nudged back inside the window at the edges, because an absolutely positioned
+  popover is clipped by the sticky column header (which hides overflow so titles can ellipsize) and
+  by a virtual row. Verified in a column header, in the rightmost header (where it flips) and inside
+  an expanded row: fully in the viewport and the topmost element at its centre. Fixes the two older
+  reports too (their tips also inherited `white-space:nowrap` from the header).
+- [DONE-v1.5.0] `cache_links.json` **version 3** (written by the Conversations report) adds an
+  `href` per record, because with one page per conversation an anchor no longer says which document
+  to open. `cache_controller_report.load_chat_links` prefers it, falls back to the legacy v2/v1
+  manifests, and stamps those with the document they belong to. Chat chips now open the message's
+  conversation page in the `scauto_convs` tab.
+
 # Report structure and directory paths
 - [DONE-v1.3.3] Add "/Report" to "Working/Temp" in the GUI.
 - [DONE-v1.3.3] Make the Working/Temp/Report directory path selection mandatory.

@@ -9,14 +9,19 @@ Android device extractions, producing HTML reports of chats, contacts, cached me
 Memories / My Eyes Only.
 
 - Entry point: `Snapchat_Auto.py` (FreeSimpleGUI front end).
-- iOS parsing: `scripts/ParseSnapchat_iOS.py`.
+- iOS parsing: `scripts/ParseSnapchat_iOS.py` — also still builds the **legacy** single-page
+  chats/contacts report (`Reports/Communications_legacy/`), kept until the two below are validated.
+- iOS conversations: `scripts/conversations_report.py` (index of every conversation + one detail
+  page each) and `scripts/contacts_report.py` (one table of contacts; also owns the contact/group
+  normalizers and `text_html`, which the conversations report imports).
 - iOS Memories / MEO decryption: `scripts/DecryptLocalMemories_iOS.py`.
 - iOS `cache_controller.db` report: `scripts/cache_controller_report.py` (one row per cached file,
-  linked to on-disk cache files and two-way to the Memories / Communications reports).
+  linked to on-disk cache files and two-way to the Memories / Conversations reports).
 - Android: `scripts/getCacheAndroid.py`.
 - Shared report UI: `scripts/report_ui.py` (virtualized index tables, paging, row selection,
-  cross-report anchor navigation, "?" popovers) — used by the Memories and cache_controller
-  reports, with its `NAV_JS`/`NAV_CSS` also injected into the Communications report.
+  cross-report anchor navigation, "?" popovers, page chrome) — used by the Conversations, Contacts,
+  Memories and cache_controller reports, with its `NAV_JS`/`NAV_CSS` also injected into the legacy
+  Communications report.
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
@@ -37,9 +42,12 @@ Memories / My Eyes Only.
 
 - Per-report internals and the cross-report linking scheme:
   [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
+  [report_conversations.md](docs/report_conversations.md),
+  [report_contacts.md](docs/report_contacts.md),
   [report_cache_controller.md](docs/report_cache_controller.md),
   [report_memories.md](docs/report_memories.md),
-  [report_communications.md](docs/report_communications.md),
+  [report_communications.md](docs/report_communications.md) (legacy report + **the chat parsing
+  both chat reports rely on**),
   [report_ui.md](docs/report_ui.md) (why the index tables are virtualized, how the data files are
   laid out, and the anchor/named-tab navigation rules — read before touching report HTML/JS).
 - [Decrypting & linking Snapchat Memories media](docs/snapchat_ios_memories_decryption.md)

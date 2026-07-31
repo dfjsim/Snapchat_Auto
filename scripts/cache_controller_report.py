@@ -8,7 +8,7 @@ file** (``CACHE_KEY``), and links each entry to:
 * the on-disk cache file(s) under ``Documents/com.snap.file_manager_*_SCContent_*`` (whole file,
   byte-range parts, or the child files of a bundle), and
 * the other Snapchat Auto reports — a Memory (``Memories_report.html``) or a chat message
-  (``Communications_report.html``) — with two-way anchors so you can jump between them.
+  (``Conversations_report.html``) — with two-way anchors so you can jump between them.
 
 Tables used (columns are read dynamically, since they vary between app versions):
 
@@ -279,30 +279,45 @@ def load_memory_index(app):
 
 
 def load_chat_links(report_dir):
-    """Load the chat attachment manifest written by the Communications report, if present.
+    """Load the chat attachment manifest written by the chat report, if present.
 
     Returns ``(by_key, by_message)``:
 
-    * ``by_key``     : CACHE_KEY -> [{conversation_id, server_message_id, anchor}]
+    * ``by_key``     : CACHE_KEY -> [{conversation_id, server_message_id, anchor[, href]}]
     * ``by_message`` : "<conversation>|<server message id>" -> the same records
 
     ``by_message`` is the fallback that links **every** cache entry belonging to a message (a chat
     video is typically a full-media claim, a thumbnail claim and a raw content claim), not only the
-    single file the Communications report chose to display. Empty when that report didn't run.
-    Version-1 manifests (a bare CACHE_KEY -> records map) are still understood.
+    single file the chat report chose to display. Empty when no chat report ran.
+
+    The **Conversations** report's manifest (version 3) wins over the legacy Communications one,
+    because its records carry an ``href`` — with one page per conversation the target is no longer a
+    single document, so the anchor alone is not enough to build the link. Version 2 (Communications:
+    the two indexes, anchors into ``Communications_legacy_report.html``) and version 1 (a bare
+    CACHE_KEY -> records map) are still understood.
     """
-    cand = os.path.join(report_dir or "", "Communications", "cache_links.json")
-    if not (cand and os.path.isfile(cand)):
-        return {}, {}
-    try:
-        with open(cand, encoding="utf-8") as f:
-            data = json.load(f) or {}
-    except Exception as error:
-        logger.debug(f"Could not read chat link manifest {cand}: {error}")
-        return {}, {}
-    if data.get("version") == 2:
-        return data.get("by_key") or {}, data.get("by_message") or {}
-    return data, {}                                            # legacy (v1) manifest
+    for report, document in (("Conversations", None),
+                             ("Communications_legacy", "Communications_legacy_report.html"),
+                             ("Communications", "Communications_report.html")):
+        cand = os.path.join(report_dir or "", report, "cache_links.json")
+        if not os.path.isfile(cand):
+            continue
+        try:
+            with open(cand, encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except Exception as error:
+            logger.debug(f"Could not read chat link manifest {cand}: {error}")
+            continue
+        if data.get("version") in (2, 3):
+            by_key, by_message = data.get("by_key") or {}, data.get("by_message") or {}
+        else:
+            by_key, by_message = data, {}                      # legacy (v1) manifest
+        if document:                                           # single-document report: one base
+            for records in list(by_key.values()) + list(by_message.values()):
+                for rec in records:
+                    rec.setdefault("base", f"{report}/{document}")
+        return by_key, by_message
+    return {}, {}
 
 
 def load_memory_media(report_dir):
@@ -567,7 +582,7 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 
 # A chat claim's EXTERNAL_KEY is "<type>:<conversation id>:<message id>:<part>[:…]" — e.g.
 # "thumbnail~1:19e0693c-…:12:0:0". The (conversation, message.part) it carries is what ties a cache
-# entry to a chat message even when the Communications report attached a *different* file to it.
+# entry to a chat message even when the chat report attached a *different* file to it.
 _CHAT_EK_RE = re.compile(r"^(?P<type>[^:]*):(?P<conv>[0-9a-fA-F-]{36}):(?P<msg>\d+):(?P<part>\d+)")
 
 
@@ -578,7 +593,7 @@ def _chat_links_for(clist, cache_key, by_key, by_message):
         anchor = rec.get("anchor") or f"cf-{cache_key}"
         seen.add((rec.get("conversation_id"), rec.get("server_message_id")))
         out.append(dict(rec, anchor=anchor, basis=(
-            f"This CACHE_KEY is the attachment file the Communications report recorded for "
+            f"This CACHE_KEY is the attachment file the chat report recorded for "
             f"message {rec.get('server_message_id') or '(unknown)'} in conversation "
             f"{rec.get('conversation_id') or '(unknown)'} (via its local_message_references / "
             f"content-type mapping, exported to cache_links.json).")))
@@ -595,7 +610,7 @@ def _chat_links_for(clist, cache_key, by_key, by_message):
             seen.add(ident)
             out.append(dict(rec, anchor=anchor, basis=(
                 f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries the conversation id "
-                f"{mo.group('conv')} and message {smid}, which the Communications report reported "
+                f"{mo.group('conv')} and message {smid}, which the chat report reported "
                 f"for that message. The link therefore points at the message rather than at this "
                 f"exact file — a message can have several cached files (full media, thumbnail, raw "
                 f"content claim), and only one of them is displayed in the chat report.")))
@@ -836,10 +851,18 @@ def _links_html(entry, rel_prefix, compact=False):
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
-        label = f' {_esc(conv[:8])}… msg {_esc(smid)}' if conv else ""
-        chips.append(f'<a class="chip chat" target="scauto_comms" '
-                     f'href="{rel_prefix}Communications/Communications_report.html'
-                     f'#{_esc(ch.get("anchor") or ("cf-" + entry["cache_key"]))}">'
+        anchor = _esc(ch.get("anchor") or ("cf-" + entry["cache_key"]))
+        # The Conversations report has one page per conversation, so its manifest states the exact
+        # page in `href` (relative to the reports root); the legacy report is one document.
+        if ch.get("href"):
+            url, target = f'{rel_prefix}{_esc(ch["href"])}', "scauto_convs"
+            name = (ch.get("title") or "")[:24] or (conv[:8] + "…" if conv else "")
+        else:
+            base = ch.get("base") or "Communications/Communications_report.html"
+            url = f'{rel_prefix}{_esc(base)}#{anchor}'
+            target, name = "scauto_comms_legacy", (conv[:8] + "…" if conv else "")
+        label = f' {_esc(name)} msg {_esc(smid)}' if name else ""
+        chips.append(f'<a class="chip chat" target="{target}" href="{url}">'
                      f'💬 Chat{label}</a>' + why(ch.get("basis")))
     if not compact:
         if entry["on_disk"]["found"]:
@@ -1226,7 +1249,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
    background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}}
  .qm:hover{{background:#2d2d71;color:#fff}}
  .tip{{display:none;position:absolute;left:20px;top:-4px;z-index:30;background:#1f1f52;color:#fff;padding:8px 11px;
-   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45}}
+   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;
+   white-space:normal;text-align:left;text-transform:none;letter-spacing:normal}}
  .hint.open .tip{{display:block}}
  h2{{margin:24px 0 0;padding:10px 24px;background:#1f1f52;color:#fff;font-size:15px}}
  table.vtab{{border-collapse:collapse;width:100%;font-size:12px}} table.vtab td{{border-bottom:1px solid #e2e2ea;padding:5px 24px}}
@@ -1337,8 +1361,8 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     outdir      : output directory (default: ./Snapchat_CacheController_report_<timestamp>).
     tz          : timezone for displayed timestamps — 'local', 'utc', an IANA name, or '±HH:MM'.
     src_root    : extraction root the files were unzipped under (for archive-relative source paths).
-    report_dir  : the sibling reports root (…/Reports). Used to find the Communications chat-link
-                  manifest and to compute relative links to the Memories/Communications reports.
+    report_dir  : the sibling reports root (…/Reports). Used to find the chat report's chat-link
+                  manifest and to compute relative links to the Memories/chat reports.
     """
     app = find_app_container(app_or_root)
     dbs = find_cache_controllers(app)
