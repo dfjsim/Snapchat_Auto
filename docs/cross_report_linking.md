@@ -7,19 +7,23 @@ Reports/
   index.html
   run_id.txt                                  identifies this set of reports
   selection.js                                the examiner's row selections, shared by every report
-  Communications/Communications_report.html   + cacheFiles/, cache_links.json
+  Conversations/Conversations_report.html     + pages/, media/, data/, assets/,
+                                                conversation_pages.json, cache_links.json
+  Contacts/Contacts_report.html               + data/
   Memories/Memories_report.html               + pages/, media/, maps/, data/,
                                                 memory_pages.json, media_by_cache_key.json
-  LocalMemories_legacy/LocalMemories_legacy_report.html
   CacheController/CacheController_report.html + files/, data/
+  Communications_legacy/Communications_legacy_report.html   + cacheFiles/, cache_links.json
+  LocalMemories_legacy/LocalMemories_legacy_report.html
 ```
 
 Wherever the same underlying artifact appears in more than one report, the reports link to each
 other with plain `#anchor` fragments, so an examiner can jump between (say) a cached file and the
 Memory or chat message it belongs to. This page is the single reference for **the anchor scheme
 and exactly how each cross-link is derived**. Each per-report page documents its own internals:
-[Communications](report_communications.md), [Memories](report_memories.md),
-[cache_controller](report_cache_controller.md).
+[Conversations](report_conversations.md), [Contacts](report_contacts.md),
+[Memories](report_memories.md), [cache_controller](report_cache_controller.md),
+[Communications (legacy)](report_communications.md).
 
 > Every media file and every cross-report link in the reports carries a small round **“?” icon**.
 > Clicking it shows, in plain language, *how that specific association was made* (which identifier
@@ -30,10 +34,17 @@ and exactly how each cross-link is derived**. Each per-report page documents its
 
 | Report | Anchor id | On what element | Written by |
 |---|---|---|---|
+| Conversations index | `conv-<conversation id>` | each conversation's index-table row | `generate_index` in `scripts/conversations_report.py` |
+| Conversation detail page | `conv-<conversation id>` | the conversation's metadata block | `render_conversation_page` |
+| Conversation detail page | `msg-<server message id>` | each message row (e.g. `msg-12.0`) | `build_messages` / `_message_rows` |
+| Contacts | `ct-<user id>` | each contact's row | `generate_report` in `scripts/contacts_report.py` |
 | Memories index | `mem-<ZSNAPID>` | each memory's index-table row | `generate_report` in `scripts/memories_media_report.py` |
 | Memories detail sub-page | `mem-<ZSNAPID>` | each member block on `pages/<key>.html` | `_render_group_detail` |
 | cache_controller | `ck-<CACHE_KEY>` | each physical-file row | `generate_report` in `scripts/cache_controller_report.py` |
-| Communications | `cf-<CACHE_KEY>` | each cached chat attachment | `path_to_image_html` in `scripts/ParseSnapchat_iOS.py` |
+| Communications (legacy) | `cf-<CACHE_KEY>` | each cached chat attachment | `path_to_image_html` in `scripts/ParseSnapchat_iOS.py` |
+
+A message with no `server_message_id` (one the app had not finished sending) is anchored on its
+position in the conversation instead: `msg-row<N>`. Duplicate anchors get a `-2`, `-3`, … suffix.
 
 The Memories report is split into a lightweight index (`Memories_report.html`) plus one detail
 sub-page per group (`pages/<key>.html`); the same `mem-<ZSNAPID>` anchor exists on both, so links can
@@ -44,9 +55,14 @@ so other reports can resolve a snap to its detail page.
 32-hex `cache_controller.db` key, which is also the on-disk filename in the `SCContent` folder.
 Links are relative between siblings, e.g. `../Memories/Memories_report.html#mem-<ZSNAPID>`.
 
-In the Communications report the anchor id is the **attachment filename**, which is the `CACHE_KEY`
-for files copied out of `SCContent` but *not* for `SCPersistentMedia` copies (see below) — so the
-`cf-…` anchor is taken from the manifest rather than assumed.
+The Conversations report is split the same way: a lightweight index plus one detail page per
+conversation, with `Conversations/conversation_pages.json` (`conversation id → pages/<key>.html`)
+mapping between them. Links into it target a **message row** (`msg-…`), which the virtual table
+resolves and expands even when that row is not in the DOM.
+
+In the legacy Communications report the anchor id is the **attachment filename**, which is the
+`CACHE_KEY` for files copied out of `SCContent` but *not* for `SCPersistentMedia` copies (see
+below) — so the `cf-…` anchor is taken from the manifest rather than assumed.
 
 **How the jump behaves** (scrolling clear of the sticky toolbar, expanding the target row in a
 virtualized table, and working on repeat clicks into an already-open tab) is documented in
@@ -81,15 +97,24 @@ present in `cache_controller.db`** (`all_cache_keys`). The key is the one used t
 either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target. (`caching-media`
 `.pack` files are *not* indexed by `cache_controller.db`, so they get no such link.)
 
-### cache_controller → Communications (chat)
-The Communications report writes `Reports/Communications/cache_links.json` (version 2) with **two**
-indexes over the attachments it rendered:
+### cache_controller → the chat report
+The chat report writes `cache_links.json` with **two** indexes over the attachments it rendered.
+The Conversations report writes version 3:
 
 ```json
-{"version": 2,
- "by_key":     {"<CACHE_KEY>": [{"conversation_id": …, "server_message_id": …, "anchor": "cf-…"}]},
+{"version": 3, "report": "Conversations",
+ "by_key":     {"<CACHE_KEY>": [{"conversation_id": …, "server_message_id": "12.0",
+                                 "anchor": "msg-12.0", "title": "…",
+                                 "href": "Conversations/pages/<key>.html#msg-12.0"}]},
  "by_message": {"<conversation id>|<server message id>": [ …the same records… ]}}
 ```
+
+`href` (relative to the reports root) is the addition: with one page per conversation the anchor
+alone no longer says *which document* to open. The legacy Communications report still writes its
+own version-2 manifest, whose records have no `href` and whose anchors are `cf-<filename>` into its
+single document. `load_chat_links` prefers `Conversations/`, then `Communications_legacy/`, then
+`Communications/`, and stamps the single-document reports' records with the `base` document so the
+link can be built either way. Version 1 (a bare `CACHE_KEY → records` map) is still understood.
 
 The cache_controller report links an entry to a chat message by, in order:
 
@@ -104,9 +129,10 @@ The cache_controller report links an entry to a chat message by, in order:
 
 Chips are deduplicated per (conversation, message).
 
-### Communications → cache_controller
-Each cached attachment links back to `#ck-<CACHE_KEY>` (the `cclink` in `path_to_image_html`), where
-the key comes from `cacheControllerKey`:
+### the chat report → cache_controller
+Each cached attachment links back to `#ck-<CACHE_KEY>` — the `cclink` in `path_to_image_html`
+(legacy) and the cache chip in the expanded message row (Conversations). Both take the key from
+the same `cacheControllerKey`:
 
 * attachments copied out of `SCContent` are **named after their `CACHE_KEY`** — used directly;
 * **`SCPersistentMedia`** copies ("media saved in chat") are named
@@ -142,10 +168,17 @@ from a cache key, and the cache_controller report links/embeds that decrypted co
 labelled as a derived file, with the original cached bytes' hashes shown next to it.
 
 ## Ordering / dependency
-`ParseSnapchat_iOS.main` runs the reports in the order **Communications → Memories →
-cache_controller**. That matters: the cache_controller report reads the chat manifest the
-Communications report just wrote (`cache_links.json`) and the two manifests the Memories report
-just wrote (`memory_pages.json`, `media_by_cache_key.json`), and reads each `scdb-27.sqlite3`
-directly for the Memory index — so there is no circular dependency, and the back-links from
-Communications/Memories are static URLs that resolve to anchors the cache_controller report emits.
-Running cache_controller alone still produces the full index; only the cross-links are missing.
+`ParseSnapchat_iOS.main` runs the reports in the order **Communications (legacy) → Conversations →
+Contacts → Memories → cache_controller**. That matters:
+
+* the **Conversations** report renders the message frame the parser built for the legacy report,
+  taken before that frame's content is turned into HTML, and writes the chat manifest;
+* the **Contacts** report takes the conversation summary the Conversations report returns, which is
+  how a contact row links to a conversation page and shows its message count;
+* the **cache_controller** report reads the chat manifest (`Conversations/cache_links.json`, else
+  the legacy one) and the two manifests the Memories report just wrote (`memory_pages.json`,
+  `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index.
+
+So there is no circular dependency, and the back-links from the chat/Memories reports are static
+URLs that resolve to anchors the cache_controller report emits. Running cache_controller alone
+still produces the full index; only the cross-links are missing.

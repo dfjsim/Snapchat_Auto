@@ -1153,13 +1153,23 @@ def getChats(database):
     logger.info("Getting chats from " + ntpath.basename(database))
     conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
 
-    messagesQuery = """select
+    # A message has two identities: the id the device gave it (client_message_id, present as soon as
+    # it is composed) and the one the server assigned (server_message_id, absent while it is still
+    # sending). Both are reported, so a message can be found again in arroyo.db either way. The
+    # column names differ between app versions, so the optional ones are selected only when present.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_message)")}
+    optional = ""
+    for candidate in ("client_message_id", "local_message_id", "server_conversation_id"):
+        if candidate in columns:
+            optional += f"    {candidate} as {candidate},\n"
+
+    messagesQuery = f"""select
     client_conversation_id as client_conversation_id,
     server_message_id as server_message_id,
-    message_content as message_content,
+{optional}    message_content as message_content,
     datetime(creation_timestamp/1000, 'unixepoch') as 'Creation Timestamp',
-    CASE 
-        datetime(read_timestamp/1000, 'unixepoch') when '1970-01-01 00:00:00' then "" 
+    CASE
+        datetime(read_timestamp/1000, 'unixepoch') when '1970-01-01 00:00:00' then ""
         else datetime(read_timestamp/1000, 'unixepoch')
         end as 'Read Timestamp',
     content_type as content_type,
@@ -1371,9 +1381,16 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     for index in sending_messages:
         merge_df.loc[index, 'server_message_id'] = "None"
         merge_df.loc[index, 'content_type'] = "Sending Message"
-    final_df = merge_df.rename(
-        columns={'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
-                 'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID'})
+    renames = {'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
+               'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID',
+               'server_conversation_id': 'Server Conversation ID'}
+    # the device-side message id, under whichever name this app version uses (only one is renamed,
+    # so two present columns can never collide on the same output name)
+    for candidate in ('client_message_id', 'local_message_id'):
+        if candidate in merge_df.columns:
+            renames[candidate] = 'Client Message ID'
+            break
+    final_df = merge_df.rename(columns=renames)
 
     try:
         final_df = final_df.drop(columns=['CACHE_KEY', 'SERVER_MESSAGE_ID_PART', 'TYPE'])
@@ -1473,6 +1490,10 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     global keychain_file
     global current_username
 
+    # Set here as well as in the getFriends* functions: they assign it only once they have read
+    # their artifact, so a source that fails early would otherwise leave it unbound.
+    current_username = ""
+
     platform = system()
     logger.info(f"Running on {platform}")
 
@@ -1534,7 +1555,10 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         else:
             groupPlist = ""
             app_group_plist_storage = ""
-        outputDir = report_dir + "/Communications"
+        # The original single-page chats+contacts report. It is kept as-is under a "_legacy" name
+        # (like LocalMemories_legacy) while the Conversations and Contacts reports that replace it
+        # are validated; both are built from the same parsed rows.
+        outputDir = report_dir + "/Communications_legacy"
         os.makedirs(outputDir + "//cacheFiles", exist_ok=True)
         try:
             contentmanager = glob.glob(snapchatFolder + f"/Documents/contentmanagerV3_{uuid_sha256}/contentManagerDb.db", recursive = True)[0]
@@ -1582,21 +1606,30 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         # groupPlist = ""
 
     #if groupPlist != "":
+    # Which artifact the contacts actually came from is recorded, because it changes what the
+    # contacts report means: the two plist sources are the account's friends list, the
+    # primary.docobjects fallbacks are every Snapchatter the device knows about. See
+    # scripts/contacts_report.py (SOURCE_NOTES).
+    friends_source = ""
     try:
         friends_df, group_df = getFriendsPlist(groupPlist)
+        friends_source = "group.snapchat.picaboo.plist"
     except Exception as Error:
         logger.info("Could not find friends in group.snapchat.picaboo")
         try:
             friends_df, group_df = getFriendsAppGroupPlistStorage(app_group_plist_storage, arroyo[0])
+            friends_source = "app_group_plist_storage"
         except Exception as E:
             logger.info(f"Could not find friends in app_group_plist_storage: {E}")
             try:
                 friends_df, group_df, df_snapchatter = getFriendsPrimary_DisplayMetadata(Path(primaryDoc[0]), Path(arroyo[0]))
+                friends_source = "primary.docobjects (DisplayMetadata)"
             except:
                 logger.info("")
                 logger.info("Could not get friends from DisplayMetadata, using last resort")
                 try:
                     friends_df, group_df = getFriendsPrimary(Path(primaryDoc[0]), Path(arroyo[0]))
+                    friends_source = "primary.docobjects (Snapchatters)"
                 except:
                     logger.error("Could not find friends info anywhere! This is unexpected, please contact the author")
                     friends_df, group_df = pd.DataFrame({}), pd.DataFrame({})
@@ -1626,8 +1659,12 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     final_df = final_df.sort_values(by=['Client Conversation ID', 'Server Message ID'])
     final_df = final_df.rename(
         columns={'Creation Timestamp': 'Creation Timestamp UTC+0', 'Read Timestamp': 'Read Timestamp UTC+0'})
-    final_df = final_df[["Client Conversation ID", "Sender ID", "Message Content", "Content Type", 
-                            "Creation Timestamp UTC+0", "Read Timestamp UTC+0", "Server Message ID"]]
+    # The device-side ids are only present when this app version's conversation_message has them
+    # (see getChats), so the column list is filtered rather than fixed.
+    wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Message Content",
+              "Content Type", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
+              "Server Message ID", "Client Message ID"]
+    final_df = final_df[[c for c in wanted if c in final_df.columns]]
      
     logger.info("Cleaning up cache files not linked to messages")
     messages = final_df["Message Content"].tolist()
@@ -1665,9 +1702,14 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     except Exception as Error:
         logger.debug(f"Could not write cache_links.json: {Error}")
 
+    # The Conversations report renders these same rows itself (its own attachment handling, its own
+    # per-conversation pages), so it needs them while Message Content still holds the raw attachment
+    # filename — the loop below replaces it with the legacy report's HTML in place.
+    msg_df = final_df.copy()
+
     for index, row in final_df.iterrows():
         final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
-    
+
     logger.info("Cleaning up messages")
     for index, row in final_df.iterrows():
         if row["Content Type"] == "Video (Unknown Source)":
@@ -1682,11 +1724,37 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     
 
     html = getHtml(final_df, friends_df, group_df)
-    text_file = open(outputDir + "/Communications_report.html", "w", encoding="cp1252")
+    text_file = open(outputDir + "/Communications_legacy_report.html", "w", encoding="cp1252")
     text_file.write(html)
     text_file.close()
     logger.info("Success, report can be found in " + os.path.abspath(outputDir))
     logger.info("")
+
+    # Conversations report: an index of every conversation plus one detail page each, built from
+    # the same rows as the legacy report above (msg_df was taken before its content became HTML).
+    # It also writes the chat-attachment manifest the cache_controller report links back with, so
+    # it has to run before that report.
+    conv_index = {}
+    try:
+        from scripts import conversations_report
+        _report, conv_index = conversations_report.main(
+            msg_df, friends_df, group_df, report_dir + "/Conversations", cachefiles_dir,
+            arroyo=arroyo[0], tz=tz, owner_user_id=uuid, owner_username=current_username,
+            cache_key_for=cacheControllerKey, report_dir=report_dir,
+            primary=primaryDoc[0] if primaryDoc else None)
+    except Exception as Error:
+        logger.error(f"Conversations report failed: {Error}")
+
+    # Contacts report: one table of every contact, linked to that contact's conversation page.
+    try:
+        from scripts import contacts_report
+        contacts_report.main(friends_df, report_dir + "/Contacts", conv_index=conv_index,
+                             owner_user_id=uuid, owner_username=current_username,
+                             friends_source=friends_source, tz=tz, report_dir=report_dir,
+                             primary=primaryDoc[0] if primaryDoc else None)
+    except Exception as Error:
+        logger.error(f"Contacts report failed: {Error}")
+
     #final_df.to_excel("test.xlsx")
     if keychain_file != "" and scdb != "":
         df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df, SCContentFolder,

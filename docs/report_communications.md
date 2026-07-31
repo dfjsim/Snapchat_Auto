@@ -1,8 +1,14 @@
-# Communications report
+# Communications report (legacy)
+
+> **Superseded.** The [Conversations](report_conversations.md) and [Contacts](report_contacts.md)
+> reports replace this one and are built from the same parsed rows. This report is still produced,
+> under a `_legacy` name, until those two have been validated on more extractions — see the removal
+> plan in `TODO.md`. **The parsing described below is not legacy**: it is what produces the message
+> frame both this report and the Conversations report render.
 
 Built in `scripts/ParseSnapchat_iOS.py` (`main` → `getHtml`) →
-`Reports/Communications/Communications_report.html`, with recovered attachments in
-`Reports/Communications/cacheFiles/`.
+`Reports/Communications_legacy/Communications_legacy_report.html`, with recovered attachments in
+`Reports/Communications_legacy/cacheFiles/`.
 
 Parses Snapchat chats, contacts and groups and renders one table per conversation, inlining any
 cached attachment (image / video / sticker) that can be linked to a message.
@@ -61,13 +67,15 @@ Each rendered attachment:
   than the `mergeCache`-filtered set — otherwise a saved video's full-media claim is missing (its
   `CACHE_KEY` file is a bundle descriptor, not media) and both the thumbnail and the video would
   point at the thumbnail's entry. See
-  [cross_report_linking.md](cross_report_linking.md#communications--cache_controller).
+  [cross_report_linking.md](cross_report_linking.md#the-chat-report--cache_controller).
 
 Before the message contents are turned into HTML, `main` writes
-`Reports/Communications/cache_links.json` (version 2) with a `by_key` **and** a `by_message` index;
-the cache_controller report uses the second to link back **all** of a message's cache entries (full
-media, thumbnail, raw content claim), which is what a message with two attachments needs. Format and
-rules: [cross_report_linking.md](cross_report_linking.md).
+`Reports/Communications_legacy/cache_links.json` (version 2) with a `by_key` **and** a `by_message`
+index; the cache_controller report uses the second to link back **all** of a message's cache entries
+(full media, thumbnail, raw content claim), which is what a message with two attachments needs. It
+only reads this manifest when the Conversations report did not write its own (version 3, which
+carries the target page as well as the anchor). Format and rules:
+[cross_report_linking.md](cross_report_linking.md).
 
 The report also loads the shared `NAV_JS`, so a `#cf-…` link from another report scrolls the
 attachment into view, highlights it, and keeps working when the same link is clicked again into the
@@ -75,6 +83,13 @@ already-open tab. See [report_ui.md](report_ui.md).
 
 ## Notes / caveats
 * The report renders with pandas `DataFrame.to_html`; per-conversation tables come from
-  `groupby('Client Conversation ID')`.
+  `groupby('Client Conversation ID')`. Every conversation is in **one document**, which is why it
+  is being replaced: the same failure mode the index tables were virtualized for.
+* `main` takes a copy of the message frame (`msg_df`) just before this loop turns each
+  `Message Content` into HTML, and hands that copy to the Conversations report — so the two
+  reports show the same rows and only one of them is responsible for the rendering.
+* `getChats` also selects `client_message_id` / `local_message_id` and `server_conversation_id`
+  when the app version's `conversation_message` has them, so both this report and the Conversations
+  report can show a message's device-side id as well as the server's.
 * The HTML file is written as **cp1252**, so anything injected into it (including the shared JS)
   must stay ASCII; emoji are written as HTML entities.

@@ -174,7 +174,7 @@ Implications for the report / examiner:
 ## Cross-report links
 See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory** by snap UUID in the
 `EXTERNAL_KEY` (primary), then `SHA-256(url token)[:16] == CACHE_KEY` (fallback), then `ZMEDIAID`
-(fallback); **→ chat** via the Communications report's `cache_links.json` manifest, by `CACHE_KEY`
+(fallback); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
 and — so that every cache entry of a message links back, not only the file the chat report showed —
 by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
 

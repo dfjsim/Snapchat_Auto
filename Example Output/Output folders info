@@ -1,9 +1,25 @@
 # iOS
-Snapchat_iOS_report
-  Contains chats (text, saved and cached media), contacts and groups
+Everything for one run is written under Snapchat_Auto-<date_time>/, with the reports in Reports/
+and index.html linking to them.
 
-Snapchat_LocalMemories_report
-  Contains info on all Memories and My Eyes Only, contains decrypted media if it is cached
-  
+Reports/Conversations
+  An index of every conversation plus one detail page per conversation (messages, senders,
+  timestamps, attachments with hashes)
+
+Reports/Contacts
+  One table of every contact recovered from the friends artifact, linked to their conversation
+
+Reports/Memories
+  Info on all Memories and My Eyes Only, with all recovered media, hashes and geolocation
+
+Reports/CacheController
+  Every file indexed by cache_controller.db, linked to the on-disk cache files, Memories and chats
+
+Reports/Communications_legacy
+  The original single-page report: chats (text, saved and cached media), contacts and groups
+
+Reports/LocalMemories_legacy
+  The original Memories / My Eyes Only report, contains decrypted media if it is cached
+
 SnapFixedVideos
   Contains media files that have been merged from split files

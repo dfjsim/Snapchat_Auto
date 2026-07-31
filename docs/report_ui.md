@@ -1,8 +1,9 @@
 # Shared report UI — virtual tables and cross-report navigation
 
 `scripts/report_ui.py` holds the pieces every HTML report shares: the **virtual index table**, the
-**anchor/tab navigation**, and the “?” popover. It has no dependencies and emits plain ES5-ish JS,
-so the reports keep working from `file://` on any modern browser with nothing installed.
+**anchor/tab navigation**, the “?” popover (`HINT_JS`/`HINT_CSS`/`info_icon()`) and the page chrome
+the newer reports style themselves with (`PAGE_CSS`). It has no dependencies and emits plain ES5-ish
+JS, so the reports keep working from `file://` on any modern browser with nothing installed.
 
 ## Why the index tables are virtualized
 
@@ -23,6 +24,13 @@ Reports/
     data/index.js                  one compact array per row (all rows)
     data/detail-<n>.js             row detail HTML, 250 rows per chunk
 ```
+
+The Conversations report uses the same engine **twice**: once for the conversation index and once
+per conversation, for its message table (`pages/data/<key>/index.js` +
+`pages/data/<key>/detail-<n>.js`) — one active conversation can hold as many messages as a small
+cache index holds files. Because that would inline the ~20 KB of shared JS/CSS into every
+conversation page, that report writes it once to `Conversations/assets/ui.{js,css}` and both the
+index and the detail pages load it with `<script src>` / `<link href>`.
 
 * **The document is a shell.** It holds the header, the toolbar, the column titles and the scripts.
 * **`data/index.js`** carries the rows: `[anchor id, [cell html…], search text, {col: sort key},
@@ -55,7 +63,7 @@ Measured on a synthetic 101 200-row cache_controller index (Chrome, `file://`):
 
 ## Cross-report navigation (`NAV_JS`)
 
-Every report — including the plain ones (Communications, Memory detail sub-pages) — includes
+Every report — including the plain ones (Communications legacy, Memory detail sub-pages) — includes
 `NAV_JS`, which owns what happens when an `#anchor` link is followed:
 
 * **Scrolls the target clear of the sticky toolbar and column titles.** The scroll position is
@@ -65,13 +73,24 @@ Every report — including the plain ones (Communications, Memory detail sub-pag
   resolves the row's index, clears any active filter that hides it, expands it, and scrolls to its
   computed offset.
 * **Works on repeat clicks into an already-open tab.** Reports open each other in *named* tabs
-  (`scauto_cache`, `scauto_memories`, `scauto_comms`), so a second click on the same link reuses
+  (`scauto_cache`, `scauto_memories`, `scauto_convs`, `scauto_contacts`,
+  `scauto_comms_legacy`), so a second click on the same link reuses
   the tab that is already open. When the URL — fragment included — is unchanged, the browser fires
   **no** event, which is why "it only worked the first time". `NAV_JS` therefore **consumes the
   fragment** after acting on it (`location.hash = '_'`), so the next click is always a real
   `hashchange`. The `_` sentinel is used rather than an empty fragment because an empty fragment
   makes the browser scroll back to the top. `history.replaceState` is deliberately not used: it
   throws on `file://` documents.
+
+## The "?" popovers
+
+Every explanation icon opens its popover with `position:fixed`, placed next to the icon in viewport
+coordinates and nudged back inside the window when it would fall off the right or bottom edge
+(`HINT_JS`). An absolutely positioned popover is clipped by the first ancestor that hides its
+overflow, which is exactly what a column header does (`.vhdr .vc` clips so long titles can
+ellipsize) and what a virtual row does — the popover came out cut off, or invisible. A fixed element
+is not clipped by an overflow ancestor. It is closed on any click, and on scroll or resize, since a
+fixed popover would otherwise stay put while the page moves under it.
 
 ## Clicking inside a row
 

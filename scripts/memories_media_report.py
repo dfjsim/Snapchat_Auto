@@ -1385,7 +1385,7 @@ _BASE_CSS = """
    background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}
  .qm:hover{background:#2d2d71;color:#fff}
  .tip{display:none;position:absolute;left:20px;top:-4px;z-index:30;background:#1f1f52;color:#fff;padding:8px 11px;
-   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;text-transform:none;letter-spacing:normal}
+   border-radius:6px;font-size:11.5px;font-weight:400;width:340px;box-shadow:0 3px 10px rgba(0,0,0,.35);line-height:1.45;text-transform:none;letter-spacing:normal;white-space:normal;text-align:left}
  .hint.open .tip{display:block}
  .sharebar{background:#eef0ff;border:1px solid #c9cdf0;color:#2d2d71;padding:6px 10px;border-radius:5px;font-size:12.5px;font-weight:600;margin-bottom:10px}
  .mem{padding:8px 0;border-left:2px solid #e2e2ee;padding-left:10px;margin-top:8px}

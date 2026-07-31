@@ -80,10 +80,23 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
 - The **Memories media report** described above (`scripts/memories_media_report.py`), which links
   each Memory to all of its recovered media, including the `caching-media/**/*.pack` cache, and
   adds geolocation, hashes and source paths.
+- A **Conversations report** (`scripts/conversations_report.py`) — an index of every conversation
+  (type, participants, message and attachment counts, first/last message) plus **one detail page
+  per conversation** holding its full message table: sender, direction, both the report-timezone
+  and the raw UTC timestamps, the content, and each attachment with its MD5/SHA-256 and a link to
+  its `cache_controller` entry. Both tables are searchable, sortable and paged, and neither the
+  index nor a detail page grows with the data (see
+  [docs/report_conversations.md](docs/report_conversations.md)).
+- A **Contacts report** (`scripts/contacts_report.py`) — one table of every contact, naming the
+  artifact the contact list came from (and warning when that source includes non-friends), linked
+  to each contact's conversation.
+- The original single-page chats/contacts/groups report is kept as
+  `Communications_legacy/Communications_legacy_report.html` until the two reports above have been
+  validated on more extractions.
 - A **`cache_controller.db` report** (`scripts/cache_controller_report.py`) — a sortable/filterable
   index of every file Snapchat cached on the device (one row per `CACHE_KEY`), joining the claim,
   metadata, children and deletion tables, resolving each entry to its on-disk cache file(s), and
-  cross-linking two-way to the Memories and Communications reports. Run standalone with
+  cross-linking two-way to the Memories and Conversations reports. Run standalone with
   `python -m scripts.cache_controller_report <extraction_root_or_app_container> [output_dir]`.
 - **Compatibility fixes** for pandas 3.x / Python 3.14 and for newer Snapchat iOS schemas — see
   [docs/pandas3_python314_compat.md](docs/pandas3_python314_compat.md).
