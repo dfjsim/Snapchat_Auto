@@ -222,7 +222,45 @@ def _map_timezone(tzval):
     return tzval
 
 
+def diag_keychain(path):
+    """`--diag-keychain <file>`: read a keychain and report what it holds, without running an
+    extraction. Lets a keychain be checked in seconds on the machine that holds the case data,
+    instead of inferring it afterwards from a run log."""
+    from scripts import DecryptLocalMemories_iOS as memkeys
+    if not path:
+        # A CLI flag with a missing argument should fail fast, not pop a GUI dialog and hang a
+        # script (or a console with no one watching it).
+        print("--diag-keychain requires a path: Snapchat_Auto.exe --diag-keychain <keychain file>")
+        return 2
+    # Everything goes to the console (the built app keeps its console window), so the check stays
+    # scriptable — no dialog to dismiss.
+    res = memkeys.diagnose_keychain(path)
+    logger.info(f"Format: {res['format'] or 'not recognized'} — {res['items']} item(s), "
+                f"{res['snap_items']} in the Snapchat access group")
+    return 0 if res["status"] == "ok" else 1
+
+
+def print_usage():
+    print(f"Snapchat Auto v{get_version()}\n\n"
+          "usage: Snapchat_Auto.exe [--diag-keychain <keychain file>] [--help]\n\n"
+          "  (no arguments)          Launch the GUI.\n"
+          "  --diag-keychain <file>  Check a keychain file (GrayKey/UFED plist or objection\n"
+          "                          JSON dump) and report what it holds, without running an\n"
+          "                          extraction. Exit code 0 if egocipher was recovered, 1\n"
+          "                          otherwise.\n"
+          "  --help, -h              Show this message.")
+
+
 def main(args):
+    flag = args[0].lstrip("-/").lower() if args else ""
+    if flag in ("help", "h", "?"):
+        print_usage()
+        sys.exit(0)
+    if flag in ("diag-keychain", "diagkeychain"):
+        sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
+    if flag:                                                  # an argument was given but not
+        print_usage()                                         # recognized — don't silently fall
+        sys.exit(2)                                           # through to the GUI
 
     logger.info(f"Snapchat Auto v{get_version()}")
     cfg = load_config()

@@ -106,6 +106,45 @@
   resolves all of them too (`sccontent_folders`, logged-in account first) instead of pinning
   `_3_<uuid>`, and `mergeCache` looks a CACHE_KEY up across all of them — its multi-folder branch
   never actually resolved a file. `parseSnapvideos_PREFETCH` matches all folders as well.
+- [DONE-v1.5.0] **The friends-source fall-through no longer reads as a failure, and leaves no
+  scratch file.** `Can not find key 'share_user' in Group plist` was logged at ERROR on every
+  newer-iOS run, although it only means this app version keeps its friends list somewhere else and
+  `main` should try the next source — which on 13.49 it does, successfully, from
+  `app_group_plist_storage`. It is now an INFO statement of that version fact; the older `user`
+  format (which the script genuinely cannot read) is a WARNING; each fall-through says which source
+  it is moving to; and one `Contacts source: …` line names the source that answered — at WARNING
+  for the two `primary.docobjects` fallbacks, which are **not** the friends list. Both friends
+  parsers also round-tripped the embedded NSKeyedArchiver blob through a `test.plist` file written
+  into the run folder next to the reports; they now parse it in memory (`BytesIO`), so no scratch
+  artifact is produced at all.
+- [DONE-v1.5.0] **Partially cached Memories media is detected and flagged instead of silently
+  presented as the whole media.** The cache holds only the byte ranges the device actually
+  streamed, so `collect_media` was writing truncated and gap-riddled `.mp4`s that looked like
+  complete recoveries — and whose broken frames made OpenCV's FFmpeg print thousands of
+  `Invalid NAL unit size` / `Error splitting the input into NAL units` lines into the run log.
+  Three checks now classify every recovered file: a missing **PKCS#7** tail (a complete CBC file
+  always ends in padding), **holes between `<start>-<end>` shards** (`_part_coverage`, measured
+  from each shard's real size on disk so either end convention works), and a **pack shorter than
+  the payload length its header declares**. Incomplete files get a red badge stating exactly what
+  is missing, a tinted row, a banner on the detail page, a **PART** chip and an
+  *incomplete only / complete only* filter on the index, and a count in the header; plaintext
+  files are marked *completeness not verified* rather than guessed at. A ciphertext whose length
+  is not a block multiple is no longer discarded outright — the block-aligned prefix is recovered.
+- [DONE-v1.5.0] **caching-media pack matching went from hours to minutes.** Each pack folder was
+  tried against every Memory's key by AES-decrypting the *whole* item, so cost grew with
+  gallery size × item size (~5 h on a 22 k-Memory gallery). `pack_matches` probes the first
+  32 bytes instead — every acceptance test in `decrypt_pack` reads within the first 24 plaintext
+  bytes, and CBC decrypts a prefix independently, so the verdict is identical (~50× faster per
+  trial, and the item is no longer read off disk to reject it).
+- [DONE-v1.5.0] **`collect_media` reports progress.** It does all the per-file work of the
+  Memories report and logged nothing from start to finish, so a long run on a large gallery was
+  indistinguishable from a hang. Each phase now logs its size, periodic progress and elapsed time,
+  and a closing line counts the partially cached files. FFmpeg's decoder output is silenced by
+  redirecting **fd 2** (`_quiet_stderr`) — the `OPENCV_FFMPEG_*` environment variables never
+  suppressed it, because the capture options reach only the demuxer while those messages come from
+  the decoder context. Poster frames are still extracted from partial video: the cached bytes start
+  at the beginning of the file, so `generate_poster` skips the seek and takes the first frame that
+  decodes.
 - [DONE-v1.5.0] **Cache files the index does not know about are listed.** The cache_controller
   report was built only from `cache_controller.db`, so a file on disk that no claim / metadata /
   tombstone row leads to had no row at all. `orphan_entries` adds one per such file, in the category

@@ -15,6 +15,7 @@ from pathlib import Path
 from platform import system
 import blackboxprotobuf
 import hashlib
+from io import BytesIO
 from scripts import DecryptLocalMemories_iOS
 from scripts import report_ui
 import math
@@ -403,7 +404,7 @@ def getFriendsAppGroupPlistStorage(app_group_plist_storage_list, arroyo):
             elif "share_user" in data.keys():
                 app_group_plist_storage_friends_groups = i
                 try:
-                    logger.info("found share_user in app_group_plist_storage")
+                    logger.info("Found 'share_user' in app_group_plist_storage")
                     friends_df, group_df = getFriendsPlist(app_group_plist_storage_friends_groups)
                     return friends_df, group_df
                 except KeyError:
@@ -422,15 +423,13 @@ def getFriendsAppGroupPlistStorage(app_group_plist_storage_list, arroyo):
     with open(app_group_plist_storage_friends_groups, "rb") as f:
         data = plistlib.loads(f.read())
 
-    with open("test.plist", "wb") as test:
-        try:
-            test.write(data["snapchatter_repository"])
-        except KeyError:
-            raise KeyError
+    blob = data.get("snapchatter_repository")
+    if blob is None:
+        raise KeyError("snapchatter_repository")
 
-    with open("test.plist", "rb") as test:
-        plist = ccl_bplist.load(test)
-        data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)    
+    # Embedded NSKeyedArchiver blob, parsed in memory (see getFriendsPlist).
+    plist = ccl_bplist.load(BytesIO(blob))
+    data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
     
     if app_group_plist_storage_user != "":
         with open(app_group_plist_storage_user, "rb") as f:
@@ -558,21 +557,24 @@ def getFriendsPlist(group_plist):
     with open(group_plist, "rb") as f:
         data = plistlib.loads(f.read())
 
-    with open("test.plist", "wb") as test:
-        try:
-            test.write(data["share_user"])
-        except KeyError:
-            logger.error("Can not find key 'share_user' in Group plist")
-            try:
-                test.write(data["user"])
-                logger.error(
-                    "Found key 'user' in plist, this is an older version of storing friends not yet supported by this script")
-            except:
-                raise Exception
+    # 'share_user' absent is not a failure: it is how we learn this app version keeps its friends
+    # list elsewhere, and main() then tries the next source. Logging it as an ERROR made every
+    # newer-iOS run look broken, so it is stated as the version fact it is.
+    blob = data.get("share_user")
+    if blob is None:
+        logger.info("group.snapchat.picaboo.plist has no 'share_user' key — this app version does "
+                    "not keep the friends list there")
+        blob = data.get("user")
+        if blob is None:
+            raise KeyError("share_user")
+        # This one IS a limitation of the script rather than a fact about the device.
+        logger.warning("group.snapchat.picaboo.plist uses the older 'user' friends format, which "
+                       "this script does not support yet — attempting it anyway")
 
-    with open("test.plist", "rb") as test:
-        plist = ccl_bplist.load(test)
-        data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
+    # The value is an embedded NSKeyedArchiver blob; parse it in memory rather than round-tripping
+    # it through a scratch file (which used to be dropped in the run folder as "test.plist").
+    plist = ccl_bplist.load(BytesIO(blob))
+    data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
 
     current_username = ""
     display = []
@@ -1629,17 +1631,22 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # contacts report means: the two plist sources are the account's friends list, the
     # primary.docobjects fallbacks are every Snapchatter the device knows about. See
     # scripts/contacts_report.py (SOURCE_NOTES).
+    # Where a source stops answering, it is normally because the app version moved the data, not
+    # because anything failed — so the fall-through is logged as a step, and only the last two
+    # sources (which are NOT the friends list) warrant a warning.
     friends_source = ""
     try:
         friends_df, group_df = getFriendsPlist(groupPlist)
         friends_source = "group.snapchat.picaboo.plist"
     except Exception as Error:
-        logger.info("Could not find friends in group.snapchat.picaboo")
+        logger.info(f"No friends list in group.snapchat.picaboo ({Error}) — "
+                    f"trying app_group_plist_storage")
         try:
             friends_df, group_df = getFriendsAppGroupPlistStorage(app_group_plist_storage, arroyo[0])
             friends_source = "app_group_plist_storage"
         except Exception as E:
-            logger.info(f"Could not find friends in app_group_plist_storage: {E}")
+            logger.info(f"No friends list in app_group_plist_storage ({E}) — "
+                        f"falling back to primary.docobjects")
             try:
                 friends_df, group_df, df_snapchatter = getFriendsPrimary_DisplayMetadata(Path(primaryDoc[0]), Path(arroyo[0]))
                 friends_source = "primary.docobjects (DisplayMetadata)"
@@ -1652,13 +1659,21 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                 except:
                     logger.error("Could not find friends info anywhere! This is unexpected, please contact the author")
                     friends_df, group_df = pd.DataFrame({}), pd.DataFrame({})
+    if friends_source.startswith("primary.docobjects"):
+        logger.warning(f"Contacts source: {friends_source} — this is NOT the account's friends "
+                       f"list and MAY contain users who are not friends. The Contacts report says "
+                       f"so in a banner.")
+    elif friends_source:
+        logger.info(f"Contacts source: {friends_source} — the account's own friends list")
     try:                    
         df_friends = getLocalUserDisplayname(friends_df, primaryDoc[0])
     except:
         pass
     
+    # Older runs left a "test.plist" scratch file in the run folder; the friends parsers now work
+    # in memory, so this only cleans up after a run made by a previous version.
     if os.path.exists("test.plist"):
-       os.remove("test.plist")
+        os.remove("test.plist")
     chats_df = getChats(arroyo[0])
     chats_df = fixSenders(chats_df, friends_df, df_snapchatter)
     cache_df = getCache(cacheController[0])

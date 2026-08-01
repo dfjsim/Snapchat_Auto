@@ -142,6 +142,9 @@ The table is **virtualized**: rows live in `data/index.js`, each row's detail HT
 `data/detail-<n>.js` chunk loaded only when that row is expanded, and only the visible rows are put
 in the DOM — so the report opens instantly no matter how many entries `cache_controller.db` has
 (measured: ~0.7 s for 101 200 rows). Search covers the whole index, not just what is on screen.
+Rows are searchable **by URL** (full or partial): a row's own `CONTENT_RETRIEVAL_METADATA` source
+URL, and — for the ~2 entries in 3 that have no retrieval metadata — the CDN URLs of the Memory it
+is linked to (`load_memory_index` → `snap_urls`), which the detail panel also lists.
 A **pager** (rows per page + page navigation) sits under the toolbar, and **Expand all** applies to
 the current page and refuses more than 500 rows at once. Entries can be **ticked as relevant to the
 case**, filtered with **Selected only** and saved with **💾 Save selections** — shared with the

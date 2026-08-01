@@ -12,6 +12,20 @@ are documented in depth in [snapchat_ios_memories_decryption.md](snapchat_ios_me
 **This page focuses on how the report links a Memory to its media files**, which is what the “?”
 icon next to each media file explains in the report itself.
 
+## The keychain banner
+
+When no `egocipher` was recovered, the index carries a red banner. Its first sentence is the
+`detail` from `read_keychain_status` (`scripts/DecryptLocalMemories_iOS.py`), so it names the
+actual cause — no keychain supplied, path not found, unparseable dump, parsed but no `egocipher`,
+or no Snapchat items — rather than the single catch-all message it used to show. The same causes
+are logged at INFO/WARNING during the run, and can be checked on their own with
+`--diag-keychain` (see [Diagnosing a keychain](snapchat_ios_memories_decryption.md#diagnosing-a-keychain)).
+
+Note what the banner does **not** imply: on the new schema, My Eyes Only memories carry their
+key/IV in `scdb` and decrypt with no keychain at all, so MEO media appearing in the report says
+nothing about whether the keychain was read. **Geolocation is the reliable tell** — it always
+requires `egocipher`.
+
 ## How each media file is located and linked
 
 For every Memory that has an AES key/IV, `collect_media` gathers candidate cache files three ways.
@@ -33,11 +47,54 @@ that are concatenated in offset order before decryption (`_resolve_sccontent`); 
 notes the reconstruction. If a video has no cached still, a **poster frame** is derived from the
 decrypted `.mp4` and clearly labelled as a derived artifact.
 
+Case 3 identifies the owning key with a **32-byte probe** (`pack_matches`) rather than decrypting
+the whole item once per candidate key. Every acceptance test in `decrypt_pack` reads within the
+first 24 plaintext bytes and CBC decrypts a prefix independently of the rest, so the probe reaches
+the same verdict — but it is the difference between minutes and hours on a gallery with tens of
+thousands of Memories, since a folder is tried against every key until one matches.
+
+## Partially cached media — the file is genuine but not the whole media
+The cache holds only the byte ranges the device actually **streamed**, so recovered media is
+routinely incomplete. This is not a decryption failure: the key is right and the bytes present are
+genuine. It matters to the examiner because an incomplete video plays for a few seconds and stops,
+or breaks up part way through, and nothing about the file itself says why. Three checks classify
+every recovered file as complete / incomplete / not verified:
+
+* **Missing tail** — SCContent media is AES-256-CBC with **PKCS#7** padding, so a complete file
+  always ends in valid padding. Decrypted bytes that do not are truncated (`_has_pkcs7`); a random
+  final block only looks like valid padding about 1 time in 255.
+* **Holes between shards** — `_part_coverage` walks the `<start>-<end>` parts in offset order and
+  measures each one's **actual size on disk** (so it holds whichever end convention the name uses),
+  reporting every gap. A gap matters more than a short tail: concatenating across it leaves every
+  later byte at the wrong offset, so a decoder reads impossible atom/NAL sizes rather than simply
+  stopping. The declared range is used only to notice a shard shorter than its own name claims.
+* **Short packs** — `decrypt_pack` returns the payload length the pack header declares; fewer bytes
+  than that means `-<n>.pack` chunks were evicted or never downloaded.
+
+A ciphertext whose length is not a block multiple is a partial cache, **not** a dead loss: the
+block-aligned prefix is decrypted and kept rather than the file being discarded.
+
+In the report, an incomplete file gets a red **⚠ incomplete — partially cached** badge in its
+*Source cache* cell whose “?” states exactly what is missing (byte offsets, counts), its row is
+tinted, and the detail page carries a banner above the media table. The index shows a **PART**
+chip on the affected Memory, counts them in the header, and offers a **Media: incomplete only /
+complete only** filter. Files stored as plaintext are marked *completeness not verified* — there is
+no padding to check and no shard layout to measure, so claiming either way would be a guess.
+
+Poster frames are still extracted from partial video: what the cache holds starts at the beginning
+of the file, so the opening frames decode. For those files `generate_poster` skips the seek (a seek
+into missing bytes fails and costs a full re-read) and takes the first frame that decodes, bounded
+by `_POSTER_MAX_READS`. FFmpeg's decoder complaints (`Invalid NAL unit size`, `Error splitting the
+input into NAL units`) are silenced by `_quiet_stderr`, which redirects **fd 2** — the
+`OPENCV_FFMPEG_*` environment variables do not help, as the capture options reach only the demuxer
+while those messages come from the decoder context.
+
 ## Layout — a lightweight index + per-group detail sub-pages
 To keep the report usable with many Memories, it is split (`generate_report`):
 
 * **`Memories_report.html`** — a lightweight, **sortable/filterable index table** (global search,
-  per-column sort, a with/without-thumbnail filter, a user filter). One **row per Memory (snap)**
+  per-column sort, a with/without-thumbnail filter, a user filter, an incomplete-media filter).
+  One **row per Memory (snap)**
   with: thumbnail, kind, user, `ZSNAPID` / `ZENTRYID` / `ZMEDIAID`, cache-file tokens, the media
   **MD5 / SHA-256**, created time, geolocation, and a link to the detail sub-page. Each row carries
   `id="mem-<ZSNAPID>"` (the anchor other reports link to).
@@ -47,6 +104,10 @@ To keep the report usable with many Memories, it is split (`generate_report`):
   cache-token cell shows the first two and counts the rest). It also carries the **pager** and the
   **selection** controls, and a **My Eyes Only** filter. Keep the `data/` and `media/` folders next
   to the HTML file. See [report_ui.md](report_ui.md).
+  The search text behind each row also carries the Memory's **CDN URLs** (media / overlay /
+  thumbnail, download and redirect), so a full or partial URL — pasted from `scdb-27`, from a
+  detail page, or from the cache_controller report — finds its Memory. The URLs themselves are
+  shown on the detail sub-page.
 * **`pages/<key>.html`** — one **detail sub-page per group**, holding the full detail (metadata,
   location, per-snap AES key/IV, ZGALLERYSNAP/ZGALLERYENTRY values, CDN URLs, timestamp tables, and
   the media-files table with hashes/paths and the 🗄 cache-entry links). MEDIA ID and SNAP IDs are

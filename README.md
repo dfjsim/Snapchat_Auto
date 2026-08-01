@@ -58,16 +58,32 @@ per-user sections with a navigation bar linking to each.
 - **Video posters:** when a video Memory has a recovered `.mp4` but no cached still image, a
   poster frame is extracted from the video for the thumbnail. It is clearly labelled *poster
   (generated)* / source *generated* — a derived artifact, not original device data.
+- **Incomplete media is flagged.** The device caches only the byte ranges it actually streamed, so
+  recovered media is often *part* of the original — a video that plays for a few seconds and stops,
+  or breaks up part way through. Those files carry a red **⚠ incomplete — partially cached** badge
+  stating exactly what is missing (missing tail, gaps between byte ranges, or missing pack chunks),
+  the index shows a **PART** chip with an *incomplete only* filter, and the header counts them. The
+  bytes are still genuine and correctly decrypted — they are just not the whole media, which is
+  something to state before drawing anything from what such a file does or does not show.
 
 - Works for both key storage schemas and for multiple Snapchat users on one device.
-- Regular-memory imagery on newer Snapchat decrypts **without** a keychain. A
-  full-filesystem keychain (with `egocipher`/`persistedkey`) is required for **geolocation**,
-  for **My Eyes Only**, and for older extractions where the keys live in `gallery.encrypteddb`.
+- On newer Snapchat, regular-memory **and My Eyes Only** imagery decrypts **without** a keychain
+  (their keys live in `scdb`). A full-filesystem keychain (with `egocipher`/`persistedkey`) is
+  required for **geolocation**, and for older extractions where the keys live in
+  `gallery.encrypteddb` — there it also covers My Eyes Only.
 
 Run it standalone on an already-unzipped extraction:
 
 ```
 python -m scripts.memories_media_report <extraction_root_or_app_container> [keychain.plist] [output_dir]
+```
+
+Check a keychain by itself, without running an extraction (prints the format, the item counts and
+which keys were recovered; exit code 0 only when `egocipher` was found):
+
+```
+Snapchat_Auto.exe --diag-keychain <keychain file>
+python -m scripts.DecryptLocalMemories_iOS --diag-keychain <keychain file>   # from source
 ```
 
 See [docs/snapchat_ios_memories_decryption.md](docs/snapchat_ios_memories_decryption.md) for
