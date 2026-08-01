@@ -25,11 +25,13 @@ import sys
 import glob
 import html
 import json
+import time
 import shutil
 import hashlib
 import sqlite3
 import logging
 import subprocess
+import contextlib
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
@@ -212,55 +214,95 @@ def _aes_cbc(key, iv, data):
     return AES.new(key, AES.MODE_CBC, iv).decrypt(data[:n])
 
 
+def _has_pkcs7(data):
+    """True when data ends in valid PKCS#7 padding.
+
+    Used as a **completeness test**: a fully cached SCContent file is CBC + PKCS#7, so its last
+    plaintext block always ends in padding. Random plaintext (what a truncated file's final block
+    decrypts to) only looks like valid padding about 1 time in 255.
+    """
+    if not data:
+        return False
+    n = data[-1]
+    return 1 <= n <= 16 and len(data) >= n and data[-n:] == bytes([n]) * n
+
+
 def _strip_pkcs7(data):
     """Remove PKCS#7 padding if present (SCContent media is CBC + PKCS#7)."""
-    if data:
-        n = data[-1]
-        if 1 <= n <= 16 and data[-n:] == bytes([n]) * n:
-            return data[:-n]
-    return data
+    return data[:-data[-1]] if _has_pkcs7(data) else data
 
 
 def decrypt_sccontent(raw, key, iv):
-    """Decrypt an SCContent file. Returns (padded, stripped, ext) or (None, None, None).
+    """Decrypt an SCContent file. Returns (padded, stripped, ext, tail_ok) or a 4-None tuple.
 
     SCContent media is AES-256-CBC with PKCS#7 padding. ``padded`` is the raw CBC output (as some
     older decryptors emit it); ``stripped`` has the padding removed so it is byte-exact and its
     MD5/SHA-256 match current tools. They are equal when the file was already plaintext.
+
+    ``tail_ok`` reports whether the **end** of the media is present: True when the decrypted bytes
+    carry valid PKCS#7 padding, False when they do not (the cache holds only part of the file),
+    and None when the file was already plaintext, where padding says nothing either way.
+
+    A ciphertext whose length is not a multiple of the AES block size is a partial cache, not a
+    dead loss: the block-aligned prefix still decrypts, so we recover it and report ``tail_ok``
+    False rather than discarding the whole file.
     """
     ext = guess_media(raw[:16])
     if ext:
-        return raw, raw, ext                              # already plaintext, no padding
-    if not key or len(key) != 32 or len(iv) != 16 or len(raw) % 16:
-        return None, None, None
+        return raw, raw, ext, None                        # already plaintext, no padding
+    if not key or len(key) != 32 or len(iv) != 16 or len(raw) < 16:
+        return None, None, None, None
     plain = _aes_cbc(key, iv, raw)
+    aligned = len(raw) % 16 == 0
     if guess_media(plain[:16]):
-        return plain, _strip_pkcs7(plain), guess_media(plain[:16])
+        return plain, _strip_pkcs7(plain), guess_media(plain[:16]), aligned and _has_pkcs7(plain)
     if guess_media(plain[8:24]):                           # some have an 8-byte prefix
         body = plain[8:]
-        return body, _strip_pkcs7(body), guess_media(plain[8:24])
-    return None, None, None
+        return body, _strip_pkcs7(body), guess_media(plain[8:24]), aligned and _has_pkcs7(body)
+    return None, None, None, None
 
 
 def decrypt_pack(cipher, key, iv):
-    """Decrypt a concatenated caching-media pack. Returns (bytes, ext) or (None, None)."""
+    """Decrypt a concatenated caching-media pack. Returns (bytes, ext, declared_len) or 3×None.
+
+    ``declared_len`` is the payload length the pack header states. Comparing it with the payload
+    actually returned is how a partially cached pack (missing `-<n>.pack` chunks) is detected; it
+    is None for the header-less fallback shapes, where nothing declares the true length.
+    """
     if not key or len(key) != 32 or len(iv) != 16:
-        return None, None
+        return None, None, None
     plain = _aes_cbc(key, iv, cipher)
     if plain[:4] == PACK_HEADER_MARKER:
         length = int.from_bytes(plain[4:8], "little")
         payload = plain[8:8 + length]
         ext = guess_media(payload[:16])
         if ext:
-            return payload, ext
+            return payload, ext, length
     # fallbacks (older/variant containers)
     ext = guess_media(plain[:16])
     if ext:
-        return plain, ext
+        return plain, ext, None
     ext = guess_media(plain[8:24])
     if ext:
-        return plain[8:], ext
-    return None, None
+        return plain[8:], ext, None
+    return None, None, None
+
+
+# Every branch of decrypt_pack decides purely on the first 24 plaintext bytes (magic bytes at
+# offset 0, or after the 8-byte header). CBC decrypts a prefix independently of the rest, so
+# decrypting two blocks answers "does this key own this pack?" exactly as the full decrypt would —
+# at 1/1000th the work when the answer is no, which it is for all but one of the candidate keys.
+_PACK_PROBE_BYTES = 32
+
+
+def pack_matches(head, key, iv):
+    """True when key/iv decrypt this pack's first bytes to something decrypt_pack would accept."""
+    if not key or len(key) != 32 or len(iv) != 16 or len(head) < 16:
+        return False
+    plain = _aes_cbc(key, iv, head[:_PACK_PROBE_BYTES])
+    if plain[:4] == PACK_HEADER_MARKER and guess_media(plain[8:24]):
+        return True
+    return bool(guess_media(plain[:16]) or guess_media(plain[8:24]))
 
 
 # --------------------------------------------------------------------------- keychain
@@ -592,11 +634,50 @@ def index_sccontent(app):
     return full, parts
 
 
+# "<cache_key>_<start>-<end>": the byte range a shard covers. index_sccontent's _SC_SPLIT_RE only
+# needs the start (to order the shards); here we also want the declared end, to cross-check it
+# against the bytes actually on disk.
+_PART_RANGE_RE = re.compile(r"_(\d+)-(\d+)$")
+
+
+def _part_coverage(ordered):
+    """Describe how completely a set of byte-range shards covers the original file.
+
+    The device caches only the ranges it actually streamed, so the shards on disk can start past 0
+    or leave holes in the middle. Concatenating them regardless yields a file whose bytes are each
+    correct but sit at the wrong offsets — which is exactly what makes a decoder report impossible
+    NAL/atom sizes rather than simply refusing the file.
+
+    ``ordered`` is ``[(start_offset, path)]`` sorted by offset. Coverage is measured from each
+    shard's **actual size on disk** rather than the ``<start>-<end>`` in its name, so it holds
+    whichever end convention the name uses; the name is used only to notice a shard that is itself
+    shorter than it claims. Returns ``{"gaps": [(from, to)], "short": [names], "bytes": int}``.
+    """
+    gaps, short, pos, total = [], [], 0, 0
+    for start, path in ordered:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        mo = _PART_RANGE_RE.search(os.path.basename(path))
+        if mo:                                             # end may be exclusive or inclusive
+            declared = int(mo.group(2)) - int(mo.group(1))
+            if size not in (declared, declared + 1):
+                short.append(os.path.basename(path))
+        if start > pos:
+            gaps.append((pos, start))
+        pos = max(pos, start + size)
+        total += size
+    return {"gaps": gaps, "short": short, "bytes": total}
+
+
 def _resolve_sccontent(cache_key, full, parts):
-    """Resolve a cache key to (ciphertext_bytes, [full paths], [ordered part paths]) or (None,...).
+    """Resolve a cache key to (ciphertext, [full paths], [ordered part paths], coverage) or 4×None.
 
     Prefers a full copy for the bytes; otherwise concatenates the byte-range parts (deduped by
     start offset). Full copies and parts are all returned so every on-disk copy shows as a source.
+    ``coverage`` is ``_part_coverage`` for a file rebuilt from shards, else None — a whole file has
+    no shard layout to be missing anything.
     """
     fulls = full.get(cache_key, [])
     ordered, seen_off = [], set()
@@ -604,14 +685,13 @@ def _resolve_sccontent(cache_key, full, parts):
         if off in seen_off:                                # e.g. a PREFETCH and a _0-1 both at 0
             continue
         seen_off.add(off)
-        ordered.append(p)
+        ordered.append((off, p))
+    paths = [p for _, p in ordered]
     if fulls:
-        cipher = open(fulls[0], "rb").read()
-    elif ordered:
-        cipher = _read_concat(ordered)
-    else:
-        return None, [], []
-    return cipher, fulls, ordered
+        return open(fulls[0], "rb").read(), fulls, paths, None
+    if ordered:
+        return _read_concat(paths), [], paths, _part_coverage(ordered)
+    return None, [], [], None
 
 
 _UUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -709,6 +789,17 @@ def _read_concat(paths):
     return b"".join(open(p, "rb").read() for p in paths)
 
 
+def _read_head(paths, n):
+    """First n bytes of the concatenation of paths, reading no more files than needed."""
+    out = b""
+    for p in paths:
+        with open(p, "rb") as fh:
+            out += fh.read(n - len(out))
+        if len(out) >= n:
+            break
+    return out
+
+
 def _dims(path):
     try:
         with Image.open(path) as im:
@@ -722,10 +813,66 @@ def _snap_dim(m):
     return f"{m['width']}×{m['height']}" if m.get("width") and m.get("height") else ""
 
 
-def generate_poster(video_path, out_path, at_seconds=1.0):
+@contextlib.contextmanager
+def _quiet_stderr():
+    """Silence FFmpeg's decoder chatter at the OS level for the duration of the block.
+
+    OpenCV's FFmpeg writes to file descriptor 2 from C, so ``contextlib.redirect_stderr`` never
+    sees it, and the ``OPENCV_FFMPEG_*`` environment variables do not help either: the capture
+    options reach only the *demuxer*, while "Invalid NAL unit size" / "Error splitting the input
+    into NAL units" come from the decoder context. Partially cached media emits two such lines per
+    undecodable frame, which floods the run log and — on a Windows console — costs more time than
+    the decoding itself, so fd 2 goes to the null device while the decoder runs.
+    """
+    try:
+        sys.stderr.flush()
+    except Exception:                                      # pragma: no cover - detached stderr
+        pass
+    try:
+        saved = os.dup(2)
+    except (OSError, ValueError, AttributeError):           # no real fd 2 (pythonw, some hosts)
+        yield
+        return
+    devnull = None
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        try:
+            os.dup2(saved, 2)
+        finally:
+            os.close(saved)
+            if devnull is not None:
+                os.close(devnull)
+
+
+# How many frames to try before giving up on a poster. Partially cached video decodes at the start
+# and fails after that, so the frame we want is always within the first few reads; the bound is
+# what stops a badly damaged file from being decoded end to end for a thumbnail.
+_POSTER_MAX_READS = 60
+
+
+def _first_decodable(cap, limit):
+    """The first frame that decodes, reading forward from the current position. None if none does."""
+    for _ in range(limit):
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            return frame
+        if not ok:                                         # stream ended / unrecoverable
+            return None
+    return None
+
+
+def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
     """Extract a single poster frame from a video into out_path (JPEG). Returns True on success.
 
     The result is a DERIVED artifact (not original device data) — callers must label it as such.
+
+    Incompletely cached video still gets a poster. What the cache holds starts at the beginning of
+    the file, so the opening frames decode even when the sample table points past the bytes on
+    disk; for those files we skip the seek (seeking into missing bytes fails, and the failure costs
+    a full re-read) and take the first frame that decodes.
     """
     for var in ("OPENCV_LOG_LEVEL", "OPENCV_FFMPEG_LOGLEVEL", "OPENCV_VIDEOIO_DEBUG"):
         os.environ.setdefault(var, "OFF" if "LOG_LEVEL" in var else "0")
@@ -735,17 +882,25 @@ def generate_poster(video_path, out_path, at_seconds=1.0):
         logger.debug(f"cv2 unavailable, cannot generate poster: {error}")
         return False
     try:
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0
-        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-        if fps and frames:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, min(int(fps * at_seconds), max(int(frames) - 1, 0)))
-        ok, frame = cap.read()
-        if not ok:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = cap.read()
-        cap.release()
-        if not ok or frame is None:
+        frame = None
+        with _quiet_stderr():
+            cap = cv2.VideoCapture(video_path)
+            try:
+                if complete:
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                    if fps and frames:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES,
+                                min(int(fps * at_seconds), max(int(frames) - 1, 0)))
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        frame = _first_decodable(cap, _POSTER_MAX_READS)
+                else:
+                    frame = _first_decodable(cap, _POSTER_MAX_READS)
+            finally:
+                cap.release()
+        if frame is None:
             return False
         return bool(cv2.imwrite(out_path, frame))
     except Exception as error:
@@ -763,6 +918,52 @@ def _save_media(outdir, name, data):
     with open(out, "wb") as o:
         o.write(data)
     return {"out": name, "bytes": len(data), "dim": _dims(out)}
+
+
+def _sccontent_completeness(coverage, tail_ok):
+    """Classify a rebuilt SCContent file. Returns (complete, reason) with complete tri-state.
+
+    ``complete`` is True when nothing says bytes are missing, False when something does, and None
+    when the file was stored as plaintext — there is no padding to check and no shard layout to
+    measure, so we say "unknown" rather than implying a completeness we did not verify.
+    """
+    problems = []
+    gaps = (coverage or {}).get("gaps") or []
+    short = (coverage or {}).get("short") or []
+    if gaps:
+        missing = sum(b - a for a, b in gaps)
+        where = ", ".join(f"{a:,}–{b:,}" for a, b in gaps[:4])
+        problems.append(f"{len(gaps)} gap(s) in the cached byte ranges — {missing:,} bytes missing "
+                        f"at offset {where}{', …' if len(gaps) > 4 else ''}")
+    if short:
+        problems.append(f"{len(short)} shard(s) hold fewer bytes than the range in their name "
+                        f"declares ({', '.join(short[:3])}{', …' if len(short) > 3 else ''})")
+    if tail_ok is False:
+        problems.append("the end of the file is not cached (the decrypted bytes carry no PKCS#7 "
+                        "padding, which a complete file always ends with)")
+    if problems:
+        return False, ("Partially cached — " + "; ".join(problems) + ". The device stores only the "
+                       "byte ranges it actually streamed. This is NOT a decryption failure: the key "
+                       "is correct and the recovered bytes are genuine, but the file is not the "
+                       "whole media. Bytes after a gap sit at the wrong offsets, so a player or "
+                       "decoder will fail from that point on.")
+    if tail_ok is None and not coverage:
+        return None, ("Completeness not verified: this cache file was stored as plaintext, so "
+                      "there is no padding to check and no shard layout to measure.")
+    return True, ""
+
+
+def _pack_completeness(payload, declared):
+    """Classify a caching-media pack from its header's declared payload length."""
+    if declared is None:
+        return None, ("Completeness not verified: this pack uses a header-less variant container, "
+                      "so nothing on disk declares how long the payload should be.")
+    if len(payload) < declared:
+        return False, (f"Partially cached — the pack header declares a {declared:,}-byte payload "
+                       f"but only {len(payload):,} bytes are on disk ({declared - len(payload):,} "
+                       "missing). Chunks of this item were evicted from the cache or never "
+                       "downloaded. The recovered bytes are genuine, just truncated.")
+    return True, ""
 
 
 def collect_media(memories, app, outdir, padding="both"):
@@ -783,8 +984,16 @@ def collect_media(memories, app, outdir, padding="both"):
     userids = map_userids(app)                 # userHash -> userId, to spot cross-scope on-disk copies
     keyed = [(sid, m) for sid, m in memories.items() if m["key"] and m["iv"]]
 
+    # This function does all the per-file work of the report and can run for a long time on a large
+    # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
+    logger.info(f"Media: {len(keyed)} memories with a usable key, "
+                f"{len(scfull)} whole + {len(scparts)} split SCContent cache file(s)")
+    t0 = time.monotonic()
+
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
-    for sid, m in keyed:
+    for done, (sid, m) in enumerate(keyed, 1):
+        if done % 2000 == 0:
+            logger.info(f"  SCContent: {done}/{len(keyed)} memories")
         targets = []                                       # (role, cache_key, addressing basis)
         url_fields = {"full": "ZMEDIADOWNLOADURL", "overlay": "ZOVERLAYDOWNLOADURL",
                       "thumbnail": "ZTHUMBNAILDOWNLOADURL"}
@@ -807,12 +1016,13 @@ def collect_media(memories, app, outdir, padding="both"):
             if cache_key in seen:
                 continue
             seen.add(cache_key)
-            cipher, fulls, pparts = _resolve_sccontent(cache_key, scfull, scparts)
+            cipher, fulls, pparts, coverage = _resolve_sccontent(cache_key, scfull, scparts)
             if cipher is None:
                 continue
-            padded, stripped, ext = decrypt_sccontent(cipher, m["key"], m["iv"])
+            padded, stripped, ext, tail_ok = decrypt_sccontent(cipher, m["key"], m["iv"])
             if padded is None:
                 continue
+            complete, why_incomplete = _sccontent_completeness(coverage, tail_ok)
             has_pad = padded != stripped
             if padding == "keep":
                 write_bytes = padded
@@ -842,26 +1052,38 @@ def collect_media(memories, app, outdir, padding="both"):
                           "cache_key": cache_key,
                           "in_cc": cache_key.lower() in cc_keys,
                           "how": addr_basis,
+                          "complete": complete, "why_incomplete": why_incomplete,
                           "owner_uid": owner_uid,
                           "scope_by_path": scope_by_path, "cross_scope": cross_scope})
             m["media_files"].append(entry)
 
+    n_sc = sum(len(m["media_files"]) for _, m in keyed)
+    logger.info(f"Media: SCContent done — {n_sc} file(s) in {time.monotonic() - t0:.0f}s")
+
     # --- caching-media (link by decrypt-and-match; unique names by item hash) ---
-    for folder, by_item in index_caching_media(app):
-        first = _read_concat(next(iter(by_item.values())))
-        match = None
-        for sid, m in keyed:
-            payload, ext = decrypt_pack(first, m["key"], m["iv"])
-            if payload:
-                match = (sid, m)
-                break
+    t0 = time.monotonic()
+    cm_folders = index_caching_media(app)
+    logger.info(f"Media: matching {len(cm_folders)} caching-media folder(s) against "
+                f"{len(keyed)} key(s)")
+    n_packs = 0
+    for done, (folder, by_item) in enumerate(cm_folders, 1):
+        if done % 500 == 0:
+            logger.info(f"  caching-media: {done}/{len(cm_folders)} folder(s), {n_packs} file(s)")
+        # Probe with the first two plaintext blocks only. Every acceptance test in decrypt_pack
+        # reads within the first 24 plaintext bytes, and CBC decrypts a prefix independently of the
+        # rest, so this identifies the owning key exactly as a full decrypt would — but a wrong key
+        # is rejected after 32 bytes instead of after the whole item, which is the difference
+        # between minutes and hours once a gallery has thousands of memories.
+        head = _read_head(next(iter(by_item.values())), _PACK_PROBE_BYTES)
+        match = next(((sid, m) for sid, m in keyed if pack_matches(head, m["key"], m["iv"])), None)
         if not match:
             continue
         sid, m = match
         for item_hash, chunks in by_item.items():
-            payload, ext = decrypt_pack(_read_concat(chunks), m["key"], m["iv"])
+            payload, ext, declared = decrypt_pack(_read_concat(chunks), m["key"], m["iv"])
             if not payload:
                 continue
+            complete, why_incomplete = _pack_completeness(payload, declared)
             entry = _save_media(outdir, f"{sid}_pack_{item_hash[:12]}.{ext}", payload)
             how = ("Linked by decrypt-and-match: caching-media pack names are opaque, so this "
                    "folder was tried against every Memory's AES key/IV and only this Memory's key "
@@ -870,8 +1092,11 @@ def collect_media(memories, app, outdir, padding="both"):
             entry.update({"role": "cached", "source": "caching-media", "ext": ext,
                           "src": chunks, "folder": folder, "item": item_hash,
                           "hashes": [("", *_hashes(payload))], "snap_dim": _snap_dim(m),
+                          "complete": complete, "why_incomplete": why_incomplete,
                           "how": how})
             m["media_files"].append(entry)
+            n_packs += 1
+    logger.info(f"Media: caching-media done — {n_packs} file(s) in {time.monotonic() - t0:.0f}s")
 
     # label the smallest caching-media still per memory as the "preview"
     for m in memories.values():
@@ -881,26 +1106,49 @@ def collect_media(memories, app, outdir, padding="both"):
             packs[0]["role"] = "preview"
 
     # for video memories with a recovered .mp4 but no still, derive a poster frame from the video
+    t0 = time.monotonic()
+    todo = []
     for sid, m in memories.items():
         if _best_still(m["media_files"]):
             continue
-        vids = [f for f in m["media_files"] if f["ext"] == "mp4"]
-        if not vids:
-            continue
-        video_out = os.path.join(outdir, vids[0]["out"])
+        # A complete video makes the better poster (we can seek into it), so prefer one; among
+        # equals the largest file has the most of the media in it.
+        vids = sorted((f for f in m["media_files"] if f["ext"] == "mp4"),
+                      key=lambda f: (f.get("complete") is False, -f["bytes"]))
+        if vids:
+            todo.append((sid, m, vids[0]))
+    logger.info(f"Media: extracting poster frames from {len(todo)} video(s) with no cached still")
+    made = 0
+    for done, (sid, m, vid) in enumerate(todo, 1):
+        if done % 500 == 0:
+            logger.info(f"  posters: {done}/{len(todo)}, {made} extracted")
+        video_out = os.path.join(outdir, vid["out"])
         poster_name = f"{sid}_poster.jpg"
-        if not generate_poster(video_out, os.path.join(outdir, poster_name)):
+        if not generate_poster(video_out, os.path.join(outdir, poster_name),
+                               complete=vid.get("complete") is not False):
             continue
+        made += 1
         data = open(os.path.join(outdir, poster_name), "rb").read()
         entry = _save_media(outdir, poster_name, data)      # already written; recompute size/dim
+        partial = (" The video it came from is only partially cached, so the frame is from the "
+                   "part that is present." if vid.get("complete") is False else "")
         entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
                       "src": ["(generated from the decrypted video — not original device data)"]
-                             + vids[0]["src"],
+                             + vid["src"],
                       "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": "",
+                      "complete": None, "why_incomplete": "",
                       "how": ("Derived artifact: this Memory is a video with no cached still, so a "
                               "poster frame was extracted from the decrypted .mp4. It is NOT "
-                              "original device data.")})
+                              "original device data." + partial)})
         m["media_files"].append(entry)
+    logger.info(f"Media: posters done — {made} of {len(todo)} extracted "
+                f"in {time.monotonic() - t0:.0f}s")
+
+    files = [f for m in memories.values() for f in m["media_files"]]
+    partial = sum(1 for f in files if f.get("complete") is False)
+    if partial:
+        logger.info(f"Media: {partial} of {len(files)} recovered file(s) are only partially "
+                    f"cached — flagged as incomplete in the report")
 
 
 # --------------------------------------------------------------------------- report
@@ -1105,6 +1353,17 @@ def _info(text):
         return ""
     return ("<span class='hint'><span class='qm' onclick='hint(event,this)'>?</span>"
             f"<span class='tip'>{html.escape(text)}</span></span>")
+
+
+def _partial_badge(f):
+    """Badge + explanation for a media file the cache holds only part of."""
+    if f.get("complete") is False:
+        return (" <span class='partial'>⚠ incomplete — partially cached</span>"
+                + _info(f.get("why_incomplete")))
+    if f.get("complete") is None and f.get("why_incomplete"):
+        return " <span class='unverified'>completeness not verified</span>" + \
+               _info(f.get("why_incomplete"))
+    return ""
 
 
 def _cross_scope_note(f):
@@ -1354,6 +1613,7 @@ _BASE_CSS = """
  a.back{display:inline-block;margin:14px 24px 0;color:#2d2d71;font-weight:600;text-decoration:none;font-size:13px}
  a.back:hover{text-decoration:underline}
  .warn{background:#ffe8e8;border:1px solid #e0a0a0;color:#7a1f1f;padding:10px 24px;font-size:13px}
+ .warn .sub{color:#9a5555} .warn code{font-family:ui-monospace,Consolas,monospace;font-size:12px}
  .detailwrap{display:grid;grid-template-columns:190px 1fr;gap:16px;padding:16px 24px;align-items:start}
  .detailwrap .thumbcol img{max-width:170px;max-height:300px;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
  .noimg{width:150px;height:120px;display:flex;align-items:center;justify-content:center;background:#e6e6ee;color:#888;border-radius:6px;font-size:12px}
@@ -1380,6 +1640,15 @@ _BASE_CSS = """
  .muted{color:#999} .meo{background:#8a1f1f;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px}
  a.cclink{color:#2d2d71;text-decoration:none;font-size:10.5px;white-space:nowrap} a.cclink:hover{text-decoration:underline}
  .xscope{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;white-space:nowrap}
+ /* partially cached media — the file is genuine but not the whole media */
+ .partial{background:#fde3e3;color:#8a1f1f;border:1px solid #eeacac;border-radius:8px;padding:0 6px;
+   font-size:10px;font-weight:700;white-space:nowrap}
+ .unverified{background:#eef0f6;color:#666;border:1px solid #d3d7e4;border-radius:8px;padding:0 6px;
+   font-size:10px;white-space:nowrap}
+ .partialbar{background:#fdeeee;border:1px solid #edb8b8;border-left:4px solid #b03535;color:#6d1b1b;
+   border-radius:5px;padding:8px 12px;margin:8px 0;font-size:12px;line-height:1.5}
+ .partialcap{color:#b03535;font-weight:700}
+ tr.partialrow td{background:#fff8f8}
  .hint{position:relative;display:inline-block}
  .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
    background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}
@@ -1497,7 +1766,10 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     files = _dedup_media(members)
     still = _best_still(files)
     if still:
-        cap = "<div class='gencap'>▶ poster generated from video</div>" if still.get("generated") else ""
+        cap = ("<div class='gencap'>▶ poster generated from video</div>"
+               if still.get("generated") else "")
+        if still.get("complete") is False:
+            cap += "<div class='gencap partialcap'>⚠ from partially cached media</div>"
         thumb_html = (f'<a href="{media_prefix}{html.escape(still["path"])}" target="_blank">'
                       f'<img src="{media_prefix}{html.escape(still["path"])}" loading="lazy"></a>{cap}')
     else:
@@ -1510,6 +1782,17 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     if is_video and not any(f["ext"] == "mp4" for f in files):
         kind += " <span class='muted'>(preview only — full video not cached)</span>"
     meo = ' <span class="meo">My Eyes Only</span>' if any(m["is_meo"] for m in members) else ""
+
+    # An incomplete file is still evidence, but the examiner has to know the media in front of them
+    # is not the whole media before they draw anything from what it does or does not show.
+    n_partial = sum(1 for f in files if f.get("complete") is False)
+    partial_banner = ("" if not n_partial else
+                      f"<div class='partialbar'>⚠ <b>{n_partial} of {len(files)}</b> recovered "
+                      "media file(s) below are <b>incomplete</b>: the device cached only part of "
+                      "the original, so what plays or displays here stops short of — or breaks up "
+                      "part way through — the real media. The bytes present are genuine and "
+                      "correctly decrypted. Each file's <i>Source cache</i> cell says exactly what "
+                      "is missing.</div>")
 
     # prominent MEDIA ID (shared) + snap count
     media_id = lead["ids"].get("ZMEDIAID")
@@ -1574,7 +1857,7 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                           f"<span class='hl'>SHA-256</span>{tag} {sha256}")
         hashes = "<div class='hgap'></div>".join(blocks)
         dim = f.get("dim") or f.get("snap_dim") or ""
-        source_cell = html.escape(f["source"]) + _info(f.get("how"))
+        source_cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
         if f.get("in_cc") and f.get("cache_key"):
             source_cell += (f" <a class='cclink' target='scauto_cache' "
                             f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
@@ -1583,7 +1866,8 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
                             + _info(_cross_scope_note(f)))
         frows.append(
-            f"<tr><td>{html.escape(f['role'])}</td><td>{source_cell}</td>"
+            f"<tr{' class=partialrow' if f.get('complete') is False else ''}>"
+            f"<td>{html.escape(f['role'])}</td><td>{source_cell}</td>"
             f"<td>{f['ext']}</td><td>{html.escape(dim)}</td>"
             f"<td>{f['bytes']//1024} KB</td>"
             f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
@@ -1600,6 +1884,7 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
         <div class="detailcol">
           {sharebar}
           <div class="kind">{kind}{meo}</div>
+          {partial_banner}
           {idband}
           {shared_html}
           {''.join(mem_blocks)}
@@ -1733,6 +2018,8 @@ def write_media_manifest(memories, outdir):
                 "path": f["path"], "role": f.get("role", ""), "ext": f.get("ext", ""),
                 "bytes": f.get("bytes", 0), "snap_id": sid,
                 "md5": hashes[0][1], "sha256": hashes[0][2],
+                # so the cache_controller report can repeat the warning next to the same bytes
+                "complete": f.get("complete"), "why_incomplete": f.get("why_incomplete", ""),
             })
     try:
         with open(os.path.join(outdir, "media_by_cache_key.json"), "w", encoding="utf-8") as fh:
@@ -1743,7 +2030,7 @@ def write_media_manifest(memories, outdir):
 
 
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
-                    src_root=None, manifest=None, run_id="default"):
+                    src_root=None, manifest=None, run_id="default", keychain_note=""):
     """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
 
     Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
@@ -1754,6 +2041,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     total = len(memories)
     linked = sum(1 for m in memories.values() if m["media_files"])
     located = sum(1 for m in memories.values() if m["latitude"] is not None)
+    n_partial = sum(1 for m in memories.values()
+                    if any(f.get("complete") is False for f in m["media_files"]))
 
     snap_tcols = _union_cols(memories.values(), "times")
     entry_tcols = _union_cols(memories.values(), "entry_times")
@@ -1781,8 +2070,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     for key, members in groups:
         for m in members:
             uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:10] + "…")
+            own = m["media_files"] or _dedup_media(members)
             still = _best_still(m["media_files"]) or _best_still(_dedup_media(members))
             has_img = bool(still)
+            n_part = sum(1 for f in own if f.get("complete") is False)
             page_href = f"pages/{key}.html#mem-{html.escape(m['snap_id'])}"
             if still:
                 thumb = (f'<a href="{page_href}"><img src="{html.escape(still["path"])}" '
@@ -1806,6 +2097,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             kind = "🎬" if is_video else "🖼️"
             if is_meo:                                     # My Eyes Only — the private album
                 kind += "<div class='meo' title='My Eyes Only'>MEO</div>"
+            if n_part:                                     # only part of the media is on the device
+                kind += (f"<div class='part' title='{n_part} recovered media file(s) are "
+                         f"incomplete — the cache holds only part of the original'>PART</div>")
             # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
             # since every byte here is multiplied by the number of memories in data/index.js
             cells = [
@@ -1823,10 +2117,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 f"title='open this memory in its own tab' href='{page_href}'>open ▸</a>"
                 f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>",
             ]
-            searchable = [zsnap, str(zentry), str(zmedia), str(uid), md5, sha,
-                          m["create_utc"]] + list(tokens)
+            # `urls` holds every CDN URL of the memory (media / overlay / thumbnail, download and
+            # redirect), so the index is searchable by a full or partial URL — the cache tokens
+            # alone only match the last path segment.
+            searchable = ([zsnap, str(zentry), str(zmedia), str(uid), md5, sha, m["create_utc"]]
+                          + list(tokens) + list(dict.fromkeys(m["urls"].values())))
             if is_meo:
                 searchable.append("meo my eyes only")
+            if n_part:
+                searchable.append("incomplete partial partially cached truncated")
             if m["latitude"] is not None:
                 searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
             rows.append([
@@ -1836,7 +2135,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "2": str(uid), "3": f"{zmedia}|{zsnap}", "6": m["created_sort"]},
                 None,
                 {"user": str(uid), "img": "y" if has_img else "n",
-                 "meo": "y" if is_meo else "n"},
+                 "meo": "y" if is_meo else "n", "part": "y" if n_part else "n"},
             ])
     report_ui.write_rows(os.path.join(outdir, "data"), rows)
 
@@ -1844,9 +2143,17 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
                                          for m in memories.values()}))
 
+    # The banner names the cause (`keychain_note`, from read_keychain_status) and then its
+    # consequences. The last sentence is there because the two are easily confused: My Eyes Only
+    # memories on the new schema carry their key in scdb and show up with no keychain at all, so
+    # seeing MEO media is not evidence that the keychain was read.
     banner = "" if keychain_available else (
-        '<div class="warn">No usable keychain (egocipher/persistedkey) was supplied — geolocation '
-        'and My Eyes Only memories cannot be recovered, and old-schema imagery cannot be decrypted.</div>')
+        '<div class="warn">'
+        + html.escape(keychain_note or "No usable keychain (egocipher) was available.")
+        + ' Geolocation cannot be recovered, and on the old schema neither My Eyes Only nor '
+          'regular memory imagery can be decrypted. <span class="sub">New-schema memories '
+          '(including My Eyes Only) carry their key in <code>scdb</code> and are unaffected.'
+          '</span></div>')
 
     index_css = """
  .toolbar{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
@@ -1860,6 +2167,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .vcells>.vc.c1{font-size:16px;line-height:1.1}
  .vcells>.vc.c1 .meo{background:#8a1f1f;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
    letter-spacing:.04em;padding:1px 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c1 .part{background:#fde3e3;color:#8a1f1f;border:1px solid #eeacac;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2,.vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
  .vcells>.vc.c3{color:#33367a} .vcells>.vc.c3 div{margin:1px 0}
@@ -1885,17 +2194,23 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<header><h1>Snapchat Memories — index</h1>'
            f'<div class="sum">{n_users} user profile(s) &middot; {total} memories &middot; {linked} with '
            f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
-           f'times in <b>{html.escape(tz_label)}</b></div></header>'
+           + (f'<b>{n_partial}</b> with incomplete media &middot; ' if n_partial else '')
+           + f'times in <b>{html.escape(tz_label)}</b></div></header>'
            f'{banner}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
-           f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, user…" oninput="flt()">'
+           f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, user…" oninput="flt()">'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
            f'<label>Thumbnail <select id="img" onchange="flt()"><option value="">any</option>'
            f'<option value="y">with</option><option value="n">without</option></select></label>'
            f'<label title="My Eyes Only — Snapchat&#39;s private, separately-encrypted album">'
            f'My Eyes Only <select id="meo" onchange="flt()"><option value="">any</option>'
            f'<option value="y">only MEO</option><option value="n">exclude MEO</option>'
+           f'</select></label>'
+           f'<label title="Memories whose recovered media the device only cached part of — the '
+           f'file is genuine but stops short of the real media">'
+           f'Media <select id="part" onchange="flt()"><option value="">any</option>'
+           f'<option value="y">incomplete only</option><option value="n">complete only</option>'
            f'</select></label>'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
@@ -1924,8 +2239,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'rowHeight:{MEM_ROW_H},cols:"{MEM_COLS}",detailBase:null,'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
-           'im=document.getElementById("img").value,mo=document.getElementById("meo").value;'
-           'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)'
+           'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
+           'pa=document.getElementById("part").value;'
+           'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
            '&&(!document.getElementById("selonly").checked||SCSel.get("mem",r[0]));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
@@ -1934,7 +2250,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'n===t?(n+" memories"):(n+" of "+t+" shown");},'
            'reset:function(){document.getElementById("q").value="";'
            'document.getElementById("user").value="";document.getElementById("img").value="";'
-           'document.getElementById("meo").value="";'
+           'document.getElementById("meo").value="";document.getElementById("part").value="";'
            'document.getElementById("selonly").checked=false;}});'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
@@ -1980,12 +2296,11 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     os.makedirs(media_dir, exist_ok=True)
     timefmt, tz_label = make_time_formatter(tz)
 
-    egocipher = persisted = ""
-    if keychain and os.path.exists(keychain):
-        try:
-            egocipher, persisted = _memkeys.readKeychain(keychain)
-        except Exception as error:
-            logger.warning(f"Could not read keychain: {error}")
+    # read_keychain_status never raises and logs every outcome (missing path, unparseable dump,
+    # parsed-but-no-egocipher), so the banner below can name the actual cause instead of the
+    # catch-all "no usable keychain" that used to cover all three.
+    kc = _memkeys.read_keychain_status(keychain)
+    egocipher, persisted = kc["egocipher"], kc["persistedkey"]
     keychain_available = bool(egocipher)
 
     profiles = find_profiles(app)
@@ -2012,7 +2327,8 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     report_ui.write_selection_stub(reports_root, run)       # shared by every report of the run
     report, linked, located = generate_report(all_memories, outdir, keychain_available,
                                               userids=map_userids(app), tz_label=tz_label,
-                                              src_root=src_root, manifest=manifest, run_id=run)
+                                              src_root=src_root, manifest=manifest, run_id=run,
+                                              keychain_note=kc["detail"])
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 

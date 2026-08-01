@@ -17,9 +17,10 @@
 
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
+- We need to be able to filter/search by URL.
 
 # Keychain auto-detection
-- Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.. 
+- Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.
 
 # Android tests/improvements
 - Make sure we properly support all the same features on Android than on iOS, for example:
@@ -50,13 +51,20 @@
     (imported as `_memkeys`). Optionally delete `scripts/parseSnapvideos_PREFETCH.py` (unused after).
   - Benefit: faster runs and no longer writing into `ExtractedData`.
 
-# Code cleanup and optimization
+# Code cleanup, performance and optimization
 - Fix Pylance/Pyright/Ruff warnings/errors.
+- Consider giving the user an option to make the report dependent on the device extraction ZIP archive for unencrypted media files.
+  We would not have to keep a copy of so much extracted media files. It might not be worth it depending on the ratio of encrypted/unencrypted files.
+- Check if there is any improvements that can be copied from `C:/Coding/MyGitHub/Python/bplist_base64_decoder/keychain_decoder.py`.
 
 # New report for `cache_controller.db` data. [DONE — see DONE.md]
 - Remaining/uncertain: `CACHE_KEY_VIRTUALIZATION` was empty in every test extraction, so the
   `VIRTUAL_CACHE_KEY` ↔ `CACHE_KEY` semantics are unconfirmed — its rows are listed but no linking
   logic depends on them. Revisit once a populated sample is available.
+- We need to be able to filter/search by URL.
+
+# New report for other cached files in `Library/Caches/*`
+- See `docs/snapchat_ios_cache_media.md`
 
 # Add support for offline tile map server [DONE — see DONE.md]
 - Remaining ideas (not done):

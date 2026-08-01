@@ -114,9 +114,14 @@ def main(input_keychain, output_keychain):
 	if not os.path.exists(input_keychain):
 		raise IOError("Can not find input keychain in {}".format(input_keychain))
 
+	# Format is auto-detected: UFED writes this plist as XML *or* binary depending on the version,
+	# and forcing FMT_XML made every binary export raise (which the caller used to swallow).
 	with open(input_keychain,'rb') as fp:
-		ufed_plist = plistlib.load(fp, fmt=plistlib.FMT_XML)
+		ufed_plist = plistlib.load(fp)
 
+	if 'classKeyIdxToUnwrappedMetadataClassKey' not in ufed_plist:
+		raise KeyError("UFED keychain has no 'classKeyIdxToUnwrappedMetadataClassKey' — the class "
+		               "keys were not unwrapped in this export, so its items cannot be decrypted")
 	metaDataKeys = ufed_plist['classKeyIdxToUnwrappedMetadataClassKey']
 
 	keychainList = []
@@ -131,4 +136,5 @@ def main(input_keychain, output_keychain):
 		plistlib.dump(keychainList, out, sort_keys=False )
 
 if __name__ == "__main__":
-    main()
+	main(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_UFED_KEYCHAIN,
+	     sys.argv[2] if len(sys.argv) > 2 else DEFAULT_GK_KEYCHAIN)

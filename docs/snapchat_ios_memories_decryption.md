@@ -14,6 +14,11 @@ Covers both cache locations:
 
 …and both Snapchat storage schemas we observed (see [Two schemas](#two-schemas-where-the-keys-live)).
 
+> Other media also lives under `Library/Caches`: plaintext MP4s at the cache root and in
+> `Library/Caches/tmp`, plus the URL-keyed `SCCache` / `global_scoped` caches. That media is
+> **not** part of the Memories pipeline, needs no keys, and nothing on the device indexes it —
+> see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md).
+
 > ⚠️ Extractions contain a device owner's private media. Keep all decrypted output **local** —
 > never upload or publish it.
 
@@ -40,9 +45,11 @@ user profiles on the device.
 
 ## TL;DR recipe
 
-1. **Read the keychain** (`readKeychain` in `scripts/DecryptLocalMemories_iOS.py`). You may get
-   `egocipher` (Memories DB key) and/or `persistedkey` (My Eyes Only master key). See
-   [When is the keychain required?](#when-is-the-full-filesystem-keychain-required).
+1. **Read the keychain** (`read_keychain_status` in `scripts/DecryptLocalMemories_iOS.py`, or
+   `readKeychain` for just the two keys). You may get `egocipher` (Memories DB key) and/or
+   `persistedkey` (My Eyes Only master key). See
+   [When is the keychain required?](#when-is-the-full-filesystem-keychain-required) and
+   [Diagnosing a keychain](#diagnosing-a-keychain).
 2. **Get the per-Memory AES `KEY`/`IV`:**
    - **New schema:** decode `ZGALLERYSNAP.ZENCRYPTION` (a `SCMemoriesSnapEncryption`
      NSKeyedArchiver bplist). No keychain needed for regular memories.
@@ -127,7 +134,9 @@ KEY, IV, IS_ENCRYPTED = root["KEY"], root["IV"], root["IS_ENCRYPTED"]
 
 - `IS_ENCRYPTED == False` → regular Memory; `KEY`/`IV` are **plaintext**. **No keychain and no
   `gallery.encrypteddb` needed** to decrypt the media.
-- `IS_ENCRYPTED == True` → My Eyes Only; `KEY`/`IV` are wrapped (see [MEO](#my-eyes-only-meo)).
+- `IS_ENCRYPTED == True` → My Eyes Only. `KEY`/`IV` are **plaintext here too** — the flag marks
+  the private album, it does not wrap the key, so no keychain is needed either
+  (see [MEO](#my-eyes-only-meo)).
 
 ### Old schema (Device B, 2023) — keys in `gallery.encrypteddb`
 
@@ -248,19 +257,60 @@ extraction (Device A) may include the filesystem but **not** those keys.
 |---|---|---|
 | Decrypt regular-memory media (`.pack` + SCContent) | **No keychain needed** | **`egocipher` required** |
 | Geolocation (`snap_location_table`) | **`egocipher` required** | **`egocipher` required** |
-| My Eyes Only memories | `persistedkey` required | `egocipher` + `persistedkey` required |
+| My Eyes Only memories | **No keychain needed** | `egocipher` + `persistedkey` required |
 
-So even on the new schema, **geolocation and My Eyes Only still need the FFS keychain.** Regular
-memory *imagery* is the only thing recoverable without it.
+So even on the new schema, **geolocation still needs the FFS keychain** — it is the only thing the
+keychain is required for there.
 
 ### My Eyes Only (MEO)
 
-`snap_key_iv.encrypted = 1` (old) / `ZENCRYPTION.IS_ENCRYPTED = True` (new). The `KEY`/`IV` are
-themselves AES-CBC-encrypted with the MEO master key/IV, which come from the keychain item
-`com.snapchat.keyservice.persistedkey` (an NSKeyedArchiver plist with `masterKey` /
-`initializationVector`). Unwrap them first — see `DecryptLocalMemories_iOS.fixMEOkeys` — then
-decrypt media as usual. Device B has 1 MEO memory, but its `persistedkey` was not in the
-keychain, so it could not be decrypted (a clean illustration of the dependency).
+`snap_key_iv.encrypted = 1` (old) / `ZENCRYPTION.IS_ENCRYPTED = True` (new).
+
+- **Old schema:** the `KEY`/`IV` in `snap_key_iv` are themselves AES-CBC-encrypted with the MEO
+  master key/IV, which come from the keychain item `com.snapchat.keyservice.persistedkey` (an
+  NSKeyedArchiver plist with `masterKey` / `initializationVector`). Unwrap them first — see
+  `DecryptLocalMemories_iOS.fixMEOkeys` — then decrypt media as usual. Device B has 1 MEO memory,
+  but its `persistedkey` was not in the keychain, so it could not be decrypted.
+- **New schema:** the `KEY`/`IV` in `ZENCRYPTION` are directly usable and `IS_ENCRYPTED` only
+  *flags* the memory as belonging to the private album — no unwrap, and **no keychain**. Observed
+  2026-07-30 on a third device (22 365 memories, new schema, no `egocipher` recovered): MEO
+  imagery decrypted normally while geolocation stayed empty. Device A had 0 MEO memories, so the
+  earlier "`persistedkey` required" here was an untested carry-over from the old schema.
+
+Because of this, **seeing MEO media in the report is not evidence that the keychain was read** —
+on the new schema it proves nothing either way. Geolocation is the reliable tell.
+
+---
+
+## Diagnosing a keychain
+
+Check a keychain on its own, without re-running an extraction:
+
+```
+Snapchat_Auto.exe --diag-keychain <keychain file>
+python -m scripts.DecryptLocalMemories_iOS --diag-keychain <keychain file>   # from source
+```
+
+Both print the format detected, how many items were scanned, how many belong to Snapchat's access
+group (`3MY7A92V5W.com.toyopagroup.picaboo`), which of `egocipher`/`persistedkey` were recovered
+(sizes only — never the key material), and a verdict. Exit code is 0 only when `egocipher` was
+recovered. The same lines are written into every run log at INFO/WARNING, so a report that says
+"keychain missing" can always be traced back to one of these causes:
+
+| status | Meaning |
+|---|---|
+| `ok` | `egocipher` recovered. |
+| `no-egocipher` | Parsed fine, but the item is absent. `egocipher.key.avoidkeyderivation` is ThisDeviceOnly, so backup-class dumps never carry it — an FFS keychain is needed. Also covers metadata-only dumps that list the item without its value. |
+| `no-snapchat-items` | Parsed fine, but nothing in the Snapchat access group — likely the wrong device or extraction. |
+| `unreadable` | Not a recognized format, or it failed to parse/decrypt (the exception and traceback are logged). |
+| `missing` / `none` | The path does not exist / no keychain was supplied at all. |
+
+Recognized formats: GrayKey-style keychain plists (XML **or** binary), UFED
+`backup_keychain_v2.plist` (decrypted on the fly via `scripts/data/keychain.py`, leaving
+`decrypted_keychain.plist` in the run folder), and objection JSON dumps. Item attributes are
+matched case-exactly but representation-agnostically — `agrp`/`gena` may be `<data>` (with or
+without a trailing NUL) or `<string>`, and the secret may be raw data, hex, or base64. Items are
+matched on the **account name**, so dumps that export no `agrp` still work.
 
 ---
 

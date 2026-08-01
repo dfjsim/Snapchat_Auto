@@ -61,6 +61,13 @@ The last two are shown as a red warning banner rather than a neutral note. `SOUR
 `scripts/contacts_report.py` holds the text; `friends_source` is set in `ParseSnapchat_iOS.main`
 next to the call that succeeded.
 
+**The run log states the same thing** — one `Contacts source: …` line naming the source that
+answered, at WARNING level for the two `primary.docobjects` fallbacks and INFO for the two real
+friends lists. A source that does not answer is logged as a step, not as an error: on iOS 13.49
+`group.snapchat.picaboo.plist` has no `share_user` key at all, which says where that app version
+keeps its friends list, not that anything failed. Only the older `user` format — which the script
+cannot read — is a warning.
+
 ## Message counts
 
 They come from the Conversations report (`conv_index`), matched on the contact's conversation id. A

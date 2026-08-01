@@ -253,8 +253,12 @@ def load_memory_index(app):
       CDN-downloaded media: SHA-256 of a Memory URL's token (first 16 bytes) IS the CACHE_KEY.
     * ``media_ids`` : {UPPER(ZMEDIAID): (ZSNAPID, user_hash)} — last-resort fallback for an
       EXTERNAL_KEY carrying the Memory's ZMEDIAID instead of its ZSNAPID.
+
+    Plus ``snap_urls`` : {ZSNAPID: [CDN URL, …]} — the Memory's download URLs, so a cache file
+    linked to a Memory can be found by searching that URL (only ~1 cache entry in 3 carries a
+    ``CONTENT_RETRIEVAL_METADATA`` URL of its own).
     """
-    snap_ids, url_keys, media_ids = {}, {}, {}
+    snap_ids, url_keys, media_ids, snap_urls = {}, {}, {}, {}
     for p in find_profiles(app):
         try:
             conn = sqlite3.connect(f"file:{p['scdb']}?mode=ro", uri=True)
@@ -268,6 +272,8 @@ def load_memory_index(app):
                 if has_mediaid and row["ZMEDIAID"]:
                     media_ids.setdefault(str(row["ZMEDIAID"]).upper(), (sid, p["userHash"]))
                 for c in url_cols:
+                    if row[c]:
+                        snap_urls.setdefault(sid, []).append(str(row[c]))
                     tok = _url_token(row[c])
                     if tok:
                         ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
@@ -275,7 +281,8 @@ def load_memory_index(app):
             conn.close()
         except sqlite3.DatabaseError as error:
             logger.debug(f"Could not read memory index from {p['scdb']}: {error}")
-    return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids}
+    return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
+            "snap_urls": snap_urls}
 
 
 def load_chat_links(report_dir):
@@ -627,6 +634,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     snap_ids = mem_index["snap_ids"]
     url_keys = mem_index["url_keys"]
     media_ids = mem_index["media_ids"]
+    snap_urls = mem_index.get("snap_urls") or {}
     memory_pages = memory_pages or {}
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     claims = _read_all(conn, "CACHE_FILE_CLAIM")
@@ -706,6 +714,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     break
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
+            memory["urls"] = snap_urls.get(memory["snap_id"]) or []
         chats = _chat_links_for(clist, key, chat_links, chat_by_message or {})
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
@@ -1004,6 +1013,11 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
             ("LAST_READ_TIMESTAMP_MILLIS (last read)", m["last_read"])]
     if e["retrieval"].get("url"):
         grid.append(("CONTENT_RETRIEVAL_METADATA → source URL", e["retrieval"]["url"]))
+    # The linked Memory's own CDN URLs. Shown (and searchable from the index) because most cache
+    # entries carry no CONTENT_RETRIEVAL_METADATA of their own, so this is the only URL that
+    # identifies the file's source.
+    for u in (e["memory"] or {}).get("urls") or []:
+        grid.append(("scdb-27 ZGALLERYSNAP → linked Memory's CDN URL", u))
     ref = e["retrieval"].get("content_ref")
     if ref:
         ref = str(ref)
@@ -1227,6 +1241,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
         searchable += [c["user_id"] for c in e["claims"]]
         if e["memory"]:
             searchable.append(e["memory"]["snap_id"])
+            # the linked Memory's CDN URLs, so a URL pasted from the Memories report (or from
+            # scdb) finds this cache file even when it has no retrieval metadata of its own
+            searchable += e["memory"].get("urls") or []
         for ch in e["chats"]:
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
         for k in e.get("child_files") or []:
@@ -1345,7 +1362,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 {report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
 <div class="toolbar">
- <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, user…" oninput="flt()">
+ <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, URL, user…" oninput="flt()">
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>

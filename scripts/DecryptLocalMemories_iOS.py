@@ -683,64 +683,276 @@ def filterDfByDates(df_merge, start_date, end_date):
         return df_merge
 
 
-def readKeychain(keychain):
-    egocipher = ""
-    persisted = ""
-    try:  # GK Keychain
-        with open(keychain, "rb") as f:
-            keychain_plist = plistlib.load(f)
-        for x in keychain_plist.values():
-            for y in x:
-                if 'agrp' in y.keys():
-                    if b'3MY7A92V5W.com.toyopagroup.picaboo' == y['agrp']:
-                        # logger.info("snapchat")
-                        if 'gena' in y.keys():
-                            if b'com.snapchat.keyservice.persistedkey' == y['gena']:
-                                # logger.info("persisted")
-                                # logger.info(y['v_Data'])
-                                persisted = y['v_Data']
-                            elif b'egocipher.key.avoidkeyderivation' == y['gena']:
-                                egocipher = y['v_Data']
-    except:
-        try:  # Premium Keychain
+# --------------------------------------------------------------------------------- keychain
+#
+# Reading the keychain used to be three nested bare `except:` blocks, each of which could fail
+# *silently*: a format that parsed but matched nothing, an attribute stored as <string> where the
+# code compared bytes, or a decrypt error swallowed whole. The only trace left in the log was a
+# generic "could not find egocipher", which cannot be told apart from "this dump genuinely has no
+# egocipher". Everything below exists so the log always answers *which* of those happened.
+
+# The Snapchat keychain items we need, and the access group they live in.
+SNAPCHAT_ACCESS_GROUP = "3MY7A92V5W.com.toyopagroup.picaboo"
+EGOCIPHER_ACCOUNT = "egocipher.key.avoidkeyderivation"      # Memories DB (gallery.encrypteddb) key
+PERSISTEDKEY_ACCOUNT = "com.snapchat.keyservice.persistedkey"   # My Eyes Only master key
+
+# Attribute names an item can carry, per dump format: GrayKey / decrypted-UFED plists use the iOS
+# keychain short names, objection's JSON dump uses long ones.
+_AGRP_FIELDS = ("agrp", "accessGroup", "access_group")
+_ACCOUNT_FIELDS = ("gena", "acct", "account")
+_VALUE_FIELDS = ("v_Data", "dataHex", "data", "v_data")
+
+_FORMAT_LABELS = {"bplist": "a binary plist", "xml": "an XML plist", "json": "a JSON dump",
+                  "unknown": "an unrecognized format"}
+
+
+def _kc_text(value):
+    """Normalize a keychain attribute (``agrp``/``gena``/``acct``) to a plain string.
+
+    Dumps disagree on the representation: some store these as UTF-8 <data> (at times
+    NUL-terminated), others as <string>. The old code compared raw values against bytes literals,
+    so a dump using the other representation matched nothing at all — without raising."""
+    if isinstance(value, (bytes, bytearray)):
+        value = bytes(value).decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\x00", "").strip()
+
+
+def _kc_field(entry, fields):
+    """First non-empty value among `fields`, normalized to text."""
+    for f in fields:
+        if f in entry:
+            text = _kc_text(entry[f])
+            if text:
+                return text
+    return ""
+
+
+def _kc_value_hex(entry):
+    """The item's secret as a hex string, whatever the dump encoded it as (raw <data>, hex text, or
+    base64 text). Returns "" when the item carries no usable value — a metadata-only dump."""
+    for f in _VALUE_FIELDS:
+        v = entry.get(f)
+        if isinstance(v, (bytes, bytearray)) and v:
+            return bytes(v).hex()
+        if isinstance(v, str) and v.strip():
+            s = "".join(v.split())
+            try:                                            # objection's dataHex
+                return unhexlify(s).hex()
+            except Exception:
+                pass
+            try:
+                return base64.b64decode(s, validate=True).hex()
+            except Exception:
+                continue
+    return ""
+
+
+def _key_note(value_hex):
+    """How a key is described in the log — its size, never the key material itself."""
+    return f"found ({len(value_hex) // 2} bytes)" if value_hex else "not present"
+
+
+def _sniff_keychain(path):
+    """Classify a keychain dump by its first bytes, returning (kind, head).
+
+    Detecting the format up front replaces the old exception-chaining, where the second branch
+    re-ran the very `plistlib.load` that had just failed in the first and so could never rescue it.
+    """
+    with open(path, "rb") as f:
+        head = f.read(256)
+    stripped = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+    if stripped.startswith(b"bplist00"):
+        return "bplist", head
+    if stripped.startswith((b"<?xml", b"<plist", b"<!DOCTYPE plist")):
+        return "xml", head
+    if stripped[:1] in (b"[", b"{"):
+        return "json", head
+    return "unknown", head
+
+
+def _kc_items(obj, depth=0):
+    """Yield the keychain-item dicts inside a loaded dump, whatever the container shape: a flat
+    list (decrypted UFED output, objection JSON), a dict of per-class lists (GrayKey), or nested
+    dicts. The old code assumed one specific shape and raised on every other."""
+    if depth > 6:
+        return
+    if isinstance(obj, dict):
+        if any(f in obj for f in _AGRP_FIELDS + _ACCOUNT_FIELDS):
+            yield obj
+            return
+        for v in obj.values():
+            yield from _kc_items(v, depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _kc_items(v, depth + 1)
+
+
+def _decrypt_ufed_keychain(keychain):
+    """Decrypt a UFED keychain (one carrying `keychainEntries`) and return its item list.
+
+    Keeps the old behaviour of leaving `decrypted_keychain.plist` in the run folder, but falls back
+    to a temp file when the working directory is not writable — a failure that used to be swallowed
+    along with everything else."""
+    out = "decrypted_keychain.plist"
+    try:
+        convert_keychain.main(keychain, out)
+    except OSError as error:
+        logger.info(f"Keychain: cannot write {out} in {os.getcwd()} ({error}) — using a temp file")
+        out = os.path.join(tempfile.mkdtemp(prefix="scauto_keychain_"), "decrypted_keychain.plist")
+        convert_keychain.main(keychain, out)
+    with open(out, "rb") as f:
+        return plistlib.load(f)
+
+
+def read_keychain_status(keychain):
+    """Read a keychain dump and report exactly what was found.
+
+    Returns a dict:
+        egocipher / persistedkey : hex strings, "" when absent
+        status : 'ok' | 'no-egocipher' | 'no-snapchat-items' | 'unreadable' | 'missing' | 'none'
+        detail : one sentence naming the cause, for the Memories report banner
+        format : the detected dump format
+        items / snap_items : how many items were scanned / were Snapchat's
+
+    Never raises — a keychain problem degrades the run instead of aborting it. Unlike the previous
+    version, though, every outcome is logged at INFO or above (the run log is INFO-level, so DEBUG
+    diagnostics would never reach the examiner's log file)."""
+    res = {"egocipher": "", "persistedkey": "", "status": "none", "detail": "", "format": "",
+           "items": 0, "snap_items": 0, "path": str(keychain or "")}
+
+    if not res["path"].strip():
+        res["detail"] = "No keychain file was supplied."
+        logger.info("Keychain: none supplied — geolocation, My Eyes Only unwrapping and "
+                    "old-schema memories will be unavailable")
+        return res
+    keychain = res["path"]
+    if not os.path.isfile(keychain):
+        res["status"] = "missing"
+        res["detail"] = f"The keychain file was not found: {keychain}"
+        logger.warning(f"Keychain: file not found: {keychain}")
+        return res
+
+    fmt, head = _sniff_keychain(keychain)
+    logger.info(f"Keychain: {keychain} ({os.path.getsize(keychain):,} bytes, "
+                f"{_FORMAT_LABELS.get(fmt, fmt)})")
+
+    kind = ""
+    try:
+        if fmt == "json":
+            kind = "objection JSON dump"
             with open(keychain, "rb") as f:
-                keychain_plist = plistlib.load(f)
-            if "keychainEntries" in keychain_plist.keys():
-                logger.info("Decrypting UFED keychain")
-                convert_keychain.main(keychain, "decrypted_keychain.plist")
-                with open("decrypted_keychain.plist", "rb") as f:
-                    keychain_plist = plistlib.load(f)
-                for y in keychain_plist:
-                    if 'agrp' in y.keys():
-                        if y['agrp'] == "3MY7A92V5W.com.toyopagroup.picaboo" and 'gena' in y.keys():
-                            if y['gena'] == b'com.snapchat.keyservice.persistedkey':
-                                persisted = y['v_Data']
-                                logger.info(f"Persisted key for MEO found")
-                            elif y['gena'] == b'egocipher.key.avoidkeyderivation':
-                                egocipher = y['v_Data']
-                                logger.info(f"Egocipher key for Memories found")
-        except:
-            try: #Objection keychain dump
-                with open(keychain, 'rb') as f:
-                    json_data = json.load(f)
-                for i in json_data:
-                    if i['account'] == "egocipher.key.avoidkeyderivation":
-                        egocipher = i['dataHex']
-                    elif i['account'] == "com.snapchat.keyservice.persistedkey":
-                        persisted = i['dataHex']
-            except Exception as error:
-                logger.error("Could not read keychain, this is unexpected, contact author", error)
-                
-    if egocipher == "" or egocipher == b'':
-        logger.info("Could not find correct key (egocipher) in keychain, please verify manually and contact the author if "
-              "it is present")
-    
-    if isinstance(egocipher, bytes):
-        egocipher = egocipher.hex()
-    if isinstance(persisted, bytes):
-        persisted = persisted.hex()
-              
-    return egocipher, persisted
+                raw = json.load(f)
+        elif fmt in ("bplist", "xml"):
+            with open(keychain, "rb") as f:
+                raw = plistlib.load(f)
+            if isinstance(raw, dict) and "keychainEntries" in raw:
+                kind = "UFED keychain"
+                logger.info(f"Keychain: UFED format ({len(raw.get('keychainEntries') or [])} "
+                            "entries) — decrypting")
+                raw = _decrypt_ufed_keychain(keychain)
+            else:
+                kind = "keychain plist (GrayKey / already decrypted)"
+        else:
+            res["status"] = "unreadable"
+            res["detail"] = ("The keychain file is not in a format this tool recognizes — expected "
+                             "a plist (GrayKey or UFED) or an objection JSON dump.")
+            logger.error(f"Keychain: unrecognized format, first bytes {head[:16]!r} — expected an "
+                         "XML/binary plist (GrayKey or UFED) or an objection JSON dump")
+            return res
+        items = list(_kc_items(raw))
+    except Exception as error:
+        res["status"] = "unreadable"
+        res["detail"] = (f"The keychain file could not be parsed as {kind or fmt} "
+                         f"({type(error).__name__}: {error}).")
+        logger.error(f"Keychain: could not read {keychain} as {kind or fmt} — "
+                     f"{type(error).__name__}: {error}", exc_info=True)
+        return res
+
+    res["format"], res["items"] = kind, len(items)
+    found, snap_items, valueless = {}, 0, []
+    for entry in items:
+        agrp = _kc_field(entry, _AGRP_FIELDS)
+        acct = _kc_field(entry, _ACCOUNT_FIELDS)
+        if agrp.startswith(SNAPCHAT_ACCESS_GROUP):
+            snap_items += 1
+        if acct not in (EGOCIPHER_ACCOUNT, PERSISTEDKEY_ACCOUNT) or acct in found:
+            continue
+        # Matched on the account name rather than on the access group: some dumps do not export
+        # `agrp` at all, and requiring it (as before) skipped those items entirely.
+        value = _kc_value_hex(entry)
+        if not value:
+            valueless.append(acct)
+            continue
+        if agrp and not agrp.startswith(SNAPCHAT_ACCESS_GROUP):
+            logger.info(f"Keychain: '{acct}' sits in access group '{agrp}', not "
+                        f"'{SNAPCHAT_ACCESS_GROUP}' — using it anyway")
+        found[acct] = value
+
+    for acct in valueless:
+        logger.warning(f"Keychain: item '{acct}' is present but carries no readable value — the "
+                       "dump looks metadata-only (secrets not exported or not decrypted)")
+
+    res["snap_items"] = snap_items
+    res["egocipher"] = found.get(EGOCIPHER_ACCOUNT, "")
+    res["persistedkey"] = found.get(PERSISTEDKEY_ACCOUNT, "")
+    logger.info(f"Keychain: {len(items)} item(s) scanned, {snap_items} in the Snapchat access "
+                f"group; egocipher {_key_note(res['egocipher'])}, "
+                f"persistedkey {_key_note(res['persistedkey'])}")
+
+    if res["egocipher"]:
+        res["status"] = "ok"
+        res["detail"] = ("Keychain read: egocipher present, "
+                         + ("persistedkey present." if res["persistedkey"] else
+                            "persistedkey absent — old-schema My Eyes Only keys cannot be "
+                            "unwrapped."))
+        if not res["persistedkey"]:
+            logger.warning("Keychain: 'com.snapchat.keyservice.persistedkey' is not in this dump — "
+                           "old-schema My Eyes Only keys cannot be unwrapped")
+    elif EGOCIPHER_ACCOUNT in valueless:
+        res["status"] = "no-egocipher"
+        res["detail"] = ("The keychain lists 'egocipher.key.avoidkeyderivation' but exports no "
+                         "value for it — the dump holds item metadata only, not the secrets.")
+    elif snap_items or found or valueless:
+        res["status"] = "no-egocipher"
+        res["detail"] = ("The keychain was read, but it holds no "
+                         "'egocipher.key.avoidkeyderivation' item. That item is ThisDeviceOnly, so "
+                         "it is absent from backup-class dumps — a full-filesystem keychain is "
+                         "required.")
+        logger.warning("Keychain: parsed successfully but 'egocipher.key.avoidkeyderivation' is "
+                       "not in it — typically a backup-class dump (the item is ThisDeviceOnly); "
+                       "geolocation and old-schema memories cannot be recovered")
+    else:
+        res["status"] = "no-snapchat-items"
+        res["detail"] = ("The keychain was read, but it contains no Snapchat items at all — it may "
+                         "belong to another device or extraction.")
+        logger.warning(f"Keychain: parsed successfully but none of its {len(items)} item(s) belong "
+                       f"to Snapchat — is this the keychain for this extraction?")
+    return res
+
+
+def readKeychain(keychain):
+    """(egocipher_hex, persistedkey_hex) — the long-standing signature, kept for existing callers.
+    See `read_keychain_status` for the full outcome."""
+    res = read_keychain_status(keychain)
+    return res["egocipher"], res["persistedkey"]
+
+
+def diagnose_keychain(keychain):
+    """Read a keychain and report on it without running an extraction — the `--diag-keychain`
+    entry point, so a keychain can be checked on the machine holding the case data in seconds.
+    Returns the `read_keychain_status` dict."""
+    res = read_keychain_status(keychain)
+    logger.info(f"Keychain verdict [{res['status']}]: {res['detail']}")
+    if res["status"] == "ok" and not res["persistedkey"]:
+        logger.info("Geolocation and old-schema memories: OK. Old-schema My Eyes Only: unavailable.")
+    elif res["status"] == "ok":
+        logger.info("Geolocation, old-schema memories and My Eyes Only: OK.")
+    else:
+        logger.info("Geolocation is unavailable. New-schema memories (including My Eyes Only) are "
+                    "unaffected — their keys live in scdb, not in the keychain.")
+    return res
 
 
 def main(enc_db, scdb, keychain, cache_df, SCContentFolder, out_dir=None):
@@ -822,4 +1034,10 @@ def main(enc_db, scdb, keychain, cache_df, SCContentFolder, out_dir=None):
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    # Only the keychain diagnostic is runnable standalone; the report itself is driven by
+    # ParseSnapchat_iOS, which supplies the databases and cache DataFrame this module needs.
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    if len(sys.argv) > 2 and sys.argv[1].lstrip("-/").lower() == "diag-keychain":
+        sys.exit(0 if diagnose_keychain(sys.argv[2])["status"] == "ok" else 1)
+    print("usage: python -m scripts.DecryptLocalMemories_iOS --diag-keychain <keychain file>")
+    sys.exit(2)
