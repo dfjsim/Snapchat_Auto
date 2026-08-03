@@ -6,7 +6,7 @@ back to its Memory row in ``scdb-27.sqlite3``, including geolocation. Handles bo
 storage schemas, multiple user profiles, the ``SCContent`` cache and the
 ``caching-media`` ``.pack`` cache.
 
-See ``docs/snapchat_ios_memories_decryption.md`` for the full reverse-engineering write-up.
+See ``docs/snapchat_ios_memories_decryption.md`` for the full artifact-analysis write-up.
 
 Storage schemas
 ---------------
@@ -16,7 +16,14 @@ Storage schemas
   ``egocipher`` keychain key is required.
 
 Geolocation (``snap_location_table``) always lives in ``gallery.encrypteddb`` and therefore
-always needs the keychain. My Eyes Only memories additionally need ``persistedkey``.
+always needs the keychain.
+
+**My Eyes Only needs ``persistedkey`` on BOTH schemas.** A MEO memory never stores a usable key
+beside itself: what ``ZGALLERYSNAP.ZENCRYPTION`` holds for it is the key *wrapped* in the account's
+MEO master key — 48 bytes of ``KEY`` and 32 of ``IV`` against 32/16 for a regular memory — exactly
+like the ``encrypted=1`` rows of the old schema's ``snap_key_iv``. ``persistedkey`` is **per
+account** (its payload names its ``userId``), so a phone signed into two accounts has one item per
+account and each profile must be given its own.
 """
 
 import os
@@ -46,6 +53,9 @@ from Crypto.Cipher import AES
 from PIL import Image
 
 from scripts.data import ccl_bplist
+from scripts.data import sqlite_open
+from scripts.data import ffmpeg_log
+from scripts.data import sniff
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
 from scripts import offline_maps
@@ -194,19 +204,10 @@ def url_token(url):
     return seg or None
 
 
-def guess_media(data):
-    """Return a file extension for known media magic bytes, else None."""
-    if len(data) < 12:
-        return None
-    if data[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if data[4:8] == b"ftyp":
-        return "mp4"
-    if data[:4] == b"\x89PNG":
-        return "png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
+# The media test the decrypt-and-match linkers use, now shared with both cache reports (which need
+# to identify far more formats than these four — see scripts/data/sniff.py). Re-exported here
+# because every report already imports it from this module.
+guess_media = sniff.guess_media
 
 
 def _aes_cbc(key, iv, data):
@@ -307,20 +308,50 @@ def pack_matches(head, key, iv):
 
 # --------------------------------------------------------------------------- keychain
 
+def _persisted_master(persisted):
+    """(masterKey, iv, userId) out of a keychain `persistedkey` item."""
+    raw = persisted if isinstance(persisted, bytes) else unhexlify(persisted)
+    # Parsed from memory. This used to write "temp_meo.plist" into the *current working directory*
+    # and delete it again — a keychain secret briefly on disk somewhere the examiner did not choose,
+    # and a failure whenever the cwd was not writable.
+    obj = ccl_bplist.deserialise_NsKeyedArchiver(ccl_bplist.load(BytesIO(raw)))
+    user = obj.get("userId")
+    if isinstance(user, bytes):
+        user = user.decode("utf-8", "replace")
+    return obj["masterKey"], obj["initializationVector"], (str(user) if user else "")
+
+
 def unwrap_meo_key(persisted, enc_key, enc_iv):
-    """Unwrap a My Eyes Only key/iv using the keychain persistedkey. Returns (key, iv)."""
-    with open("temp_meo.plist", "wb") as f:
-        f.write(persisted if isinstance(persisted, bytes) else unhexlify(persisted))
-    try:
-        with open("temp_meo.plist", "rb") as f:
-            obj = ccl_bplist.deserialise_NsKeyedArchiver(ccl_bplist.load(f))
-    finally:
-        if os.path.exists("temp_meo.plist"):
-            os.remove("temp_meo.plist")
-    meo_key, meo_iv = obj["masterKey"], obj["initializationVector"]
+    """Unwrap a My Eyes Only key/iv using the keychain persistedkey. Returns (key, iv).
+
+    Applies to **both** storage schemas. A MEO memory never stores its AES key in the clear: on the
+    old schema the wrapped key is in `gallery.encrypteddb`'s `snap_key_iv`, and on the new schema it
+    is in `ZGALLERYSNAP.ZENCRYPTION` — where a wrapped key is recognisable by its length, 48 bytes
+    of KEY and 32 of IV against 32/16 for a regular memory (AES-CBC + PKCS#7 over 32/16 bytes).
+    """
+    meo_key, meo_iv, _user = _persisted_master(persisted)
     dec_key = unhexlify(hexlify(AES.new(meo_key, AES.MODE_CBC, meo_iv).decrypt(enc_key))[:64])
     dec_iv = unhexlify(hexlify(AES.new(meo_key, AES.MODE_CBC, meo_iv).decrypt(enc_iv))[:32])
     return dec_key, dec_iv
+
+
+# A wrapped (My Eyes Only) key/iv pair is exactly one AES block longer than a usable one.
+_WRAPPED_KEY_LEN, _WRAPPED_IV_LEN = 48, 32
+
+MEO_WRAPPED_BASIS = (
+    "A My Eyes Only memory never stores a usable AES key beside itself. On the new schema its "
+    "ZGALLERYSNAP.ZENCRYPTION archive carries IS_ENCRYPTED=1 with a 48-byte KEY and a 32-byte IV — "
+    "one AES block longer than the 32/16 a regular memory carries, because they are the real key "
+    "and IV encrypted (CBC + PKCS#7) under the account's My Eyes Only master key. On the old "
+    "schema the same wrapped pair sits in gallery.encrypteddb's snap_key_iv with encrypted=1. That "
+    "master key is the keychain item 'com.snapchat.keyservice.persistedkey', whose payload also "
+    "names the userId it belongs to — it is per account, so a phone signed into two accounts has "
+    "one per account and the other account's MEO stays locked without it.")
+
+
+def is_wrapped_key(key, iv):
+    """True when this key/iv pair still has to be unwrapped with the keychain persistedkey."""
+    return len(key or b"") == _WRAPPED_KEY_LEN and len(iv or b"") == _WRAPPED_IV_LEN
 
 
 # --------------------------------------------------------------------------- discovery
@@ -407,18 +438,24 @@ def _open_gallery_with_exe(local, egocipher_hex, workdir):
     return conn
 
 
-def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
+def decrypt_gallery_db(gallery_path, egocipher_hex, workdir, with_wal=True):
     """Decrypt a SQLCipher gallery.encrypteddb; return a sqlite3-compatible connection or None.
 
     Tries the sqlcipher3 Python module first (no external binary, so it survives frozen
     builds), then falls back to a bundled/PATH sqlcipher CLI. On the old storage schema the
     Memories keys live here, so failing both means no media and no geolocation.
+
+    ``with_wal`` selects which of the two readings to produce: True stages the ``-wal``/``-shm``
+    alongside the database (the app's current state), False stages the database file alone (the
+    state as of its last checkpoint). :func:`gallery_views` uses both — see
+    ``docs/sqlite_wal_handling.md``. The evidence file itself is only ever read.
     """
     if not gallery_path or not os.path.exists(gallery_path) or not egocipher_hex:
         return None
+    workdir = workdir if with_wal else os.path.join(workdir, "nowal")
     os.makedirs(workdir, exist_ok=True)
     local = os.path.join(workdir, "gallery.encrypteddb")
-    for suffix in ("", "-wal", "-shm"):
+    for suffix in (("", "-wal", "-shm") if with_wal else ("",)):
         src = gallery_path + suffix
         if os.path.exists(src):
             shutil.copy(src, local + suffix)
@@ -426,13 +463,39 @@ def decrypt_gallery_db(gallery_path, egocipher_hex, workdir):
     conn = _open_gallery_with_module(local, egocipher_hex)
     if conn is None:
         conn = _open_gallery_with_exe(local, egocipher_hex, workdir)
-    if conn is None:
+    if conn is None and with_wal:
         logger.warning(
             f"Could not decrypt {os.path.basename(gallery_path)}: no working SQLCipher found. "
             "Install a binding (pip install sqlcipher3-wheels, sqlcipher3-binary or sqlcipher3) "
             "or provide sqlcipher3.exe. Memories keys/geolocation will be missing on the old "
             "storage schema.")
     return conn
+
+
+def gallery_rows(gconn, gconn_nowal, table, columns):
+    """``[(row tuple, wal marker)]`` for one gallery table, read both with and without the -wal.
+
+    ``gallery.encrypteddb`` holds the per-snap keys and the geolocation on the old storage schema,
+    so a row the write-ahead log deleted is a Memory whose key or location is otherwise
+    unrecoverable — worth surfacing even though it is no longer current.
+    """
+    def fetch(conn):
+        if conn is None:
+            return []
+        try:
+            return list(conn.execute(f"SELECT {columns} FROM {table}"))
+        except Exception as error:                             # sqlcipher bindings vary in type
+            logger.debug(f"{table} not readable: {error}")
+            return []
+
+    current = fetch(gconn)
+    if gconn_nowal is None:
+        return [(row, sqlite_open.BOTH) for row in current]
+    seen = {tuple(row) for row in current}
+    out = [(row, sqlite_open.BOTH) for row in current]
+    out += [(row, sqlite_open.MAIN_ONLY) for row in fetch(gconn_nowal)
+            if tuple(row) not in seen]
+    return out
 
 
 # --------------------------------------------------------------------------- core
@@ -469,7 +532,11 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     if timefmt is None:
         timefmt, _ = make_time_formatter("utc")
     memories = {}
-    conn = sqlite3.connect(f"file:{profile['scdb']}?mode=ro", uri=True)
+    # scdb-27 is read twice — with and without its -wal — so a Memory the write-ahead log has
+    # deleted or rewritten since the last checkpoint is recovered instead of silently lost.
+    # See scripts/data/sqlite_open.py and docs/sqlite_wal_handling.md.
+    views = sqlite_open.open_views(profile["scdb"], workdir)
+    conn = views.merged
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cols = [r[1] for r in cur.execute("PRAGMA table_info(ZGALLERYSNAP)")]
@@ -501,11 +568,13 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
         ecolset = set(ecols)
         etcols = _timecols(ecols)
         entry_other_cols = [c for c in ENTRY_OTHER_LABELS if c in ecolset]
-        for er in cur.execute("SELECT * FROM ZGALLERYENTRY"):
-            er = dict(er)
+        entry_rows, entry_marks = sqlite_open.read_table(views, "ZGALLERYENTRY")
+        for er, mark in zip(entry_rows, entry_marks):
             pk = er.get("Z_PK")
             if pk is None:
                 continue
+            if mark == sqlite_open.MAIN_ONLY and pk in entry_times:
+                continue                                   # the current version already won
             # keep every column (None when empty) so the rendered tables share one column set
             entry_times[pk] = {c: (timefmt(er[c]) if isinstance(er.get(c), (int, float)) and er.get(c)
                                    else None) for c in etcols}
@@ -515,9 +584,20 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     empty_entry_times = {c: None for c in etcols}
     empty_entry_other = {c: None for c in entry_other_cols}
 
-    for r in cur.execute("SELECT * FROM ZGALLERYSNAP WHERE ZSNAPID IS NOT NULL"):
-        r = dict(r)
+    snap_rows, snap_marks = sqlite_open.read_table(views, "ZGALLERYSNAP")
+    for r, mark in zip(snap_rows, snap_marks):
+        if not r.get("ZSNAPID"):
+            continue
         snap = r["ZSNAPID"]
+        if snap in memories:
+            # Both readings hold a row for this snap and they differ. The current version (read
+            # with the -wal applied) already won; keep the checkpointed one as prior state rather
+            # than overwriting, so a Memory whose row was rewritten shows what it said before.
+            memories[snap].setdefault("prior_rows", []).append(
+                {"row": r, "wal": mark, "times": {
+                    c: (timefmt(r[c]) if isinstance(r.get(c), (int, float)) and r.get(c) else None)
+                    for c in time_cols}})
+            continue
         # keep every timestamp column (None when empty) so all snap tables share one column set
         times = {c: (timefmt(r[c]) if isinstance(r.get(c), (int, float)) and r.get(c) else None)
                  for c in time_cols}
@@ -545,8 +625,16 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             "urls": {c: r.get(c) for c in url_cols if r.get(c)},
             "ids": {c: _clean_text(r.get(c)) for c in id_cols if r.get(c)},
             "key": None, "iv": None, "is_meo": False,
+            # True when this Memory's key is still wrapped in the account's My Eyes Only master
+            # key and the keychain had no persistedkey to unwrap it with — i.e. the media exists
+            # but cannot be decrypted, which is a different statement from "no media".
+            "key_wrapped": False,
             "latitude": None, "longitude": None, "address": None,
             "media_files": [],
+            # which of the two scdb readings this row came from; MAIN_ONLY means the -wal has
+            # since deleted it, i.e. a Memory the app no longer lists
+            "wal": mark,
+            "prior_rows": [],
         }
         if has_zenc and r.get("ZENCRYPTION"):
             try:
@@ -554,20 +642,45 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                     ccl_bplist.load(BytesIO(r["ZENCRYPTION"])), parse_whole_structure=True)["root"]
                 m["is_meo"] = bool(root.get("IS_ENCRYPTED"))
                 m["key"], m["iv"] = root.get("KEY"), root.get("IV")
+                # A My Eyes Only memory does NOT carry a usable key here: ZENCRYPTION holds the key
+                # still wrapped in the account's MEO master key (48-byte KEY / 32-byte IV). Until
+                # this was unwrapped the memory silently ended up with no media at all — every
+                # matcher rejects a key that is not 32 bytes — even when the keychain had what was
+                # needed. Verified on a two-account iOS 26 test device: unwrapping a My Eyes Only
+                # snap yields a valid pack header followed by a JPEG.
+                if m["is_meo"] and is_wrapped_key(m["key"], m["iv"]):
+                    if persisted:
+                        try:
+                            m["key"], m["iv"] = unwrap_meo_key(persisted, m["key"], m["iv"])
+                        except Exception as error:
+                            logger.debug(f"MEO unwrap failed for {snap}: {error}")
+                            m["key"] = m["iv"] = None
+                    else:
+                        m["key"] = m["iv"] = None
             except Exception as error:
                 logger.debug(f"ZENCRYPTION decode failed for {snap}: {error}")
         memories[snap] = m
 
-    stats = {"schema": "new" if has_zenc else "old", "gallery_keys": 0, "locations": 0}
+    scdb_wal = dict(views.info)
+    views.close()
+    stats = {"schema": "new" if has_zenc else "old", "gallery_keys": 0, "locations": 0,
+             "scdb_wal": scdb_wal,
+             "wal_deleted": sum(1 for m in memories.values()
+                                if m.get("wal") == sqlite_open.MAIN_ONLY),
+             "wal_changed": sum(1 for m in memories.values() if m.get("prior_rows"))}
 
     # gallery.encrypteddb: keys (old schema) + geolocation + address (both schemas)
-    gconn = decrypt_gallery_db(profile["gallery"], egocipher,
-                               os.path.join(workdir, profile["userHash"]))
+    gdir = os.path.join(workdir, profile["userHash"])
+    gconn = decrypt_gallery_db(profile["gallery"], egocipher, gdir)
+    # the same database without its -wal: keys and locations the log has since deleted
+    gconn_nowal = (decrypt_gallery_db(profile["gallery"], egocipher, gdir, with_wal=False)
+                   if gconn and os.path.exists(profile["gallery"] + "-wal") else None)
     if gconn:
         gcur = gconn.cursor()
         tables = {r[0] for r in gcur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "snap_key_iv" in tables:
-            for sid, key, iv, enc in gcur.execute("SELECT snap_id,key,iv,encrypted FROM snap_key_iv"):
+            for (sid, key, iv, enc), mark in gallery_rows(gconn, gconn_nowal, "snap_key_iv",
+                                                          "snap_id,key,iv,encrypted"):
                 if sid not in memories:
                     continue
                 m = memories[sid]
@@ -583,20 +696,210 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                         key = iv = None
                 if key and iv and not m["key"]:           # prefer scdb keys if already set
                     m["key"], m["iv"] = key, iv
+                    m["key_wal"] = mark
                 stats["gallery_keys"] += 1
         if "snap_location_table" in tables:
-            for sid, lat, lon in gcur.execute("SELECT snap_id,latitude,longitude FROM snap_location_table"):
-                if sid in memories:
+            for (sid, lat, lon), mark in gallery_rows(gconn, gconn_nowal, "snap_location_table",
+                                                      "snap_id,latitude,longitude"):
+                if sid in memories and memories[sid]["latitude"] is None:
                     memories[sid]["latitude"] = lat
                     memories[sid]["longitude"] = lon
+                    memories[sid]["location_wal"] = mark
                     stats["locations"] += 1
         if "snap_address_title" in tables:
-            for sid, title in gcur.execute("SELECT snap_id,address_title FROM snap_address_title"):
-                if sid in memories:
+            for (sid, title), _mark in gallery_rows(gconn, gconn_nowal, "snap_address_title",
+                                                    "snap_id,address_title"):
+                if sid in memories and not memories[sid].get("address"):
                     memories[sid]["address"] = _clean_text(title)
         gconn.close()
+    if gconn_nowal is not None:
+        gconn_nowal.close()
 
+    # Counted from the final state, not from how many unwrap calls ran: on the new schema a MEO
+    # memory's wrapped key appears in BOTH ZGALLERYSNAP.ZENCRYPTION and gallery.encrypteddb's
+    # snap_key_iv, so counting operations reported two unwraps for one memory.
+    for m in memories.values():
+        m["key_wrapped"] = bool(m["is_meo"] and not (m["key"] and m["iv"]))
+    stats["meo"] = sum(1 for m in memories.values() if m["is_meo"])
+    stats["meo_locked"] = sum(1 for m in memories.values() if m["key_wrapped"])
+    stats["meo_unwrapped"] = stats["meo"] - stats["meo_locked"]
     return memories, stats
+
+
+# --------------------------------------------------------------- deleted Memories (WAL carving)
+
+_BPLIST_MAGIC = b"bplist00"
+_SNAP_ENC_CLASS = b"SCMemoriesSnapEncryption"
+# How far past a "bplist00" a SCMemoriesSnapEncryption archive can end. These are ~250 bytes; the
+# margin is generous but bounded so a bad magic byte cannot make this scan quadratic.
+_BPLIST_MAX_BYTES = 4096
+
+CARVED_KEY_BASIS = (
+    "This Memory has no row in scdb-27.sqlite3 — neither with its write-ahead log applied nor "
+    "without it — so the app no longer lists it and both ordinary readings of the database miss it "
+    "entirely. Its AES key was carved out of a -wal page image that a later frame in the same log "
+    "has already superseded, i.e. free space that SQLite itself cannot reach. A carved key is "
+    "never trusted on its own: it is kept ONLY when it actually decrypts the cached file that "
+    "cache_controller.db claims for this snap id, and the decrypted bytes start with a valid media "
+    "signature. The Memory's own metadata (capture time, geolocation, album) is NOT recovered — "
+    "only the identifier, the key and the media.")
+
+
+def _bplist_span(buf, start):
+    """Exact end offset of the binary plist starting at ``start``, or None.
+
+    Carved bytes have no length prefix, and ``ccl_bplist`` needs a complete buffer, so the end is
+    found from the 32-byte trailer: 6 unused bytes, the offset/ref integer widths, the object count,
+    the top object and where the offset table starts. A candidate is only accepted when the table
+    start plus the table's own size lands exactly on the trailer — a strong enough constraint that
+    it does not fire on arbitrary data.
+    """
+    limit = min(len(buf), start + _BPLIST_MAX_BYTES)
+    pos = start + 8
+    while True:
+        t = buf.find(b"\x00" * 6, pos, limit)
+        if t < 0 or t + 32 > len(buf):
+            return None
+        pos = t + 1
+        offset_size, ref_size = buf[t + 6], buf[t + 7]
+        if not (1 <= offset_size <= 8 and 1 <= ref_size <= 8):
+            continue
+        num_objects = int.from_bytes(buf[t + 8:t + 16], "big")
+        top_object = int.from_bytes(buf[t + 16:t + 24], "big")
+        table_start = int.from_bytes(buf[t + 24:t + 32], "big")
+        if not num_objects or num_objects > 4096 or top_object >= num_objects:
+            continue
+        if start + table_start + num_objects * offset_size == t:
+            return t + 32
+    return None
+
+
+def carve_snap_keys(buf):
+    """Every ``SCMemoriesSnapEncryption`` key/IV pair in a buffer of raw bytes.
+
+    Returns ``{(key, iv): is_meo}``. Deduplicated because a WAL holds many images of the same page.
+    """
+    out = {}
+    pos = 0
+    while True:
+        start = buf.find(_BPLIST_MAGIC, pos)
+        if start < 0:
+            return out
+        pos = start + 8
+        window = buf[start:start + _BPLIST_MAX_BYTES]
+        if _SNAP_ENC_CLASS not in window:
+            continue
+        end = _bplist_span(buf, start)
+        if end is None:
+            continue
+        try:
+            root = ccl_bplist.deserialise_NsKeyedArchiver(
+                ccl_bplist.load(BytesIO(buf[start:end])), parse_whole_structure=True)["root"]
+        except Exception:
+            continue
+        # Carved bytes: a plist that parses is not necessarily the archive we are after, and the
+        # root can be any type at all.
+        if not hasattr(root, "get"):
+            continue
+        key, iv = root.get("KEY"), root.get("IV")
+        if isinstance(key, (bytes, bytearray)) and isinstance(iv, (bytes, bytearray)):
+            out[(bytes(key), bytes(iv))] = bool(root.get("IS_ENCRYPTED"))
+    return out
+
+
+def _carve_sources(scdb):
+    """(label, bytes) for each place a deleted ZGALLERYSNAP row can survive, stale frames first."""
+    sources = []
+    for index, page_no, data in sqlite_open.superseded_wal_pages(scdb):
+        sources.append((f"-wal frame {index} (page {page_no}), superseded by a later frame", data))
+    return sources
+
+
+def carve_deleted_memories(profile, memories, ccindex, scfull, scparts, persisted, timefmt):
+    """Recover Memories that exist only as cache claims plus a key in superseded -wal frames.
+
+    A Memory deleted from the gallery leaves its cached media on disk and its cache_controller
+    claim intact, but its ZGALLERYSNAP row — which holds the AES key — is gone from both readings
+    of scdb. The key can still be sitting in a -wal page image that a later frame replaced.
+
+    Every candidate is **proved**: a carved key is accepted only when it decrypts the very file
+    cache_controller claims for that snap id into recognisable media. Nothing is guessed from
+    proximity, so a wrong key cannot produce a row.
+    """
+    orphans = sorted({sid for sid in ccindex if sid.lower() not in
+                      {s.lower() for s in memories}})
+    if not orphans:
+        return {}
+    sources = _carve_sources(profile["scdb"])
+    if not sources:
+        return {}
+
+    candidates = {}                                        # (key, iv) -> (is_meo, provenance)
+    for label, data in sources:
+        for (key, iv), is_meo in carve_snap_keys(data).items():
+            candidates.setdefault((key, iv), (is_meo, label))
+    if not candidates:
+        return {}
+    logger.info(f"    scdb-27 -wal: {len(candidates)} snap key(s) carved from superseded frames; "
+                f"testing them against {len(orphans)} cached snap(s) with no Memory row")
+
+    recovered = {}
+    for sid in orphans:
+        for cache_key, _role in ccindex.get(sid, []):
+            cipher, _fulls, _parts, _cov = _resolve_sccontent(cache_key, scfull, scparts)
+            if not cipher or len(cipher) < 32:
+                continue
+            # The proof is "this key turns these bytes into media". A file that is ALREADY media
+            # proves nothing — decrypt_sccontent returns it unchanged whatever key it is handed —
+            # so a plaintext cache file must never be allowed to validate a carved key.
+            if guess_media(cipher[:16]):
+                continue
+            hit = None
+            for (key, iv), (is_meo, label) in candidates.items():
+                use_key, use_iv = key, iv
+                if is_wrapped_key(key, iv):                # a carved My Eyes Only key
+                    if not persisted:
+                        continue
+                    try:
+                        use_key, use_iv = unwrap_meo_key(persisted, key, iv)
+                    except Exception:
+                        continue
+                if len(use_key) != 32 or len(use_iv) != 16:
+                    continue
+                _padded, _stripped, ext, _tail = decrypt_sccontent(cipher[:4096], use_key, use_iv)
+                if ext:
+                    hit = (use_key, use_iv, is_meo, label, ext)
+                    break
+            if hit:
+                recovered[sid.upper()] = _carved_memory(sid.upper(), profile, hit, timefmt)
+                break
+    return recovered
+
+
+def _carved_memory(snap_id, profile, hit, timefmt):
+    """A Memory dict for a row that no longer exists in scdb — same shape as load_memories builds.
+
+    Only the fields that were actually recovered are filled. Everything the deleted row used to
+    carry (capture time, dimensions, album, geolocation) stays empty rather than being invented.
+    """
+    key, iv, is_meo, provenance, _ext = hit
+    return {
+        "snap_id": snap_id,
+        "user_hash": profile["userHash"],
+        "media_type": None, "format": "", "media_format": None,
+        "media_url": None, "overlay_url": None, "thumb_url": None,
+        "create_utc": "", "created_sort": 0,
+        "duration": None, "width": None, "height": None, "camera": "",
+        "has_location": False,
+        "times": {}, "entry_times": {}, "snap_other": {}, "entry_other": {},
+        "urls": {}, "ids": {},
+        "key": key, "iv": iv, "is_meo": is_meo, "key_wrapped": False,
+        "latitude": None, "longitude": None, "address": None,
+        "media_files": [],
+        "wal": sqlite_open.CARVED,
+        "carved_from": provenance,
+        "prior_rows": [],
+    }
 
 
 # split SCContent media: "<cache_key>_<start>-<end>" byte-range parts, plus the initial
@@ -718,12 +1021,9 @@ def index_cache_controller(app):
     out = {}
     for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
                                      "cache_controller.db")):
-        try:
-            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-            rows = conn.execute("SELECT EXTERNAL_KEY, CACHE_KEY FROM CACHE_FILE_CLAIM")
-        except sqlite3.DatabaseError as error:
-            logger.debug(f"cache_controller read failed: {error}")
-            continue
+        # both readings: a claim the -wal has since dropped still names a file that may be on disk
+        claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
+        rows = [(c.get("EXTERNAL_KEY"), c.get("CACHE_KEY")) for c in claims]
         for ek, ck in rows:
             if not ek or not ck:
                 continue
@@ -748,18 +1048,18 @@ def all_cache_keys(app):
     keys = set()
     for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
                                      "cache_controller.db")):
+        # Read both with and without the -wal: a key the write-ahead log has since dropped still
+        # earns a link, because the cache_controller report lists that row too (as "no -wal only").
+        views = sqlite_open.open_views(db)
         try:
-            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
             for table in ("CACHE_FILE_CLAIM", "CACHE_FILE_METADATA"):
-                try:
-                    for (ck,) in conn.execute(f"SELECT CACHE_KEY FROM {table}"):
-                        if ck:
-                            keys.add(str(ck).lower())
-                except sqlite3.DatabaseError:
-                    continue
-            conn.close()
-        except sqlite3.DatabaseError as error:
-            logger.debug(f"cache_controller key scan failed: {error}")
+                rows, _marks = sqlite_open.read_table(views, table)
+                for row in rows:
+                    ck = row.get("CACHE_KEY")
+                    if ck:
+                        keys.add(str(ck).lower())
+        finally:
+            views.close()
     return keys
 
 
@@ -813,38 +1113,17 @@ def _snap_dim(m):
     return f"{m['width']}×{m['height']}" if m.get("width") and m.get("height") else ""
 
 
+# What FFmpeg wrote to fd 2 during this run's poster extraction. Captured rather than discarded:
+# "moov atom not found" on a cached video means the device only cached part of it, which is a
+# finding worth having in the .log — see scripts/data/ffmpeg_log.py.
+_FFMPEG_OUTPUT = []
+
+
 @contextlib.contextmanager
 def _quiet_stderr():
-    """Silence FFmpeg's decoder chatter at the OS level for the duration of the block.
-
-    OpenCV's FFmpeg writes to file descriptor 2 from C, so ``contextlib.redirect_stderr`` never
-    sees it, and the ``OPENCV_FFMPEG_*`` environment variables do not help either: the capture
-    options reach only the *demuxer*, while "Invalid NAL unit size" / "Error splitting the input
-    into NAL units" come from the decoder context. Partially cached media emits two such lines per
-    undecodable frame, which floods the run log and — on a Windows console — costs more time than
-    the decoding itself, so fd 2 goes to the null device while the decoder runs.
-    """
-    try:
-        sys.stderr.flush()
-    except Exception:                                      # pragma: no cover - detached stderr
-        pass
-    try:
-        saved = os.dup(2)
-    except (OSError, ValueError, AttributeError):           # no real fd 2 (pythonw, some hosts)
+    """Keep FFmpeg's decoder chatter off the console and put a summary of it in the log instead."""
+    with ffmpeg_log.captured_stderr(_FFMPEG_OUTPUT):
         yield
-        return
-    devnull = None
-    try:
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, 2)
-        yield
-    finally:
-        try:
-            os.dup2(saved, 2)
-        finally:
-            os.close(saved)
-            if devnull is not None:
-                os.close(devnull)
 
 
 # How many frames to try before giving up on a poster. Partially cached video decodes at the start
@@ -966,7 +1245,7 @@ def _pack_completeness(payload, declared):
     return True, ""
 
 
-def collect_media(memories, app, outdir, padding="both"):
+def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None):
     """Decrypt SCContent + caching-media for all memories; write files, fill m['media_files'].
 
     SCContent files are located two ways: by ``SHA256(url token)[:16]`` (CDN-downloaded media)
@@ -978,8 +1257,12 @@ def collect_media(memories, app, outdir, padding="both"):
     spans multiple caches never overwrites itself.
     """
     os.makedirs(outdir, exist_ok=True)
-    scfull, scparts = index_sccontent(app)
-    ccindex = index_cache_controller(app)
+    # The caller may pass indexes it has already built (main does, so the WAL carver can use them
+    # too); building them here keeps this function usable on its own.
+    if scfull is None or scparts is None:
+        scfull, scparts = index_sccontent(app)
+    if ccindex is None:
+        ccindex = index_cache_controller(app)
     cc_keys = all_cache_keys(app)              # for two-way links to the cache_controller report
     userids = map_userids(app)                 # userHash -> userId, to spot cross-scope on-disk copies
     keyed = [(sid, m) for sid, m in memories.items() if m["key"] and m["iv"]]
@@ -1141,6 +1424,8 @@ def collect_media(memories, app, outdir, padding="both"):
                               "poster frame was extracted from the decrypted .mp4. It is NOT "
                               "original device data." + partial)})
         m["media_files"].append(entry)
+    ffmpeg_log.log_summary(_FFMPEG_OUTPUT, "poster-frame extraction from cached video", logger)
+    _FFMPEG_OUTPUT.clear()
     logger.info(f"Media: posters done — {made} of {len(todo)} extracted "
                 f"in {time.monotonic() - t0:.0f}s")
 
@@ -1573,8 +1858,17 @@ def _enc_html(members):
                             f"<div class='k'>{html.escape(m['snap_id'][:8])}… IV</div>"
                             f"<div class='v hex'>{m['iv'].hex()}</div>")
         return "".join(rows)
+    if any(m.get("key_wrapped") for m in members):
+        owner = next((m["user_hash"][:12] for m in members if m.get("key_wrapped")), "")
+        return ("<div class='v muted'>My Eyes Only — this memory's key is stored <b>wrapped</b> in "
+                "the account's MEO master key and no <code>com.snapchat.keyservice.persistedkey</code> "
+                f"item for account {html.escape(owner)}… is in the supplied keychain, so it cannot "
+                "be unwrapped. This applies on both storage schemas: a MEO key is wrapped in "
+                "<code>ZGALLERYSNAP.ZENCRYPTION</code> just as it is in "
+                "<code>gallery.encrypteddb</code>. The media may still be present on disk."
+                + _info(MEO_WRAPPED_BASIS) + "</div>")
     if any(m["is_meo"] for m in members):
-        return "<div class='v muted'>My Eyes Only — key not unwrapped (persistedkey required)</div>"
+        return "<div class='v muted'>My Eyes Only — key not available</div>"
     return "<div class='v muted'>key not available</div>"
 
 
@@ -1777,7 +2071,8 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
 
     single = len(members) == 1
     lead = members[0]
-    is_video = lead["media_type"] == 1
+    is_video = (lead["media_type"] == 1 if lead["media_type"] is not None
+                else any(f["ext"] in ("mp4", "mov") for f in files))
     kind = "🎬 Video" if is_video else "🖼️ Image"
     if is_video and not any(f["ext"] == "mp4" for f in files):
         kind += " <span class='muted'>(preview only — full video not cached)</span>"
@@ -1827,13 +2122,26 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
         parts = [f"<div id='mem-{html.escape(m['snap_id'])}'>"
                  f"<span class='snaplab'>Snap ID</span> "
                  f"<span class='snapid'>{html.escape(m['snap_id'])}</span></div>"
-                 f"<div class='mono' style='font-size:11px;color:#666;margin:2px 0 4px'>user {html.escape(str(uid))}</div>",
-                 f"<div class='cols2'>"
-                 f"<div class='c'><div class='sect'>ZGALLERYSNAP values</div>"
-                 f"<div class='grid'>{_snap_values_grid(m)}</div></div>"
-                 f"<div class='c'><div class='sect'>ZGALLERYENTRY values</div>"
-                 f"<div class='grid'>{_entry_values_grid(m)}</div></div></div>",
-                 f"<div class='sect'>CDN URLs (scdb-27)</div><div class='grid'>{_url_grid(m)}</div>"]
+                 f"<div class='mono' style='font-size:11px;color:#666;margin:2px 0 4px'>user {html.escape(str(uid))}</div>"]
+        if m.get("wal") == sqlite_open.CARVED:
+            # This Memory has no database row at all, so every "value" panel below is empty by
+            # construction. Say so before the empty panels invite the reading that the fields were
+            # blank on the device.
+            parts.append(
+                f"<div class='warn'>Deleted Memory — recovered by carving. <b>No ZGALLERYSNAP row "
+                f"for this snap survives in scdb-27</b>, with or without its write-ahead log, so "
+                f"the value panels below are empty: capture time, dimensions, album and "
+                f"geolocation are gone with the row. What is recovered is the snap id (from the "
+                f"cache_controller claim), the AES key (carved from "
+                f"{html.escape(str(m.get('carved_from') or 'a superseded -wal frame'))}) and the "
+                f"media it decrypts.{_info(CARVED_KEY_BASIS)}</div>")
+        parts.append(f"<div class='cols2'>"
+                     f"<div class='c'><div class='sect'>ZGALLERYSNAP values</div>"
+                     f"<div class='grid'>{_snap_values_grid(m)}</div></div>"
+                     f"<div class='c'><div class='sect'>ZGALLERYENTRY values</div>"
+                     f"<div class='grid'>{_entry_values_grid(m)}</div></div></div>")
+        parts.append(f"<div class='sect'>CDN URLs (scdb-27)</div>"
+                     f"<div class='grid'>{_url_grid(m)}</div>")
         if not meta_shared:
             parts.append(f"<div class='sect'>Metadata</div><div class='grid'>{meta[idx]}</div>")
         if not loc_shared:
@@ -2029,6 +2337,63 @@ def write_media_manifest(memories, outdir):
     return out
 
 
+def write_pack_manifest(memories, outdir):
+    """Write ``media_by_pack.json``: caching-media ``<folder>/<item hash>`` -> the Memory it belongs to.
+
+    A ``.pack`` filename is an opaque hash and is indexed by no database, so the only thing that
+    ties one to a Memory is that a Memory's key decrypts it — which only this report knows, because
+    only this report holds the keys. Without this manifest the cache media report has no way to
+    link a pack to anything and showed every one as an unexplained padlock, even though all of them
+    had in fact been decrypted here.
+    """
+    out = {}
+    for sid, m in memories.items():
+        for f in m["media_files"]:
+            if f.get("source") != "caching-media" or not f.get("item"):
+                continue
+            hashes = f.get("hashes") or [("", "", "")]
+            out.setdefault(f"{f.get('folder', '')}/{f['item']}".lower(), []).append({
+                "path": f["path"], "role": f.get("role", ""), "ext": f.get("ext", ""),
+                "bytes": f.get("bytes", 0), "snap_id": sid,
+                "md5": hashes[0][1], "sha256": hashes[0][2],
+            })
+    try:
+        with open(os.path.join(outdir, "media_by_pack.json"), "w", encoding="utf-8") as fh:
+            json.dump(out, fh)
+    except Exception as error:
+        logger.debug(f"Could not write media_by_pack.json: {error}")
+    return out
+
+
+WAL_MEMORY_BASIS = (
+    "scdb-27.sqlite3 was read twice: once with its write-ahead log (-wal) applied, which is what "
+    "the app itself sees, and once from the database file alone, which is the state as of the "
+    "last checkpoint. A Memory badged DELETED appears only in the second reading — the -wal "
+    "removed its row, so the app no longer lists it, but the row (and often its media, key and "
+    "geolocation) is still recoverable. A Memory badged EDITED has a different row in each "
+    "reading; the values shown are the current ones and the previous ones are in the detail. "
+    "These rows are additions to what a normal read of the database returns, never replacements.")
+
+
+def _wal_summary_html(memories):
+    """Header line stating how many Memories only the WAL-less reading of scdb-27 contains."""
+    gone = sum(1 for m in memories.values() if m.get("wal") == sqlite_open.MAIN_ONLY)
+    carved = sum(1 for m in memories.values() if m.get("wal") == sqlite_open.CARVED)
+    changed = sum(1 for m in memories.values() if m.get("prior_rows"))
+    if not gone and not changed and not carved:
+        return ""
+    bits = []
+    if gone:
+        bits.append(f"<b>{gone}</b> deleted since scdb-27's last checkpoint (recovered)")
+    if changed:
+        bits.append(f"<b>{changed}</b> rewritten since it (both versions kept)")
+    if carved:
+        bits.append(f"<b>{carved}</b> with no surviving row at all, recovered by carving the key "
+                    f"from a superseded -wal frame{_info(CARVED_KEY_BASIS)}")
+    return (f'<div class="sum">Write-ahead log: {", ".join(bits)}'
+            f'{_info(WAL_MEMORY_BASIS)}</div>')
+
+
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
                     src_root=None, manifest=None, run_id="default", keychain_note=""):
     """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
@@ -2062,6 +2427,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
         logger.debug(f"Could not write memory_pages.json: {error}")
 
     write_media_manifest(memories, outdir)
+    write_pack_manifest(memories, outdir)
 
     # One row per memory, ordered by group then creation. Rows live in data/index.js and are drawn
     # by the virtual table (scripts/report_ui.py), so the index opens instantly whatever its size.
@@ -2093,13 +2459,30 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             toks = "<br>".join(html.escape(t) for t in tokens[:2])
             if len(tokens) > 2:
                 toks += f"<br><span class='muted'>+{len(tokens) - 2} more</span>"
-            is_video = m["media_type"] == 1
+            # ZMEDIATYPE is authoritative when there is a row to read it from; a carved Memory has
+            # none, so fall back to what the recovered media actually turned out to be.
+            is_video = (m["media_type"] == 1 if m["media_type"] is not None
+                        else any(f["ext"] in ("mp4", "mov") for f in m["media_files"]))
             kind = "🎬" if is_video else "🖼️"
             if is_meo:                                     # My Eyes Only — the private album
                 kind += "<div class='meo' title='My Eyes Only'>MEO</div>"
             if n_part:                                     # only part of the media is on the device
                 kind += (f"<div class='part' title='{n_part} recovered media file(s) are "
                          f"incomplete — the cache holds only part of the original'>PART</div>")
+            # Deleted since scdb-27's last checkpoint: THIS Memory's row survives only in the
+            # database file without its -wal, so the app itself no longer lists it. The flag is
+            # per-row, not per-group — one deleted snap must not badge its whole group.
+            gone = m.get("wal") == sqlite_open.MAIN_ONLY
+            carved = m.get("wal") == sqlite_open.CARVED
+            changed = bool(m.get("prior_rows"))
+            if carved:
+                kind += ("<div class='walcarve' title='no scdb row survives — key carved from a "
+                         "superseded -wal frame and proved by decrypting the cached media'>"
+                         "CARVED</div>")
+            elif gone:
+                kind += "<div class='walgone' title='deleted since the last checkpoint'>DELETED</div>"
+            elif changed:
+                kind += "<div class='walchg' title='row rewritten since the last checkpoint'>EDITED</div>"
             # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
             # since every byte here is multiplied by the number of memories in data/index.js
             cells = [
@@ -2126,6 +2509,13 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 searchable.append("meo my eyes only")
             if n_part:
                 searchable.append("incomplete partial partially cached truncated")
+            if gone:
+                searchable.append("deleted removed no longer in the app wal main-only recovered")
+            if carved:
+                searchable.append("carved deleted recovered wal free space no scdb row "
+                                  + str(m.get("carved_from") or ""))
+            if changed:
+                searchable.append("edited changed rewritten since checkpoint wal")
             if m["latitude"] is not None:
                 searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
             rows.append([
@@ -2135,7 +2525,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "2": str(uid), "3": f"{zmedia}|{zsnap}", "6": m["created_sort"]},
                 None,
                 {"user": str(uid), "img": "y" if has_img else "n",
-                 "meo": "y" if is_meo else "n", "part": "y" if n_part else "n"},
+                 "meo": "y" if is_meo else "n", "part": "y" if n_part else "n",
+                 "wal": ("carved" if carved else
+                         "gone" if gone else ("changed" if changed else ""))},
             ])
     report_ui.write_rows(os.path.join(outdir, "data"), rows)
 
@@ -2144,16 +2536,18 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                          for m in memories.values()}))
 
     # The banner names the cause (`keychain_note`, from read_keychain_status) and then its
-    # consequences. The last sentence is there because the two are easily confused: My Eyes Only
-    # memories on the new schema carry their key in scdb and show up with no keychain at all, so
-    # seeing MEO media is not evidence that the keychain was read.
+    # consequences. It used to say new-schema My Eyes Only was unaffected because its key lives in
+    # scdb — that is true only of REGULAR memories. A MEO key in ZGALLERYSNAP.ZENCRYPTION is
+    # wrapped (48-byte KEY / 32-byte IV) and still needs the keychain's persistedkey, so the old
+    # wording promised media that could never be produced.
     banner = "" if keychain_available else (
         '<div class="warn">'
         + html.escape(keychain_note or "No usable keychain (egocipher) was available.")
         + ' Geolocation cannot be recovered, and on the old schema neither My Eyes Only nor '
-          'regular memory imagery can be decrypted. <span class="sub">New-schema memories '
-          '(including My Eyes Only) carry their key in <code>scdb</code> and are unaffected.'
-          '</span></div>')
+          'regular memory imagery can be decrypted. <span class="sub">New-schema <b>regular</b> '
+          'memories carry their key in <code>scdb</code> and are unaffected. <b>My Eyes Only is '
+          'affected on both schemas</b>: its key is stored wrapped and can only be unwrapped with '
+          'the keychain item <code>com.snapchat.keyservice.persistedkey</code>.</span></div>')
 
     index_css = """
  .toolbar{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
@@ -2168,6 +2562,12 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .vcells>.vc.c1 .meo{background:#8a1f1f;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
    letter-spacing:.04em;padding:1px 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c1 .part{background:#fde3e3;color:#8a1f1f;border:1px solid #eeacac;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c1 .walgone{background:#ffe9e0;color:#8a3a1c;border:1px solid #e8bfae;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c1 .walchg{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c1 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2,.vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
@@ -2195,7 +2595,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="sum">{n_users} user profile(s) &middot; {total} memories &middot; {linked} with '
            f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
            + (f'<b>{n_partial}</b> with incomplete media &middot; ' if n_partial else '')
-           + f'times in <b>{html.escape(tz_label)}</b></div></header>'
+           + f'times in <b>{html.escape(tz_label)}</b></div>'
+           + _wal_summary_html(memories) + '</header>'
            f'{banner}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
@@ -2212,6 +2613,12 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'Media <select id="part" onchange="flt()"><option value="">any</option>'
            f'<option value="y">incomplete only</option><option value="n">complete only</option>'
            f'</select></label>'
+           f'<label title="Memories recovered by reading scdb-27 without its write-ahead log — '
+           f'rows the app itself no longer lists, or that it rewrote after the last checkpoint">'
+           f'-wal <select id="wal" onchange="flt()"><option value="">any</option>'
+           f'<option value="gone">deleted since the checkpoint</option>'
+           f'<option value="changed">rewritten since the checkpoint</option>'
+           f'<option value="carved">deleted outright (key carved)</option></select></label>'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
            f'<div class="pager" id="pager"></div>'
@@ -2240,8 +2647,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
-           'pa=document.getElementById("part").value;'
+           'pa=document.getElementById("part").value,wa=document.getElementById("wal").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
+           '&&(!wa||m.wal===wa)'
            '&&(!document.getElementById("selonly").checked||SCSel.get("mem",r[0]));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
@@ -2251,6 +2659,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'reset:function(){document.getElementById("q").value="";'
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
+           'document.getElementById("wal").value="";'
            'document.getElementById("selonly").checked=false;}});'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
@@ -2302,19 +2711,57 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     kc = _memkeys.read_keychain_status(keychain)
     egocipher, persisted = kc["egocipher"], kc["persistedkey"]
     keychain_available = bool(egocipher)
+    # persistedkey is per account (its payload names the userId it belongs to), so each profile is
+    # given its own. userHash is sha256(userId), which is what find_profiles keys profiles by.
+    persisted_by_hash = {hashlib.sha256(u.encode()).hexdigest(): v
+                         for u, v in (kc.get("persistedkeys") or {}).items()}
 
     profiles = find_profiles(app)
     logger.info(f"Found {len(profiles)} Snapchat profile(s) in {app}; timestamps in {tz_label}")
 
+    # Built once here and reused: carve_deleted_memories has to resolve cache keys to on-disk bytes
+    # before collect_media runs, and both would otherwise re-walk every SCContent folder.
+    scfull, scparts = index_sccontent(app)
+    ccindex = index_cache_controller(app)
+
     all_memories = {}
     for p in profiles:
-        mems, stats = load_memories(p, egocipher, persisted, workdir, timefmt)
+        # fall back to the single unattributed key only when there is exactly one profile —
+        # handing account A's master key to account B just produces garbage keys
+        p_persisted = persisted_by_hash.get(p["userHash"]) or (persisted if len(profiles) == 1
+                                                               and len(persisted_by_hash) <= 1
+                                                               else "")
+        mems, stats = load_memories(p, egocipher, p_persisted, workdir, timefmt)
         logger.info(f"  profile {p['userHash'][:12]}: {len(mems)} memories "
                     f"(schema={stats['schema']}, gallery_keys={stats['gallery_keys']}, "
                     f"locations={stats['locations']})")
+        if stats.get("meo"):
+            logger.info(f"    My Eyes Only: {stats['meo']} memory/memories, "
+                        f"{stats['meo_unwrapped']} key(s) unwrapped with the keychain "
+                        f"persistedkey, {stats['meo_locked']} still locked")
+            if stats["meo_locked"]:
+                logger.warning(f"    My Eyes Only: no persistedkey for account "
+                               f"{p['userHash'][:12]} in this keychain — {stats['meo_locked']} "
+                               "MEO memory/memories cannot be decrypted (their media is on disk "
+                               "but the key stays wrapped)")
+        if stats.get("wal_deleted") or stats.get("wal_changed"):
+            logger.info(f"    scdb-27 -wal: {stats['wal_deleted']} memory row(s) exist only "
+                        f"without the -wal (deleted since the last checkpoint), "
+                        f"{stats['wal_changed']} rewritten (both versions kept)")
         all_memories.update(mems)
+        # Memories the app has deleted outright: no row in either reading, but the cached media and
+        # the key can both still be on the device. Proven by decryption, never by proximity.
+        carved = carve_deleted_memories(p, all_memories, ccindex, scfull, scparts,
+                                        p_persisted, timefmt)
+        if carved:
+            logger.warning(f"    RECOVERED {len(carved)} deleted Memory/Memories for profile "
+                           f"{p['userHash'][:12]}: no scdb row survives, but a key carved from a "
+                           f"superseded -wal frame decrypts their cached media "
+                           f"({', '.join(s[:8] + '…' for s in sorted(carved))})")
+            all_memories.update(carved)
 
-    collect_media(all_memories, app, media_dir, padding)
+    collect_media(all_memories, app, media_dir, padding, scfull=scfull, scparts=scparts,
+                  ccindex=ccindex)
     # media link paths are relative to Memories.html (which sits in outdir)
     for m in all_memories.values():
         for f in m["media_files"]:

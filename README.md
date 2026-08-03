@@ -15,10 +15,31 @@
 >
 > This fork is provided **AS IS, with no warranty of any kind**. It has **not been thoroughly
 > tested across the many versions of the Snapchat app**, and Snapchat's database schemas differ
-> between versions, so some artifacts may be parsed incompletely or, in rare cases, incorrectly.
+> between versions, so some artifacts may be parsed incompletely or potentially incorrectly in some cases.
 > Use it as an **aid to analysis, not as a sole authority** — always validate findings against
 > the original artifacts and corroborate them with other tools before relying on them.
 > (The app shows this notice on startup; it can be dismissed with a *"Don't display again"* box.)
+
+> ### Scope
+>
+> This is an offline artifact-analysis tool for digital forensic examiners. It reads a device
+> extraction that the examiner is **lawfully authorised to examine**, and nothing else:
+>
+> - it never contacts Snapchat's servers or any other network service — the only optional network
+>   call is to a map tile server the examiner configures themselves, off by default;
+> - it does not circumvent account authentication and cannot access data that is not already on
+>   the device;
+> - it decrypts locally stored data using keys recovered **from that same device** (its app
+>   container and, where the extraction includes one, its keychain).
+>
+> The `docs/` notes describe where Snapchat stores data on the device and the formats it uses, so
+> that an examiner can verify or reproduce by hand anything the tool reports. Recovered output is
+> the device owner's private data: keep it within the case.
+>
+> This project is not a guide to reverse engineering the Snapchat application. It does not document
+> or promote decompiling, disassembling, or instrumenting the app itself; it is limited to
+> analyzing artifacts already present in a lawfully obtained extraction and reporting them with
+> clear provenance and caveats.
 
 Automatic extraction and parsing of Snapchat for iOS and Android
 
@@ -33,6 +54,22 @@ Download https://www.sqlite.org/download.html or https://developer.android.com/s
 4. Point to your extraction ZIP-file
 5. Point to your keychain file (For decryption of cached memories/MEO on iOS)
 6. Profit
+
+### Running it without the GUI
+
+Passing `--zip` runs the whole thing headlessly — no window, and no "press any key" at the end —
+so it can be driven from a batch/PowerShell/shell script or run over several extractions in a loop:
+
+```
+Snapchat_Auto.exe --zip <extraction.zip> [--keychain <file>] [--workdir <dir>]
+                  [--os ios|android] [--tz local|utc|<IANA>|<+/-HH:MM>]
+                  [--padding both|strip|keep] [--tile-server <url>] [--run-name <name>]
+```
+
+Everything for the run still lands in one folder under `--workdir`. `--run-name` pins that
+folder's name instead of using a timestamp, so a repeated run overwrites the same place and two
+runs stay directly comparable. Exit code is 0 on success, 1 if the run failed, 2 for a bad
+argument. `--help` lists everything; `--diag-keychain <file>` still checks a keychain on its own.
 
 ## Memories media report (iOS)
 
@@ -128,6 +165,6 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   should be reported upstream; only fork-specific issues belong here.
 - **Development note:** the fork-specific features and fixes listed under
   [What this fork adds](#what-this-fork-adds) — including the Memories media report, the
-  reverse-engineering notes in `docs/`, and the compatibility fixes — were developed with the
+  artifact-analysis notes in `docs/`, and the compatibility fixes — were developed with the
   assistance of [Claude Code](https://claude.com/claude-code) (Anthropic). The findings were
   verified against real device extractions.

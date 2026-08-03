@@ -11,6 +11,7 @@ import datetime
 import ntpath
 import filetype
 from scripts.data import ccl_bplist
+from scripts.data import sqlite_open
 from pathlib import Path
 from platform import system
 import blackboxprotobuf
@@ -73,20 +74,9 @@ def find_string_in_dict(data):
             
             
 def getHtml(final_df, friends_df, group_df):
-    
-    if getattr(sys, 'frozen', False):
-        exe_path = sys._MEIPASS
-        try:
-            shutil.copytree(f"{exe_path}/css", f"{outputDir}/css")
-        except:
-            logger.warning("Could not copy the CSS folder, result might look a bit worse")
-    else:
-        exe_path = os.path.dirname(os.path.abspath(__file__))
-        try:
-            shutil.copytree(f"{exe_path}/data/css", f"{outputDir}/css")
-        except:
-            logger.warning("Could not copy the CSS folder, result might look a bit worse")
-    
+
+    report_ui.copy_css(outputDir)
+
     logger.info("Writing HTML report")
     # for index, row in final_df.iterrows():
         # final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
@@ -130,12 +120,18 @@ th {
     
 
 # An SCPersistentMedia filename ("media saved in chat") encodes the same tuple a
-# CACHE_FILE_CLAIM.EXTERNAL_KEY does, with "_" instead of ":" and an extension appended:
-#   cm-chat-media-video-1_<conversationId>_<messageId>_<part>_<n>.mov
+# CACHE_FILE_CLAIM.EXTERNAL_KEY does, with an extension appended:
+#   cm-chat-media-video-1:<conversationId>:<messageId>:<part>:<n>.mov
 #   1                    :<conversationId>:<messageId>:<part>:<n>
+#
+# **Both separators must be accepted.** On the device the fields are separated by ":" (confirmed on
+# the iOS 26 UFED extraction). The "_" spelling exists only because extract_zip.py rewrites ":" to
+# "_" when it writes the file out — Windows cannot hold a ":" in a filename. So a run over a folder
+# this tool did not extract itself (a pre-unpacked container, a mounted image) sees colons, and
+# matching only underscores silently produced zero saved-media links there.
 _PERSISTENT_NAME_RE = re.compile(
-    r"^(?P<type>[^_]+)_(?P<conv>[0-9a-fA-F-]{36})_(?P<msg>\d+)_(?P<part>\d+)(?:_(?P<n>\d+))?"
-    r"(?P<ext>\.[A-Za-z0-9]+)?$")
+    r"^(?P<type>[^_:]+)[_:](?P<conv>[0-9a-fA-F-]{36})[_:](?P<msg>\d+)[_:](?P<part>\d+)"
+    r"(?:[_:](?P<n>\d+))?(?P<ext>\.[A-Za-z0-9]+)?$")
 
 # Preference between the several claims a chat message can have on one (conversation, message,
 # part): the full media first, then the raw content claim, and the thumbnail only as a last resort.
@@ -373,12 +369,11 @@ def getUserID_username_FromGroups():
 
 def getUserIDFromArroyo(arroyo):
     logger.info("Getting User ID from arroyo")
-    conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)    
     messagesQuery = """select
     value as value
     from required_values where key = "USERID"
     """
-    df = pd.read_sql_query(messagesQuery, conn)
+    df, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
     
     #logger.info(f"User ID: {df['value'][0]}")
     return df["value"][0]
@@ -516,8 +511,7 @@ def getFriendsAppGroupPlistStorage(app_group_plist_storage_list, arroyo):
         group_concat(user_id) as "User ID"
         from user_conversation where conversation_type is 1
         group by client_conversation_id"""
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
-        df = pd.read_sql_query(query, conn)
+        df, _wal_info = sqlite_open.read_sql(arroyo, query)
 
         for index, row in df.iterrows():
             conv_id = row["Conversation ID"]
@@ -671,13 +665,12 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
     #logger.info("Gathering friends from " + ntpath.basename(primary))
     logger.warning("WARNING - MIGHT contain users that are not friends")
     try:
-        conn = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
         messagesQuery = """select
         userId as 'User ID',
         p as 'Display Name'
         from snapchatters__displaymetadata
         """
-        df_friends = pd.read_sql_query(messagesQuery, conn)
+        df_friends, _wal_info = sqlite_open.read_sql(primary, messagesQuery)
 
         for index, row in df_friends.iterrows():
             try:
@@ -698,7 +691,6 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
                 df_friends.loc[index, "Display Name"] = ""
                 logger.error(f"Could not find Display name for user {row['User ID']}, {Error}")
 
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
         messagesQuery = """select
         user_id as 'User ID',
         client_conversation_id as 'Conversation ID',
@@ -710,7 +702,7 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
         from user_conversation
         """
 
-        df_conversations = pd.read_sql_query(messagesQuery, conn)
+        df_conversations, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
 
         private_conv = df_conversations[df_conversations["Conversation Type"] == "Private"].drop(columns=["Conversation Type"])
         array = []
@@ -729,8 +721,7 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
         group_concat(user_id) as "User ID"
         from user_conversation where conversation_type is 1
         group by client_conversation_id"""
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
-        df = pd.read_sql_query(query, conn)
+        df, _wal_info = sqlite_open.read_sql(arroyo, query)
         grupper = {"Conversation ID": [], "Participants": []}
 
         for index, row in df.iterrows():
@@ -750,7 +741,6 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
 
         df_group = pd.DataFrame(grupper)
         
-        conn = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
         messagesQuery = """select
         snapchatter.userId as 'User ID',
         snapchatter.rowid,
@@ -759,7 +749,7 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
         inner join index_snapchatterusername ON snapchatter.rowid=index_snapchatterusername.rowid
         """
         
-        df_snapchatter = pd.read_sql_query(messagesQuery, conn)
+        df_snapchatter, _wal_info = sqlite_open.read_sql(primary, messagesQuery)
 
         
         return df_friends, df_group, df_snapchatter
@@ -774,7 +764,6 @@ def getFriendsPrimary(primary, arroyo):
     logger.info(f"Gathering friends from {ntpath.basename(primary)}(Snapchatters)")
     logger.warning("WARNING - WILL contain users that are not friends")
     try:
-        conn = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
         messagesQuery = """select
         snapchatter.userId as 'User ID',
         snapchatter.rowid,
@@ -782,13 +771,12 @@ def getFriendsPrimary(primary, arroyo):
         from snapchatter
         inner join index_snapchatterusername ON snapchatter.rowid=index_snapchatterusername.rowid
         """
-        df_friends = pd.read_sql_query(messagesQuery, conn)
+        df_friends, _wal_info = sqlite_open.read_sql(primary, messagesQuery)
         #df = df.rename(columns={"userId" : "User ID", "username" : "Username"})
         df_group = pd.DataFrame(columns=['Group Name', 'Participants', 'Conversation ID'])
         if len(df_friends) == 0:
             raise Exception
         
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
         messagesQuery = """select
         user_id as 'User ID',
         client_conversation_id as 'Conversation ID',
@@ -800,7 +788,7 @@ def getFriendsPrimary(primary, arroyo):
         from user_conversation
         """
 
-        df_conversations = pd.read_sql_query(messagesQuery, conn)
+        df_conversations, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
 
         private_conv = df_conversations[df_conversations["Conversation Type"] == "Private"].drop(columns=["Conversation Type"])
         array = []
@@ -819,8 +807,7 @@ def getFriendsPrimary(primary, arroyo):
         group_concat(user_id) as "User ID"
         from user_conversation where conversation_type is 1
         group by client_conversation_id"""
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
-        df = pd.read_sql_query(query, conn)
+        df, _wal_info = sqlite_open.read_sql(arroyo, query)
         grupper = {"Conversation ID": [], "Participants": []}
 
         for index, row in df.iterrows():
@@ -889,7 +876,6 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
 def getCacheArroyo(arroyo, cache_df):
     cache_df = cache_df.reset_index()
     logger.info("Getting cache files from " + ntpath.basename(arroyo))
-    conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
     messagesQuery = """select
             client_conversation_id as client_conversation_id,
             server_message_id as server_message_id,
@@ -901,7 +887,7 @@ def getCacheArroyo(arroyo, cache_df):
             order by client_conversation_id, server_message_id
             """
 
-    df_arroyo = pd.read_sql_query(messagesQuery, conn)
+    df_arroyo, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
 
     for index, row in df_arroyo.iterrows():
         
@@ -959,6 +945,37 @@ def getCacheArroyo(arroyo, cache_df):
     return df_arroyo
 
 
+# The three join columns every cache frame carries. Built through empty_cache_frame() so an empty
+# result still has *string* columns: pandas 3.x refuses to merge an object column against a float64
+# one, and `pd.DataFrame({"CACHE_KEY": []})` gives float64. See empty_cache_frame().
+CACHE_JOIN_COLUMNS = ("CACHE_KEY", "EXTERNAL_KEY", "MEDIA_CONTEXT_TYPE")
+
+
+def empty_cache_frame():
+    """A 0-row cache frame whose join columns are strings, not float64.
+
+    `pd.DataFrame({"CACHE_KEY": [], ...})` types every column from an empty list, i.e. float64. When
+    that frame reached `pd.merge` against a real (string) frame, pandas 3.x raised
+    "You are trying to merge on object and float64 columns", which `mergeCache` caught and turned
+    into an empty result — costing the legacy report every chat attachment on that device. Typing
+    the columns here means the empty case merges like any other.
+    """
+    return pd.DataFrame({c: pd.Series(dtype="string") for c in CACHE_JOIN_COLUMNS})
+
+
+def normalize_cache_keys(frame):
+    """Force the join columns to strings in place ("" for missing values).
+
+    Uses `.astype`, not `.apply`: `Series.apply` short-circuits on an empty Series and returns it
+    with its original dtype, so the frame it was meant to normalize came out unchanged — the other
+    half of the merge crash above.
+    """
+    for column in CACHE_JOIN_COLUMNS:
+        if column in frame.columns:
+            frame[column] = frame[column].astype("string").fillna("")
+    return frame
+
+
 def getCache(cachecontroller):
     try:
         # foundFiles = []
@@ -969,17 +986,27 @@ def getCache(cachecontroller):
                 # foundFiles = foundFiles + files
         # logger.info(f"Getting cache files from {ntpath.basename(cachecontroller)} and {SCContentFolder.split('/')[-2]}")
         logger.info(f"Getting cache info from {ntpath.basename(cachecontroller)}")
-        conn = sqlite3.connect(f"file:{cachecontroller}?mode=ro", uri=True)
-        if uuid != "":
-            messagesQuery = f"""select
-            *
-            from CACHE_FILE_CLAIM where USER_ID is '{uuid}' and MEDIA_CONTEXT_TYPE in (2,3,19) and DELETED_TIMESTAMP_MILLIS is 0"""
-        else:
-            messagesQuery = f"""select
-            *
-            from CACHE_FILE_CLAIM where MEDIA_CONTEXT_TYPE in (2,3,19) and DELETED_TIMESTAMP_MILLIS is 0"""
-        df_cache = pd.read_sql_query(messagesQuery, conn)   
-        
+        # Every account's claims, not just the one the run identified. A device can be signed into
+        # more than one Snapchat account, and the media claims of the *other* account are still
+        # evidence: on a two-account test device the detected user owns zero rows of these context
+        # types while the second account owns 36 chat-media claims. Filtering to one USER_ID
+        # returned an empty frame there, which lost that media and crashed the merge downstream.
+        # cache_controller_report.py has never applied this filter, which is why the two reports
+        # disagreed on the same extraction. USER_ID stays in the frame so attribution is not lost.
+        messagesQuery = """select
+        *
+        from CACHE_FILE_CLAIM where MEDIA_CONTEXT_TYPE in (2,3,19) and DELETED_TIMESTAMP_MILLIS is 0"""
+        df_cache, _wal_info = sqlite_open.read_sql(cachecontroller, messagesQuery)
+
+        if "USER_ID" in df_cache.columns and len(df_cache):
+            per_user = df_cache["USER_ID"].astype("string").fillna("").value_counts()
+            summary = ", ".join(f"{(u or '(none)')[:8]}…: {n}" for u, n in per_user.items())
+            logger.info(f"cache_controller: {len(df_cache)} claim(s) across "
+                        f"{len(per_user)} account(s) — {summary}")
+            if uuid and uuid not in set(per_user.index):
+                logger.warning(f"cache_controller: none of these claims belong to the account this "
+                               f"run identified ({uuid[:8]}…) — the cached media on this device "
+                               f"belongs to another account signed in on the same phone")
         return (df_cache)
         
         # if foundFiles == []:
@@ -1015,8 +1042,8 @@ def getCache(cachecontroller):
 
     except Exception as E:
         logger.error(f"Error getting cache files from cachecontroller: {E}")
-        return pd.DataFrame({"CACHE_KEY":[], "EXTERNAL_KEY":[], "MEDIA_CONTEXT_TYPE":[]})
-    
+        return empty_cache_frame()
+
 def getContentmanager(contentmanager):
     logger.info("Getting cache info from contentmanager")
     # Newer extractions may not have a contentmanager database at all (the glob in main()
@@ -1024,10 +1051,9 @@ def getContentmanager(contentmanager):
     # frame instead of querying a non-existent table and logging a scary error.
     if not contentmanager or not os.path.exists(contentmanager):
         logger.info("No contentmanager database found, skipping")
-        return pd.DataFrame({"CACHE_KEY": [], "EXTERNAL_KEY": [], "MEDIA_CONTEXT_TYPE": []})
+        return empty_cache_frame()
     df_content = pd.DataFrame()
     try:
-        conn = sqlite3.connect(f"file:{contentmanager}?mode=ro", uri=True)
         messagesQuery = f"""
         select 
         *
@@ -1037,10 +1063,9 @@ def getContentmanager(contentmanager):
         --CONTENT_KEY LIKE '2-%'
         """
         
-        df_content = pd.read_sql_query(messagesQuery, conn)
+        df_content, _wal_info = sqlite_open.read_sql(contentmanager, messagesQuery)
     except pd.io.sql.DatabaseError:
         try:
-            conn = sqlite3.connect(f"file:{contentmanager}?mode=ro", uri=True)
             messagesQuery = f"""
             select 
             KEY as CONTENT_KEY
@@ -1051,17 +1076,16 @@ def getContentmanager(contentmanager):
             --CONTENT_KEY LIKE '2-%'
             """
             
-            df_content = pd.read_sql_query(messagesQuery, conn)
+            df_content, _wal_info = sqlite_open.read_sql(contentmanager, messagesQuery)
         except:
             try:
-                conn = sqlite3.connect(f"file:{contentmanager}?mode=ro", uri=True)
                 messagesQuery = f"""
                 select 
                 *
                 from CONTENT_OBJECT_TABLE
                 """
                 
-                df_content = pd.read_sql_query(messagesQuery, conn)
+                df_content, _wal_info = sqlite_open.read_sql(contentmanager, messagesQuery)
             except Exception as Error:
                 logger.error("Something went wrong when getting data from contentmanager!")
                 logger.error(Error)
@@ -1102,14 +1126,12 @@ def mergeCache(df_cache, df_content):
         # pandas 3.x refuses to merge integer and string values for the same key when
         # cache rows come from SQLite and content rows come from protobuf decoding.
         # Normalize the join columns to strings so both schemas can be matched reliably.
+        # normalize_cache_keys uses .astype rather than .apply on purpose — see its docstring;
+        # .apply left an EMPTY frame at its original dtype and the merge below then raised.
         for frame in (df_cache, df_content):
-            for column in ("CACHE_KEY", "EXTERNAL_KEY", "MEDIA_CONTEXT_TYPE"):
-                if column in frame.columns:
-                    frame[column] = frame[column].apply(
-                        lambda value: "" if pd.isna(value) else str(value)
-                    )
+            normalize_cache_keys(frame)
 
-        df_merge = pd.merge(df_cache, df_content, on=["CACHE_KEY", "EXTERNAL_KEY", "MEDIA_CONTEXT_TYPE"], how="outer")
+        df_merge = pd.merge(df_cache, df_content, on=list(CACHE_JOIN_COLUMNS), how="outer")
         memories_cache_df = df_merge
         # logger.info(len(df_merge))
         # con = sqlite3.connect("merge.db")
@@ -1158,22 +1180,26 @@ def mergeCache(df_cache, df_content):
         # df_merge.to_sql("test", con)
         return (df_merge)
     except Exception as E:
-        logger.error(f"Error merging cache info: {E}")
+        # Logged with the traceback: this used to fail on a pandas dtype mismatch that the one-line
+        # message did not explain, and the run carried on with no cache media at all.
+        logger.error(f"Error merging cache info: {E}", exc_info=True)
+        logger.error("No cached chat media will appear in the legacy Communications report for "
+                     "this extraction — the Conversations and cache_controller reports are built "
+                     "separately and are unaffected")
         # Return the correctly-shaped empty frame (like getCache/getContentmanager) so a
         # merge failure degrades gracefully instead of crashing mergeCacheChats with a
         # KeyError on the missing EXTERNAL_KEY/CACHE_KEY columns.
-        return pd.DataFrame({"CACHE_KEY": [], "EXTERNAL_KEY": [], "MEDIA_CONTEXT_TYPE": []})
+        return empty_cache_frame()
 
 def getChats(database):
     logger.info("")
     logger.info("Getting chats from " + ntpath.basename(database))
-    conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
 
     # A message has two identities: the id the device gave it (client_message_id, present as soon as
     # it is composed) and the one the server assigned (server_message_id, absent while it is still
     # sending). Both are reported, so a message can be found again in arroyo.db either way. The
     # column names differ between app versions, so the optional ones are selected only when present.
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(conversation_message)")}
+    columns = sqlite_open.table_columns(database, "conversation_message")
     optional = ""
     for candidate in ("client_message_id", "local_message_id", "server_conversation_id"):
         if candidate in columns:
@@ -1194,7 +1220,7 @@ def getChats(database):
     order by client_conversation_id, creation_timestamp
     """
 
-    df = pd.read_sql_query(messagesQuery, conn)
+    df, _wal_info = sqlite_open.read_sql(database, messagesQuery)
 
     for index, row in df.iterrows():
         message = (row["message_content"])
@@ -1263,8 +1289,9 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
 
     #cache_df_v2 = pd.DataFrame(columns=['CACHE_KEY', 'TYPE', 'client_conversation_id', 'server_message_id'])
     tmp_dict = {'CACHE_KEY': [], 'TYPE': [], 'client_conversation_id': [],
-                            'server_message_id': [], 'SERVER_MESSAGE_ID_PART': []}
-                            
+                            'server_message_id': [], 'SERVER_MESSAGE_ID_PART': [],
+                            'CLAIM_USER_ID': []}
+
     for index, row in cache_df.iterrows():
         try:
             data = row["EXTERNAL_KEY"]
@@ -1272,6 +1299,11 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
             try:
                 if data[0] == "https":
                     continue
+                # Which account claimed this file. getCache now reads every account's claims (a
+                # phone can be signed into more than one), so this has to be carried through:
+                # below, an unmatched claim becomes a synthetic message row, and without the
+                # account a second account's conversations would be listed as this one's.
+                tmp_dict["CLAIM_USER_ID"].append(str(row.get("USER_ID") or ""))
                 #tmp_dict = {'CACHE_KEY': row["CACHE_KEY"], 'TYPE': data[0], 'client_conversation_id': data[1],
                 #            'server_message_id': data[2], 'SERVER_MESSAGE_ID_PART': data[3]}
                 try:
@@ -1313,8 +1345,20 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
                         'Creation Timestamp': [],
                         'Read Timestamp': [], 'TYPE': [], 'sender_id': [],
                         'server_message_id': [], 'SERVER_MESSAGE_ID_PART': []}
+    other_account = 0
     for index, row in cache_df_v2.iterrows():
         if row['CACHE_KEY'] not in merged_cache_keys:
+            # A claim belonging to a DIFFERENT account on the same phone must not become a message
+            # in this account's report: its conversation ids are that account's, and folding them
+            # in silently listed another user's conversations as the device owner's. Those files
+            # are still reported — the cache_controller report lists every account's claims with
+            # the USER_ID that made them. SCPersistentMedia rows carry no USER_ID and are this
+            # account's saved media, so an empty value passes.
+            claim_user = row.get("CLAIM_USER_ID")
+            claim_user = "" if claim_user is None or pd.isna(claim_user) else str(claim_user)
+            if uuid and claim_user and claim_user != uuid:
+                other_account += 1
+                continue
             if (row["client_conversation_id"]) != "":
                 try:
                     tmp_dict["CACHE_KEY"].append(row["CACHE_KEY"])
@@ -1340,6 +1384,10 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
                 tmp_dict["Read Timestamp"].append("Unknown")
                 tmp_dict["sender_id"].append("Unknown")
             
+    if other_account:
+        logger.info(f"{other_account} cached chat file(s) are claimed by a different account on "
+                    f"this device and are not listed as this account's messages — see the "
+                    f"cache_controller report, which lists every account's claims")
     cache_df_v2 = pd.DataFrame.from_dict(tmp_dict)
     frames = [cache_df_v2, merge_df]
     merge_df = pd.concat(frames, axis=0)
@@ -1405,7 +1453,9 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
         merge_df.loc[index, 'content_type'] = "Sending Message"
     renames = {'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
                'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID',
-               'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text'}
+               'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text',
+               # which reading of arroyo.db the row came from (scripts/data/sqlite_open.py)
+               '_wal': 'WAL View'}
     # the device-side message id, under whichever name this app version uses (only one is renamed,
     # so two present columns can never collide on the same output name)
     for candidate in ('client_message_id', 'local_message_id'):
@@ -1414,10 +1464,9 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
             break
     final_df = merge_df.rename(columns=renames)
 
-    try:
-        final_df = final_df.drop(columns=['CACHE_KEY', 'SERVER_MESSAGE_ID_PART', 'TYPE'])
-    except:
-        final_df = final_df.drop(columns=['CACHE_KEY', 'TYPE'])
+    # CLAIM_USER_ID is bookkeeping for the filter above, not something to show in the report.
+    final_df = final_df.drop(columns=[c for c in ('CACHE_KEY', 'SERVER_MESSAGE_ID_PART', 'TYPE',
+                                                 'CLAIM_USER_ID') if c in final_df.columns])
     logger.info("")
     return final_df
 
@@ -1470,13 +1519,12 @@ def getSCPersistentMedia():
     
 def getLocalUserDisplayname(friends_df, primaryDoc):
     
-    conn = sqlite3.connect(f"file:{primaryDoc}?mode=ro", uri=True)
     messagesQuery = f"""select
     userId as 'User ID',
     p as 'Display Name'
     from snapchatters__displaymetadata where userId = '{uuid}'
     """
-    df = pd.read_sql_query(messagesQuery, conn)
+    df, _wal_info = sqlite_open.read_sql(primaryDoc, messagesQuery)
     for index, row in df.iterrows():
         try:
             data = row["Display Name"]
@@ -1697,7 +1745,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # (see getChats), so the column list is filtered rather than fixed.
     wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Message Content",
               "Message Text", "Content Type", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
-              "Server Message ID", "Client Message ID"]
+              "Server Message ID", "Client Message ID", "WAL View"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
      
     logger.info("Cleaning up cache files not linked to messages")
@@ -1814,9 +1862,21 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
+    # Cached media report: everything under Library/Caches that cache_controller.db does NOT index
+    # — the story renders, the PINCache stores, saved chat media and the cached documents. Runs
+    # BEFORE the cache_controller report so that report can read its by_cache_key.json manifest and
+    # the links between the two are two-way.
+    try:
+        from scripts import cache_media_report
+        cache_media_report.main(snapchatFolder, report_dir + "/CacheMedia",
+                                tz=tz, src_root=os.path.dirname(Application),
+                                report_dir=report_dir)
+    except Exception as Error:
+        logger.error(f"Cached media report failed: {Error}")
+
     # cache_controller.db report: indexes every cached file, links each to its on-disk cache
-    # file(s) and — two-way — to the Memories and Communications reports. Runs after those two so
-    # it can read the chat-attachment manifest the Communications report wrote.
+    # file(s) and — two-way — to the Memories, Communications and cached-media reports. Runs after
+    # those so it can read the manifests they wrote.
     try:
         from scripts import cache_controller_report
         cache_controller_report.main(snapchatFolder, report_dir + "/CacheController",

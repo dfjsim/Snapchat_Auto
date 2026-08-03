@@ -13,11 +13,16 @@ import requests
 import sqlite3
 from scripts.data import ccl_bplist
 from scripts.data import keychain as convert_keychain
+from scripts.data import ffmpeg_log
+from scripts import report_ui
 import filetype
 import subprocess
 from PIL import Image
 import shutil
 import tempfile
+
+# What FFmpeg wrote while checking decrypted videos are playable (see ffmpeg_log).
+_FFMPEG_OUTPUT = []
 import re
 import ntpath
 import numpy as np
@@ -275,6 +280,17 @@ def decryptMemoriesLocal(egocipherKey, persistedKey, df_merge, df_cache):
             file = f"{SCContentFolder_path}{merge_row['CACHE_KEY']}"
             filename = merge_row['CACHE_KEY']
             if filetype.guess(file) == None or filetype.guess(file).extension in ['ps']: #Encrypted file or some random filetype
+                # A My Eyes Only memory's key is stored WRAPPED in the account's MEO master key —
+                # 48-byte KEY / 32-byte IV instead of 32/16 — and can only be unwrapped with the
+                # keychain item 'com.snapchat.keyservice.persistedkey'. Without that item, AES.new
+                # raised "Incorrect AES key length (48 bytes)", which was logged as a decryption
+                # ERROR and read like a bug rather than a missing key.
+                if len(merge_row["KEY"] or b"") != 32 or len(merge_row["IV"] or b"") != 16:
+                    logger.info(f"Snap {merge_row['ID']} is My Eyes Only and its key is still "
+                                f"wrapped ({len(merge_row['KEY'] or b'')}-byte KEY) — no "
+                                f"'com.snapchat.keyservice.persistedkey' for this account was in "
+                                f"the keychain, so it cannot be decrypted")
+                    continue
                 aes = AES.new(merge_row["KEY"], AES.MODE_CBC, merge_row["IV"])
                 with open(file, "rb") as f:
                     enc_data = f.read()
@@ -323,8 +339,14 @@ def decryptMemoriesLocal(egocipherKey, persistedKey, df_merge, df_cache):
             
             if fileTypeMime.extension == "mp4": #Check if video has any frames, removes it if its 0
                 try:
-                    cv2video = cv2.VideoCapture(resultfile)
-                    framecount = cv2video.get(cv2.CAP_PROP_FRAME_COUNT)
+                    # OpenCV's FFmpeg writes its complaints straight to fd 2 from C, which put them
+                    # on the console but never in the run's .log. Capture them instead and
+                    # summarise below: on a cached video "moov atom not found" means only part of
+                    # the file was ever cached, which is a finding, not noise.
+                    with ffmpeg_log.captured_stderr(_FFMPEG_OUTPUT):
+                        cv2video = cv2.VideoCapture(resultfile)
+                        framecount = cv2video.get(cv2.CAP_PROP_FRAME_COUNT)
+                        cv2video.release()
                     if int(framecount) == 0:
                         df_merge.loc[merge_index, "filename"] = "FrameCountError"
                         os.remove(resultfile)
@@ -523,20 +545,17 @@ def createFullSnapImages(df_merge):
             logger.error(f"Error creating FullSnapImage of snap ID: {row['ID']} | Filename: {row['filename']} | Error: {error}")
 
 
+def _listdir_safe(path):
+    """os.listdir that returns [] for a missing/unreadable directory."""
+    try:
+        return os.listdir(path)
+    except OSError:
+        return []
+
+
 def generateReport(df_merge):
     logger.info("Generating report file")
-    if getattr(sys, 'frozen', False):
-        exe_path = sys._MEIPASS
-        try:
-            shutil.copytree(f"{exe_path}/css", f"{outputDir}/css")
-        except:
-            logger.error("Could not copy the CSS folder, result might look a bit worse")
-    else:
-        exe_path = os.path.dirname(os.path.abspath(__file__))
-        try:
-            shutil.copytree(f"{exe_path}/data/css", f"{outputDir}/css")
-        except:
-            logger.error("Could not copy the CSS folder, result might look a bit worse")
+    report_ui.copy_css(outputDir)
 
     filePath = f"./DecryptedMemories/"
     createFullSnapImages(df_merge)
@@ -636,7 +655,15 @@ def generateReport(df_merge):
                                                                              "not locally stored")
     with open(f'{outputDir}/LocalMemories_legacy_report.html', 'w') as f:
         f.write(html)
-    logger.info(f'Decrypted {len(df_report)} Memories/MEO and added them to report')
+    # `len(df_report)` is how many Memories were LISTED, not how many were decrypted — most rows on
+    # a typical device have no locally cached media at all. Reporting it as "Decrypted N" claimed
+    # 70 recovered on a device that produced one file. Count the files actually written instead.
+    listed = len(df_report)
+    decrypted = sum(1 for r in ("", "FullSnap")
+                    for _n in _listdir_safe(os.path.join(outputDir, "DecryptedMemories", r))
+                    if os.path.isfile(os.path.join(outputDir, "DecryptedMemories", r, _n)))
+    logger.info(f'Listed {listed} Memories/MEO in the report; '
+                f'{decrypted} media file(s) were decrypted to DecryptedMemories')
 
 
 def makeImg(src):
@@ -806,11 +833,44 @@ def _decrypt_ufed_keychain(keychain):
         return plistlib.load(f)
 
 
+def _persistedkeys_by_user(values_hex):
+    """Map Snapchat userId -> persistedkey hex, from every persistedkey item in the dump.
+
+    The item's payload is an NSKeyedArchiver plist carrying `masterKey`, `initializationVector`
+    **and the `userId` it belongs to**, so on a phone signed into two accounts the right key can be
+    handed to the right profile instead of guessing. Items that do not decode are skipped rather
+    than failing the read — a keychain problem must never abort a run.
+    """
+    out = {}
+    for value in values_hex:
+        try:
+            obj = ccl_bplist.deserialise_NsKeyedArchiver(BytesIO_load(unhexlify(value)))
+            user = obj.get("userId")
+        except Exception as error:
+            logger.debug(f"Keychain: a persistedkey item could not be decoded ({error})")
+            continue
+        if isinstance(user, bytes):
+            user = user.decode("utf-8", "replace")
+        if user:
+            out.setdefault(str(user), value)
+    return out
+
+
+def BytesIO_load(raw):
+    """ccl_bplist.load() over a bytes buffer (it wants a file-like object)."""
+    from io import BytesIO
+    return ccl_bplist.load(BytesIO(raw))
+
+
 def read_keychain_status(keychain):
     """Read a keychain dump and report exactly what was found.
 
     Returns a dict:
-        egocipher / persistedkey : hex strings, "" when absent
+        egocipher / persistedkey : hex strings, "" when absent (the first item of each kind)
+        egociphers               : every distinct egocipher value in the dump
+        persistedkeys            : {userId: hex} — persistedkey is PER ACCOUNT, so a device signed
+                                   into two accounts has two of them and keeping only the first
+                                   loses the other account's My Eyes Only master key
         status : 'ok' | 'no-egocipher' | 'no-snapchat-items' | 'unreadable' | 'missing' | 'none'
         detail : one sentence naming the cause, for the Memories report banner
         format : the detected dump format
@@ -819,7 +879,8 @@ def read_keychain_status(keychain):
     Never raises — a keychain problem degrades the run instead of aborting it. Unlike the previous
     version, though, every outcome is logged at INFO or above (the run log is INFO-level, so DEBUG
     diagnostics would never reach the examiner's log file)."""
-    res = {"egocipher": "", "persistedkey": "", "status": "none", "detail": "", "format": "",
+    res = {"egocipher": "", "persistedkey": "", "persistedkeys": {}, "egociphers": [],
+           "status": "none", "detail": "", "format": "",
            "items": 0, "snap_items": 0, "path": str(keychain or "")}
 
     if not res["path"].strip():
@@ -871,13 +932,13 @@ def read_keychain_status(keychain):
         return res
 
     res["format"], res["items"] = kind, len(items)
-    found, snap_items, valueless = {}, 0, []
+    found, all_found, snap_items, valueless = {}, {}, 0, []
     for entry in items:
         agrp = _kc_field(entry, _AGRP_FIELDS)
         acct = _kc_field(entry, _ACCOUNT_FIELDS)
         if agrp.startswith(SNAPCHAT_ACCESS_GROUP):
             snap_items += 1
-        if acct not in (EGOCIPHER_ACCOUNT, PERSISTEDKEY_ACCOUNT) or acct in found:
+        if acct not in (EGOCIPHER_ACCOUNT, PERSISTEDKEY_ACCOUNT):
             continue
         # Matched on the account name rather than on the access group: some dumps do not export
         # `agrp` at all, and requiring it (as before) skipped those items entirely.
@@ -888,7 +949,12 @@ def read_keychain_status(keychain):
         if agrp and not agrp.startswith(SNAPCHAT_ACCESS_GROUP):
             logger.info(f"Keychain: '{acct}' sits in access group '{agrp}', not "
                         f"'{SNAPCHAT_ACCESS_GROUP}' — using it anyway")
-        found[acct] = value
+        # EVERY matching item is kept, not just the first. A phone can be signed into more than one
+        # Snapchat account and `persistedkey` is per-account (its payload carries a `userId`), so
+        # the old "or acct in found: continue" silently discarded the second account's My Eyes Only
+        # master key — and, with it, any chance of decrypting that account's MEO memories.
+        all_found.setdefault(acct, []).append(value)
+        found.setdefault(acct, value)
 
     for acct in valueless:
         logger.warning(f"Keychain: item '{acct}' is present but carries no readable value — the "
@@ -897,9 +963,16 @@ def read_keychain_status(keychain):
     res["snap_items"] = snap_items
     res["egocipher"] = found.get(EGOCIPHER_ACCOUNT, "")
     res["persistedkey"] = found.get(PERSISTEDKEY_ACCOUNT, "")
+    res["persistedkeys"] = _persistedkeys_by_user(all_found.get(PERSISTEDKEY_ACCOUNT, []))
+    res["egociphers"] = list(dict.fromkeys(all_found.get(EGOCIPHER_ACCOUNT, [])))
+    owners = ", ".join(f"{u[:8]}…" for u in res["persistedkeys"]) or "none"
     logger.info(f"Keychain: {len(items)} item(s) scanned, {snap_items} in the Snapchat access "
                 f"group; egocipher {_key_note(res['egocipher'])}, "
-                f"persistedkey {_key_note(res['persistedkey'])}")
+                f"persistedkey {_key_note(res['persistedkey'])}"
+                + (f" for account(s) {owners}" if res["persistedkeys"] else ""))
+    if len(res["egociphers"]) > 1:
+        logger.info(f"Keychain: {len(res['egociphers'])} distinct egocipher item(s) present; "
+                    "each gallery.encrypteddb is tried against all of them")
 
     if res["egocipher"]:
         res["status"] = "ok"
@@ -945,13 +1018,20 @@ def diagnose_keychain(keychain):
     Returns the `read_keychain_status` dict."""
     res = read_keychain_status(keychain)
     logger.info(f"Keychain verdict [{res['status']}]: {res['detail']}")
-    if res["status"] == "ok" and not res["persistedkey"]:
-        logger.info("Geolocation and old-schema memories: OK. Old-schema My Eyes Only: unavailable.")
-    elif res["status"] == "ok":
-        logger.info("Geolocation, old-schema memories and My Eyes Only: OK.")
+    # My Eyes Only needs `persistedkey` on BOTH schemas. The key a MEO memory carries in
+    # ZGALLERYSNAP.ZENCRYPTION (new schema) is itself wrapped — 48-byte KEY, 32-byte IV against
+    # 32/16 for a regular memory — so scdb alone is not enough for it, only for regular memories.
+    if res["persistedkey"]:
+        owners = ", ".join(f"{u[:8]}…" for u in res["persistedkeys"]) or "unknown account"
+        logger.info(f"My Eyes Only: recoverable for account(s) {owners} (on either schema).")
     else:
-        logger.info("Geolocation is unavailable. New-schema memories (including My Eyes Only) are "
-                    "unaffected — their keys live in scdb, not in the keychain.")
+        logger.info("My Eyes Only: unavailable on BOTH schemas — 'persistedkey' is not in this "
+                    "dump, and a MEO memory's scdb key is wrapped with it.")
+    if res["status"] == "ok":
+        logger.info("Geolocation and old-schema regular memories: OK.")
+    else:
+        logger.info("Geolocation is unavailable. New-schema REGULAR memories are unaffected — "
+                    "their keys live in scdb, not in the keychain.")
     return res
 
 
@@ -1025,6 +1105,9 @@ def main(enc_db, scdb, keychain, cache_df, SCContentFolder, out_dir=None):
         df_merge = df_merge.groupby("ID").first().reset_index()
         df_merge = df_merge.replace(np.nan, "")
         generateReport(df_merge)
+        ffmpeg_log.log_summary(_FFMPEG_OUTPUT,
+                               "the playability check on decrypted Memories videos", logger)
+        _FFMPEG_OUTPUT.clear()
         logger.info(f"Report can be found in {outputDir}")
         logger.info(f"Decrypted memories can be found in {outputDir}/DecryptedMemories")
         return df_merge

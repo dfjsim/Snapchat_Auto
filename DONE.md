@@ -23,8 +23,8 @@
   in a different account's `SCContent_<userId>` folder than the account(s) that claim the file (an
   untracked/materialized duplicate). Shows a ⚠ chip + on-disk marker, groups the detail paths by
   account scope, adds a "cross-scope only" filter and a summary count, and the "?" explains it. The
-  claim's USER_ID stays authoritative. Verified on the 2023 GK device (4 such files, incl. the
-  `6382911a…` memory whose full copy lives in the active account's scope). See `_scope_user` /
+  claim's USER_ID stays authoritative. Verified on an iOS 16 test device (4 such files, one of
+  them a Memory whose full copy lives in the active account's scope). See `_scope_user` /
   `_resolve_on_disk` / `_cross_scope_basis`; documented in `docs/report_cache_controller.md`.
 - [DONE-v1.4.0] Mirrored the cross-scope flag in the **Memories report**: each media file's source
   paths are grouped by SCContent account scope, a ⚠ "cross-scope copy" badge + "?" appears when a
@@ -95,6 +95,114 @@
   to open. `cache_controller_report.load_chat_links` prefers it, falls back to the legacy v2/v1
   manifests, and stamps those with the document they belong to. Chat chips now open the message's
   conversation page in the `scauto_convs` tab.
+
+# Corpus test-run fixes (v1.5.0)
+
+Found by analysing the reports of a four-device test run and verified by re-running all four. Every
+number below is measured, and every finding came from the extractions themselves.
+
+The four are referred to by the properties that matter (see "Referring to test data" in CLAUDE.md):
+
+| Short name | What it is |
+|---|---|
+| **old-schema** | iOS 16 / Snapchat 12.x, keys in `gallery.encrypteddb`, full-filesystem keychain, two accounts |
+| **backup-keychain** | new schema, backup-class keychain (no `egocipher`), one account |
+| **iOS 26 single** | iOS 26 / Snapchat 14.x, new schema, full-filesystem keychain, one account |
+| **iOS 26 dual** | iOS 26, new schema, two accounts, `persistedkey` for only one of them |
+
+| | old-schema | backup-keychain | iOS 26 dual | iOS 26 single |
+|---|---|---|---|---|
+| Conversation messages | 4 → 4 | 12 → 12 | **1 → 11** | 18 → 18 |
+| …with an attachment | 3 → 3 | 7 → 7 | **0 → 10** | 17 → 17 |
+| Legacy report cacheFiles | 8 → 8 | 14 → 14 | **0 → 20** | 36 → 36 |
+| cache entries linked to chats | 5 → 5 | 10 → 10 | **0 → 20** | 33 → 33 |
+| Memories (with media) | 80 (79) | **80 → 82 (82)** | **157 → 158 (108 → 110)** | **86 → 87 (87)** |
+| cache entries shown "🔒 encrypted" | 253 → **7** | 114 → **5** | 135 → **2** | 98 → **0** |
+| CacheMedia "not recovered" | 298 → **120** | 213 → **13** | 82 → **7** | 217 → **4** |
+| CacheMedia rows linked to a report | 53 → **136** | 98 → **181** | 23 → **48** | 93 → **203** |
+
+- [FIXED-v1.5.0] **`mergeCache` crashed on an empty frame and the legacy report lost every chat
+  attachment.** On the iOS 26 dual-account device: `Error merging cache info: You are trying to merge on
+  object and float64 columns for key 'CACHE_KEY'`, after which `Communications_legacy/cacheFiles`
+  held **0 files** (36 on the same phone's other extraction) and the "Getting cache files from N
+  SCContent folder(s)" step — inside `mergeCache`, after the merge — never ran at all.
+  Two pandas behaviours combined: `pd.DataFrame({"CACHE_KEY": []})` types its columns from an empty
+  list (float64), and `Series.apply` short-circuits on an empty Series so the normalization pass
+  left it that way. `getCache`/`getContentmanager`/`mergeCache` now build empty frames through
+  `empty_cache_frame()` and normalize with `normalize_cache_keys()` (`.astype("string")`, which
+  applies to an empty frame). The failure path also logs the traceback and says explicitly which
+  report is affected. Written up in `docs/pandas3_python314_compat.md` §2b.
+- [FIXED-v1.5.0] **`getCache` only ever read one account's cache claims.** The query filtered
+  `USER_ID is '<uuid>'`; on the iOS 26 dual-account device the detected account owns **zero** rows of the
+  relevant media context types while the second account owns 36 chat-media claims — that empty
+  result is what triggered the crash above. It now reads every account, logs the per-account
+  breakdown, and warns when none of the claims belong to the account the run identified.
+  - Attribution is preserved rather than merged: a claim belonging to a **different** account no
+    longer becomes a synthetic message in this account's report (it briefly did, listing the other
+    user's conversations as the device owner's). Those files stay visible in the cache_controller
+    report, which lists every account's claims with the `USER_ID` that made them, and the chat
+    pipeline logs how many were set aside.
+- [FIXED-v1.5.0] **New-schema My Eyes Only memories were never decrypted, even with the key in
+  hand.** `ZGALLERYSNAP.ZENCRYPTION` for `IS_ENCRYPTED=1` holds the key **wrapped** — 48-byte
+  `KEY`, 32-byte `IV` against 32/16 for a regular memory — and `memories_media_report` assigned it
+  raw, so every matcher rejected it for not being 32 bytes and the memory ended up with no media at
+  all. `unwrap_meo_key` was only wired into the old-schema `snap_key_iv` path. Verified: unwrapping
+  a My Eyes Only snap on the iOS 26 dual-account device yields a valid pack header followed by a JPEG.
+  - `persistedkey` is **per account** (its payload names its `userId`), and the keychain reader
+    kept only the first item of each name, discarding the second account's MEO master key. It now
+    collects them all and hands each profile its own (`persistedkeys`, keyed by `userId`).
+  - `unwrap_meo_key` no longer writes the keychain secret to `temp_meo.plist` in the working
+    directory before reading it back.
+  - Memories with no usable key are now stated as "key still wrapped, no persistedkey for this
+    account" rather than silently having no media, with a per-account count in the log.
+  - The legacy report's `Error decrypting snap ID … Incorrect AES key length (48 bytes)` was the
+    same cause; it now reports a missing key instead of an AES error.
+  - Corrected in `docs/snapchat_ios_memories_decryption.md` (which claimed new-schema MEO needed no
+    keychain), in the module docstring, in `diagnose_keychain`, and in the report's banner.
+- [FIXED-v1.5.0] **Memories deleted from `scdb` are now recovered from superseded `-wal` frames.**
+  Reading each database twice gives the two states SQLite can produce; neither reaches a page image
+  that a *later frame in the same log* replaced, which is where a row deleted mid-log survives. On
+  the backup-keychain device two Memories exist in **no** reading, yet their media was on disk and their
+  cache claims intact — they showed as unrecoverable encrypted blobs.
+  `sqlite_open.wal_page_images()` / `superseded_wal_pages()` expose those frames;
+  `memories_media_report.carve_deleted_memories` carves `SCMemoriesSnapEncryption` archives out of
+  them and tests each carved key against the file `cache_controller.db` claims for a snap with no
+  Memory row. Recovered: a JPEG + thumbnail and an MP4 + thumbnail there, one more Memory
+  on each iOS 26 device.
+  - A carved key is accepted **only** when it decrypts the claimed file into valid media; nothing
+    is inferred from position in the page, and an already-plaintext cache file is skipped because
+    it would "decrypt" under any key.
+  - Badged apart everywhere: `sqlite_open.CARVED`, a `CARVED` chip and filter in the index, and a
+    banner on the detail page explaining that no database row survives — so the empty metadata
+    panels are not misread as blank fields on the device. Documented in
+    `docs/sqlite_wal_handling.md`.
+- [FIXED-v1.5.0] **The cache_controller "🔒 encrypted" label was wrong for ~97% of the files it
+  marked.** Identification was `guess_media` alone (JPEG/MP4/PNG/WebP) and everything else got a
+  padlock: 600 files across the corpus, of which 480 were LZC lens bundles, 27 protobuf, 10 WEBVTT
+  subtitle tracks, 9 ZIP, 9 JSON/text, 4 HTML, 4 fonts and 2 binary plists — and only 19 genuinely
+  encrypted. Content sniffing moved to a shared `scripts/data/sniff.py`; "encrypted" now requires
+  high entropy **and** AES block alignment, everything else is named for what it is, and the header
+  reports how many entries hold encrypted bytes, how many the Memories report can open and how many
+  have no key, with a filter per group. `_hash_stream` keeps 8 KB of head instead of 16 bytes, since
+  entropy over 16 bytes can never exceed 4 bits/byte.
+- [FIXED-v1.5.0] **CacheMedia counted files it deliberately does not decode as failures.** The
+  headline read "227 not recovered" on the iOS 26 single-account device when 188 were `caching-media` packs
+  that the Memories report decrypts in full — the true figure was 4. Rows owned by another report
+  and app assets are counted and labelled separately (`↗ decoded in the Memories report`), and the
+  padlock is reserved for genuine failures.
+  - `caching-media` packs now link to their Memory. A pack filename is an opaque hash indexed by no
+    database, so the Memories report writes `media_by_pack.json` (`<folder>/<item hash>` → snap)
+    from its own decrypt-and-match result; without it 110 of 191 pack rows on that device were a
+    padlock with no link at all.
+- [FIXED-v1.5.0] **"Could not copy the CSS folder" fired on every re-run of an existing run
+  folder.** `shutil.copytree` raises `FileExistsError` when the target exists — which `--run-name`
+  guarantees — and a bare `except:` reported it as a degraded report while the CSS was in fact
+  already there. Now one shared `report_ui.copy_css()` with `dirs_exist_ok=True`, catching `OSError`
+  only and naming the paths and the reason when it genuinely fails.
+- [FIXED-v1.5.0] **The legacy Memories report's log line counted the wrong thing.** "Decrypted 70
+  Memories/MEO" on a device that produced one file: it was reporting how many Memories were
+  *listed*. It now reports both — how many were listed, and how many media files were actually
+  written to `DecryptedMemories`.
 
 # Coverage and report UI fixes (v1.5.0)
 - [DONE-v1.5.0] **Every SCContent cache folder is extracted and searched.** `extract_zip` filtered
@@ -191,7 +299,7 @@
   SNAP IDs prominent and a back-to-index link. Second-level grouping (`assign_groups`, union-find)
   merges memories by ZMEDIAID **and** by identical non-zero media MD5 **across users** (0-byte
   excluded). Writes `memory_pages.json` (snap_id -> sub-page) so the cache_controller report links
-  to both the index row and the detail page. Verified on the 2023 GK device: 80 memories -> 66
+  to both the index row and the detail page. Verified on the iOS 16 test device: 80 memories -> 66
   groups, and 80/80 index<->subpage + 77/77 cache->index + 77/77 cache->detail links resolve.
 - [DONE-v1.3.3] Geolocations now include a Google Maps link on the same line as the OSM link.
 - [DONE-v1.3.3] Memories sharing the same cache media + AES key/IV are grouped; media, encryption and
@@ -229,7 +337,7 @@
   `#mem-<snapid>` anchors added to the Memories report; the Memories report links back per media
   file to `#ck-<cache_key>` (only when that key is present in cache_controller). cache→chat via a
   `cache_links.json` manifest the Communications report now writes; `path_to_image_html` adds a
-  `#cf-<cache_key>` anchor and a back-link to the cache entry. Verified on the 2023 GK FFS
+  `#cf-<cache_key>` anchor and a back-link to the cache entry. Verified on the iOS 16 GrayKey full-filesystem
   extraction (2 users): 77/77 cache-to-memory and 98/98 memory-to-cache anchors resolve.
 - [DONE-v1.3.3] cache-to-Memory linking has two **fallbacks** after the primary snap-UUID-in-EXTERNAL_KEY
   match: (a) `SHA-256(memory URL token)[:16] == CACHE_KEY` for CDN-downloaded media with only a URL
@@ -248,8 +356,8 @@
 # cache_controller.db report — follow-up improvements
 - [DONE-v1.4.0] Field-8 of `CONTENT_RETRIEVAL_METADATA` was mislabelled "Content SHA-256". It is
   usually a CDN media token, sometimes a 64-hex hash, sometimes the CACHE_KEY — and even the 64-hex
-  form is a **source-side** hash that need not match the cached bytes (proven on `f1cd5e24…`, an
-  app_install_screenshot whose field 8 matched neither the cached file nor the download). Now
+  form is a **source-side** hash that need not match the cached bytes (proven on an
+  app_install_screenshot entry whose field 8 matched neither the cached file nor the download). Now
   labelled by real column name + value-type + a "?" caveat, and the report additionally computes and
   shows the **actual cached file's** MD5/SHA-256 (`materialize_ondisk`).
 - [DONE-v1.4.0] Cached media files are now **viewable even when unlinked** to a Memory/chat:
@@ -314,7 +422,7 @@
     match, sends `thumbnail…` files to `thumbnail~1:` and everything else to the full media `1:`.
   Verified byte for byte: every one of the 19 attachments' SHA-256 equals the linked entry's bytes
   or one of its bundle children's — message 12.0's PNG → `thumbnail~1:…12:0:0`, its .mov →
-  `1:…12:0:0` whose child `z2a132f1f…` *is* that video.
+  `1:…12:0:0` whose named child *is* that video.
 
 # Report UI: paging, selection, MEO indicator, offline maps (v1.4.2)
 - [DONE-v1.4.2] **My Eyes Only indicator** in the Memories index: a red MEO badge in the Kind
@@ -347,7 +455,7 @@
   map is labelled a derived artifact, with a "?" recording the server, zoom and tile count; a server
   that stops answering degrades to a warning instead of failing the run.
 
-# Analysis / Reverse engineering
+# Analysis
 - [DONE-v1.4.0] Check if we have metadata in `cache_controller.db` for all files in `Documents/com.snap.file_manager_3_SCContent_...`.
 
 # Other

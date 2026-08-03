@@ -37,13 +37,40 @@ browser fires **no** event at all, so the target row would never be expanded/scr
 """
 
 import os
+import sys
 import json
 import html
 import uuid
+import shutil
 import logging
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- bundled assets
+
+def copy_css(dest_dir):
+    """Copy the bundled Bootstrap ``css`` folder next to a legacy report. True when it is there.
+
+    The two legacy reports each used to do this inline with a bare ``except:`` that logged
+    "Could not copy the CSS folder, result might look a bit worse". Because run folders are meant
+    to be reused (``--run-name``), ``copytree`` hit ``FileExistsError`` on **every** re-run and the
+    reports were reported as degraded while the CSS was in fact already in place. ``dirs_exist_ok``
+    makes the copy idempotent, and only a real ``OSError`` is now reported — with the reason.
+    """
+    if getattr(sys, "frozen", False):
+        source = os.path.join(sys._MEIPASS, "css")
+    else:
+        source = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "css")
+    target = os.path.join(dest_dir, "css")
+    try:
+        shutil.copytree(source, target, dirs_exist_ok=True)
+        return True
+    except OSError as error:
+        logger.warning(f"Could not copy the CSS folder from {source} to {target} ({error}) — the "
+                       "report is complete but will be unstyled")
+        return False
 
 
 # --------------------------------------------------------------------------- run identity

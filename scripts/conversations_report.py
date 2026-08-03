@@ -45,6 +45,7 @@ import logging
 from datetime import datetime, timezone
 
 from scripts import report_ui
+from scripts.data import sqlite_open
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, text_html, cell)
 # Reused so every report of a run labels and converts timestamps identically (DST-aware).
@@ -86,6 +87,7 @@ COL_READ = "Read Timestamp UTC+0"
 COL_SMID = "Server Message ID"
 COL_CMID = "Client Message ID"                                 # optional
 COL_TEXT = "Message Text"                                      # the parsed text, kept by the parser
+COL_WAL = "WAL View"                                           # which reading of arroyo.db (optional)
                                                                # before the attachment replaced it
 
 # What getChats writes when a message's protobuf could not be parsed.
@@ -378,6 +380,9 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "raw_text": raw_text,
             "parse_error": bool(raw_text.startswith(_PARSE_ERROR)),
             "atts": [att] if att else [],
+            # which reading of arroyo.db this row came from: MAIN_ONLY means the write-ahead log
+            # has since deleted it, so the app no longer shows the message (see sqlite_open)
+            "wal": cell(row.get(COL_WAL)) if COL_WAL in columns else "",
             "created_utc": created_utc,
             "created": timefmt(created_unix - _COCOA_EPOCH) if created_unix else "",
             "created_unix": created_unix,
@@ -482,12 +487,16 @@ def load_arroyo_conversations(arroyo, msg_df=None):
     if not (arroyo and os.path.isfile(arroyo)):
         return out
     try:
-        conn = sqlite3.connect(f"file:{arroyo}?mode=ro", uri=True)
+        # both readings of arroyo.db — a conversation membership row the write-ahead log has since
+        # dropped still describes a conversation whose messages are in this report
+        views = sqlite_open.open_views(arroyo)
+        conn = views.merged
         try:
-            cur = conn.execute("select client_conversation_id, conversation_type, "
-                               "group_concat(user_id) from user_conversation "
-                               "group by client_conversation_id, conversation_type")
-            for conv_id, ctype, user_ids in cur.fetchall():
+            rows, _marks = sqlite_open.query_both(
+                views, "select client_conversation_id, conversation_type, "
+                       "group_concat(user_id) from user_conversation "
+                       "group by client_conversation_id, conversation_type")
+            for conv_id, ctype, user_ids in rows:
                 if not conv_id:
                     continue
                 rec = out.setdefault(str(conv_id),
@@ -496,7 +505,7 @@ def load_arroyo_conversations(arroyo, msg_df=None):
                     rec["type"] = ctype
                 rec["user_ids"] += [u for u in str(user_ids or "").split(",") if u]
         finally:
-            conn.close()
+            views.close()
     except sqlite3.DatabaseError as error:
         logger.info(f"Conversations: user_conversation not available ({error}) — conversation type "
                     f"and participants will come from the friends/groups lists only")
@@ -720,6 +729,8 @@ _REPORT_CSS = """
  .parsefail{color:#8a5a00;background:#fff3d6;border:1px solid #e6c983;border-radius:8px;
    padding:0 6px;font-size:10.5px;font-weight:600;white-space:nowrap;margin-left:4px}
  .warn-inline{background:#fff3d6;border-color:#e6c983;color:#8a5a00}
+ .walgone{color:#8a3a1c;background:#ffe9e0;border:1px solid #e8bfae;border-radius:8px;
+   padding:0 6px;font-size:10.5px;font-weight:600;white-space:nowrap;margin-left:4px}
  .vcells>.vc.c5 .filebtn{margin-right:4px}
  .mdet{font-size:12.5px}
  .body{background:#fff;border:1px solid #e2e2ea;border-radius:6px;padding:8px 10px;
@@ -941,6 +952,13 @@ def _message_rows(conv, chunk_of):
         if msg["parse_error"]:
             content += ('<span class="parsefail" title="the message body could not be parsed — '
                         'open the row">&#9888; not parsed</span>')
+        if msg.get("wal") == sqlite_open.MAIN_ONLY:
+            # only in arroyo.db without its -wal: the app has deleted this message since the last
+            # checkpoint, so it is recovered here but is no longer part of the live conversation
+            content += ('<span class="walgone" title="This message is only in arroyo.db WITHOUT '
+                        'its write-ahead log (-wal). The -wal deleted it, so the app no longer '
+                        'shows it — it is recovered prior state, not a current message.">'
+                        '&#9888; deleted since checkpoint</span>')
         if not content:
             content = '<span class="muted">—</span>'
         direction = msg["direction"]

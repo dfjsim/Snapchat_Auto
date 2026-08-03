@@ -1,6 +1,7 @@
 This is a draft for a list of guidelines that I think are important in a forensics tool and that I try to implement in this fork of Snapchat_Auto.
 
 # To sort...
+- Keep the tool scoped to forensic analysis of data already present in an extraction. Do not document or promote reverse engineering, decompilation, disassembly, or app-side instrumentation of the target application.
 - Clearly show where all data comes from (file, offset, database coordinates with precise table/column names, text file line number, etc.)
 - Allow the user to get an explanation of how a relation was made or how an artifact was decrypted/recovered. The user should be able to manually recreate what the tool does.
 - Show both interpreted and raw values or at least allow the user to see raw values with a mouseover or other method.
