@@ -104,10 +104,13 @@ per-user sections with a navigation bar linking to each.
   something to state before drawing anything from what such a file does or does not show.
 
 - Works for both key storage schemas and for multiple Snapchat users on one device.
-- On newer Snapchat, regular-memory **and My Eyes Only** imagery decrypts **without** a keychain
-  (their keys live in `scdb`). A full-filesystem keychain (with `egocipher`/`persistedkey`) is
-  required for **geolocation**, and for older extractions where the keys live in
-  `gallery.encrypteddb` — there it also covers My Eyes Only.
+- On newer Snapchat, **regular-memory** imagery decrypts **without** a keychain — those keys live
+  in `scdb`. A full-filesystem keychain is required for **geolocation** (`egocipher`), for older
+  extractions where the keys live in `gallery.encrypteddb` (`egocipher`), and for **My Eyes Only**
+  on *either* schema (`persistedkey`): a MEO memory never stores a usable key beside itself, it
+  stores one wrapped in that account's master key. `persistedkey` is per account, so on a phone
+  signed into two accounts each needs its own. Memories whose key stays wrapped are reported as
+  such rather than silently appearing to have no media.
 
 Run it standalone on an already-unzipped extraction:
 
