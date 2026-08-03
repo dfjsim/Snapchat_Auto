@@ -102,6 +102,15 @@ Every badge carries a **“?”** whose text (`sqlite_open.MARKER_HELP`) explain
 what the marker means and warns that `main-only` rows must not be reported as current — see
 `docs/forensics_tool_guidelines.md`.
 
+### In the run log
+
+Doing the same work twice is normal here and must not look like a defect. Where a step is visible
+in the log once per reading, it says which reading it is — `gallery.encrypteddb`, the only one that
+is decrypted rather than merely opened, logs *“the app's current state, -wal applied”* and *“the
+state as of the last checkpoint, -wal set aside”* (`memories_media_report.decrypt_gallery_db`). Two
+identical lines would read as an accidental repeat, which is what the shared inputs a run genuinely
+did read twice — the keychain and `primary.docobjects` — were changed to stop doing.
+
 ## Coverage
 
 | Database | Where |

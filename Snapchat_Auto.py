@@ -240,6 +240,12 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     a scripted run must not, or it hangs forever with nobody there to press a key.
     """
     started = os.getcwd()
+    # The keychain read is cached for the length of a run (the legacy and current Memories
+    # reports both ask for it). Drop it here so a second run in the same process — the GUI stays
+    # open between extractions — never reuses another case's keys, and writes its own
+    # decrypted_keychain.plist into its own run folder.
+    from scripts import DecryptLocalMemories_iOS as _memkeys
+    _memkeys.clear_keychain_cache()
     os.makedirs(workdir, exist_ok=True)
     os.chdir(workdir)
     run_root = run_name or ("Snapchat_Auto-"
