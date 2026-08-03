@@ -1,4 +1,5 @@
 import sqlite3
+from scripts.data import sqlite_open
 import pandas as pd
 #from parse3 import *
 from scripts.data.parse3 import *
@@ -49,7 +50,6 @@ def encodeChat(message):
 def getChats(database):
     logger.info("Parsing messages from: ",database)
     db_arroyo = database
-    con_arroyo = sqlite3.connect(f"file:{db_arroyo}?mode=ro", uri=True)
     query_arroyo ="""select
     client_conversation_id as 'Client Conversation ID',
     server_message_id,
@@ -61,7 +61,7 @@ def getChats(database):
     from conversation_message
     order by client_conversation_id, creation_timestamp
     """
-    df_arroyo = pd.read_sql_query(query_arroyo, con_arroyo)
+    df_arroyo, _wal_info = sqlite_open.read_sql(db_arroyo, query_arroyo)
     schema = Snapchat_pb2.root()
     df_arroyo["extramessage_content"] = np.nan
     vect = np.vectorize(protoParse)
@@ -77,20 +77,18 @@ def getChats(database):
     #logger.info(df_arroyo['message_content'].head())
     return df_arroyo
 def getCore(database):
-    con_core = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     query_core = """SELECT contentObjectId, cacheKey from DataConsumption WHERE contentType == 'chat_snap' OR contentType == 'snap'"""
-    df = pd.read_sql_query(query_core, con_core)
+    df, _wal_info = sqlite_open.read_sql(database, query_core)
     return df
 
 def getFriends(database):
     logger.info("Parsing friends")
-    con = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     query ="""SELECT username as Username,
             userId,
             displayName as Displayname
             from Friend
             """
-    df = pd.read_sql_query(query,con)
+    df, _wal_info = sqlite_open.read_sql(database, query)
     for index, row in df.iterrows():
         name = (row['Displayname'])
         fullname = ""

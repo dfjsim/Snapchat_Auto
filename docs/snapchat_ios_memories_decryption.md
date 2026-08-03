@@ -1,6 +1,6 @@
 # Decrypting & linking Snapchat iOS Memories media (`.pack`, `SCContent`, geolocation)
 
-End-to-end reverse-engineering notes for recovering **Snapchat Memories** media from an iOS
+End-to-end artifact-analysis notes for recovering **Snapchat Memories** media from an iOS
 extraction and linking every media file back to its Memory row in `scdb-27.sqlite3`,
 including geolocation.
 
@@ -19,14 +19,11 @@ Covers both cache locations:
 > **not** part of the Memories pipeline, needs no keys, and nothing on the device indexes it —
 > see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md).
 
-> ⚠️ Extractions contain a device owner's private media. Keep all decrypted output **local** —
-> never upload or publish it.
-
-## Verified against two real iPhone 13 Pro Max extractions
+## Verified against two real iOS extractions
 
 | | Device A | Device B |
 |---|---|---|
-| Extraction | UFED Full-Filesystem (AFU), 2025 | GrayKey Full-Filesystem, 2023-05-15 |
+| Extraction | UFED Full-Filesystem (AFU) | GrayKey Full-Filesystem |
 | Schema | **new** — keys in `scdb-27.ZENCRYPTION` | **old** — keys in `gallery.encrypteddb` |
 | Keychain in extraction | limited (no `egocipher`) | full (`egocipher` present) |
 | User profiles | 1 | 2 |
@@ -52,7 +49,9 @@ user profiles on the device.
    [Diagnosing a keychain](#diagnosing-a-keychain).
 2. **Get the per-Memory AES `KEY`/`IV`:**
    - **New schema:** decode `ZGALLERYSNAP.ZENCRYPTION` (a `SCMemoriesSnapEncryption`
-     NSKeyedArchiver bplist). No keychain needed for regular memories.
+     NSKeyedArchiver bplist). No keychain needed for regular memories. If `KEY` is 48 bytes and
+     `IV` is 32 the memory is My Eyes Only and the pair is wrapped — unwrap it with that account's
+     `persistedkey` before use.
    - **Old schema:** decrypt `gallery.encrypteddb` (SQLCipher, key = `egocipher`) and read the
      `snap_key_iv` table. **Keychain required.**
 3. **Geolocation:** always from `gallery.encrypteddb` → `snap_location_table`
@@ -102,8 +101,8 @@ device. Verified on Device B, which has two profiles:
 
 | Profile `<userHash>` | userId | Memories | Decrypts with the one egocipher? |
 |---|---|---|---|
-| `650c8c96…` | `3559758e-…` (active) | 34 | ✅ 35 keys / 35 locations |
-| `09e676dd…` | `5803ed5b-…` | 46 | ✅ 51 keys / 43 locations |
+| profile 1 | the active account | 34 | ✅ 35 keys / 35 locations |
+| profile 2 | the second account | 46 | ✅ 51 keys / 43 locations |
 
 Process **each** profile folder under `gallery_data_object/1/*` and `gallery_encrypted_db/3/*`:
 pair each `scdb-27` with the `gallery.encrypteddb` of the same `<userHash>`, decrypt both with
@@ -132,11 +131,21 @@ root = ccl_bplist.deserialise_NsKeyedArchiver(
 KEY, IV, IS_ENCRYPTED = root["KEY"], root["IV"], root["IS_ENCRYPTED"]
 ```
 
-- `IS_ENCRYPTED == False` → regular Memory; `KEY`/`IV` are **plaintext**. **No keychain and no
-  `gallery.encrypteddb` needed** to decrypt the media.
-- `IS_ENCRYPTED == True` → My Eyes Only. `KEY`/`IV` are **plaintext here too** — the flag marks
-  the private album, it does not wrap the key, so no keychain is needed either
-  (see [MEO](#my-eyes-only-meo)).
+- `IS_ENCRYPTED == False` → regular Memory; `KEY`/`IV` are **plaintext** and are **32 and 16
+  bytes**. **No keychain and no `gallery.encrypteddb` needed** to decrypt the media.
+- `IS_ENCRYPTED == True` → My Eyes Only. `KEY`/`IV` are **wrapped**, and their length says so:
+  **48 and 32 bytes**, one AES block longer than a usable pair, because they are the real key and
+  IV encrypted (CBC + PKCS#7) under the account's MEO master key. The keychain item
+  `com.snapchat.keyservice.persistedkey` is required to unwrap them — exactly as on the old
+  schema (see [MEO](#my-eyes-only-meo)).
+
+> ⚠️ **Correction (2026-08-02).** This document previously said new-schema MEO keys were plaintext
+> and needed no keychain. That was wrong, and `memories_media_report.py` believed it: it assigned
+> the 48-byte value straight through, every matcher rejected it for not being 32 bytes, and the
+> memory silently ended up with **no media at all** even when the keychain held what was needed.
+> Verified on a two-account iOS 26 test device: unwrapping a My Eyes Only snap with that dump's
+> `persistedkey` yields a valid pack header followed by a JPEG. Test the length — 48/32 means
+> wrapped — rather than trusting `IS_ENCRYPTED` alone.
 
 ### Old schema (Device B, 2023) — keys in `gallery.encrypteddb`
 
@@ -172,7 +181,8 @@ Tables of interest in the decrypted DB:
 | `snap_location_table` | `snap_id, latitude, longitude` | **geolocation** (both schemas) |
 | `snap_address_title`, `media_faces` | — | reverse-geocoded label, face index (bonus) |
 
-`encrypted = 1` rows are My Eyes Only (key 48 bytes / iv 32 bytes, wrapped).
+`encrypted = 1` rows are My Eyes Only (key 48 bytes / iv 32 bytes, wrapped). The **new** schema
+wraps them identically in `ZGALLERYSNAP.ZENCRYPTION` — same lengths, same unwrap.
 
 ---
 
@@ -257,28 +267,48 @@ extraction (Device A) may include the filesystem but **not** those keys.
 |---|---|---|
 | Decrypt regular-memory media (`.pack` + SCContent) | **No keychain needed** | **`egocipher` required** |
 | Geolocation (`snap_location_table`) | **`egocipher` required** | **`egocipher` required** |
-| My Eyes Only memories | **No keychain needed** | `egocipher` + `persistedkey` required |
+| My Eyes Only memories | **`persistedkey` required** | `egocipher` + `persistedkey` required |
 
-So even on the new schema, **geolocation still needs the FFS keychain** — it is the only thing the
-keychain is required for there.
+So on the new schema the keychain is required for exactly two things: **geolocation** and
+**My Eyes Only**. Regular-memory imagery needs nothing.
 
 ### My Eyes Only (MEO)
 
-`snap_key_iv.encrypted = 1` (old) / `ZENCRYPTION.IS_ENCRYPTED = True` (new).
+`snap_key_iv.encrypted = 1` (old) / `ZENCRYPTION.IS_ENCRYPTED = True` (new). **On both schemas the
+key is wrapped and `com.snapchat.keyservice.persistedkey` is required to unwrap it.**
 
-- **Old schema:** the `KEY`/`IV` in `snap_key_iv` are themselves AES-CBC-encrypted with the MEO
-  master key/IV, which come from the keychain item `com.snapchat.keyservice.persistedkey` (an
-  NSKeyedArchiver plist with `masterKey` / `initializationVector`). Unwrap them first — see
-  `DecryptLocalMemories_iOS.fixMEOkeys` — then decrypt media as usual. Device B has 1 MEO memory,
-  but its `persistedkey` was not in the keychain, so it could not be decrypted.
-- **New schema:** the `KEY`/`IV` in `ZENCRYPTION` are directly usable and `IS_ENCRYPTED` only
-  *flags* the memory as belonging to the private album — no unwrap, and **no keychain**. Observed
-  2026-07-30 on a third device (22 365 memories, new schema, no `egocipher` recovered): MEO
-  imagery decrypted normally while geolocation stayed empty. Device A had 0 MEO memories, so the
-  earlier "`persistedkey` required" here was an untested carry-over from the old schema.
+The wrapping is the same operation in both places — the real 32-byte key and 16-byte IV, AES-CBC
+encrypted with PKCS#7 padding under the MEO master key — so the wrapped values are **48 and 32
+bytes**. That length is the reliable test; do not rely on `IS_ENCRYPTED` alone, and never hand a
+48-byte value to `AES.new` (it raises `Incorrect AES key length (48 bytes)`, which reads like a
+bug rather than a missing key).
 
-Because of this, **seeing MEO media in the report is not evidence that the keychain was read** —
-on the new schema it proves nothing either way. Geolocation is the reliable tell.
+```python
+persisted = keychain["com.snapchat.keyservice.persistedkey"]     # NSKeyedArchiver plist
+obj = ccl_bplist.deserialise_NsKeyedArchiver(ccl_bplist.load(BytesIO(persisted)))
+master, master_iv, owner = obj["masterKey"], obj["initializationVector"], obj["userId"]
+key = AES.new(master, AES.MODE_CBC, master_iv).decrypt(wrapped_key)[:32]
+iv  = AES.new(master, AES.MODE_CBC, master_iv).decrypt(wrapped_iv)[:16]
+```
+
+**`persistedkey` is per account.** Its payload carries the `userId` it belongs to, so a phone
+signed into two Snapchat accounts has one item per account, and each profile must be handed its
+own — `sha256(userId)` is the `userHash` that names the profile directory. A keychain reader that
+keeps only the first item of that name (as this one did) silently discards the second account's
+MEO master key. On a two-account iOS 26 test device only one of the two accounts has a
+`persistedkey`: that account's MEO memory decrypts and the other's does not — which is the correct,
+and reportable, outcome.
+
+> **Correction (2026-08-02).** The previous version of this section claimed new-schema MEO keys
+> were "directly usable … no unwrap, and no keychain", citing a device where MEO
+> imagery appeared without an `egocipher`. That reading does not hold: media can appear for a MEO
+> memory because a *sibling* regular memory shares its `ZMEDIAID` group, and the 48/32-byte key
+> lengths on every MEO row in the corpus are unambiguous. Treat MEO as keychain-dependent on both
+> schemas.
+
+Because of this, on the new schema **seeing MEO media in the report does imply `persistedkey` was
+read**, while regular-memory media implies nothing about the keychain. Geolocation remains the
+reliable tell for `egocipher`.
 
 ---
 

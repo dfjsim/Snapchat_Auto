@@ -70,6 +70,35 @@ Fixed in `getFriendsAppGroupPlistStorage` (`scripts/ParseSnapchat_iOS.py`). It h
 by a surrounding `try/except`, so instead of crashing it silently dropped every no-name group
 and logged an error per row.
 
+## 2b. An empty DataFrame's columns are `float64`, and `Series.apply` will not change that
+
+Two behaviours combine into a merge that fails only on *some* extractions:
+
+```python
+pd.DataFrame({"CACHE_KEY": []}).dtypes          # -> float64, not object/str
+s = pd.Series([], dtype="float64")
+s.apply(lambda v: "" if pd.isna(v) else str(v)) # -> still float64: apply short-circuits on empty
+```
+
+So a hard-coded empty fallback frame is typed from an empty list (float64), and a normalization
+pass written with `.apply` leaves it that way. Merging it against a real frame then raises:
+
+```
+ValueError: You are trying to merge on object and float64 columns for key 'CACHE_KEY'.
+```
+
+`mergeCache` caught that and returned an empty result, so the **legacy Communications report lost
+every chat attachment** on any device where `getCache` happened to return no rows — 0 cached files
+against 36 on the same phone's other extraction. It only fired when one side was empty, which is
+why three of four test devices were unaffected.
+
+Fix, in `scripts/ParseSnapchat_iOS.py`: build empty frames through `empty_cache_frame()`
+(`pd.Series(dtype="string")` per column) and normalize with `normalize_cache_keys()`, which uses
+`.astype("string").fillna("")` — `astype` applies to an empty frame, `apply` does not.
+
+`.astype("string")` also decodes `bytes` to text (`b"x"` → `"x"`) where `str()` produced `"b'x'"`,
+so a bytes/str mismatch across two sources now matches instead of silently failing to join.
+
 ## 3. Unrelated but fixed in the same pass
 
 - **`SyntaxWarning: invalid escape sequence "\."`** — `re.compile("^\.+$")` in

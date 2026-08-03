@@ -13,6 +13,7 @@ Reports/
   Memories/Memories_report.html               + pages/, media/, maps/, data/,
                                                 memory_pages.json, media_by_cache_key.json
   CacheController/CacheController_report.html + files/, data/
+  CacheMedia/CacheMedia_report.html          + files/, data/, by_cache_key.json
   Communications_legacy/Communications_legacy_report.html   + cacheFiles/, cache_links.json
   LocalMemories_legacy/LocalMemories_legacy_report.html
 ```
@@ -41,6 +42,7 @@ and exactly how each cross-link is derived**. Each per-report page documents its
 | Memories index | `mem-<ZSNAPID>` | each memory's index-table row | `generate_report` in `scripts/memories_media_report.py` |
 | Memories detail sub-page | `mem-<ZSNAPID>` | each member block on `pages/<key>.html` | `_render_group_detail` |
 | cache_controller | `ck-<CACHE_KEY>` | each physical-file row | `generate_report` in `scripts/cache_controller_report.py` |
+| Cached media (Library/Caches) | `cm-<sha256>` | each distinct-content row | `generate_report` in `scripts/cache_media_report.py` |
 | Communications (legacy) | `cf-<CACHE_KEY>` | each cached chat attachment | `path_to_image_html` in `scripts/ParseSnapchat_iOS.py` |
 
 A message with no `server_message_id` (one the app had not finished sending) is anchored on its
@@ -157,8 +159,8 @@ the same `cacheControllerKey`:
 
   This is verifiable byte for byte, and worth doing when validating on a new extraction: the
   attachment's SHA-256 must equal the linked entry's bytes, or one of its bundle children's. On the
-  2023 test device all 19 attachments match — e.g. message 12.0's video equals bundle child
-  `z2a132f1f…` of `4bfc4bba…`.
+  iOS 16 test device all 19 attachments match — e.g. one message's video equals a named child of
+  the bundle the cache entry resolves to.
 
 ### cache_controller → the decrypted copy of an encrypted cache file
 Memory media is cached **encrypted**, so its bytes cannot be displayed from the cache entry itself.
@@ -169,7 +171,7 @@ labelled as a derived file, with the original cached bytes' hashes shown next to
 
 ## Ordering / dependency
 `ParseSnapchat_iOS.main` runs the reports in the order **Communications (legacy) → Conversations →
-Contacts → Memories → cache_controller**. That matters:
+Contacts → Memories → CacheMedia → cache_controller**. That matters:
 
 * the **Conversations** report renders the message frame the parser built for the legacy report,
   taken before that frame's content is turned into HTML, and writes the chat manifest;
@@ -178,6 +180,12 @@ Contacts → Memories → cache_controller**. That matters:
 * the **cache_controller** report reads the chat manifest (`Conversations/cache_links.json`, else
   the legacy one) and the two manifests the Memories report just wrote (`memory_pages.json`,
   `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index.
+
+* the **CacheMedia** report (everything under `Library/Caches` that `cache_controller.db` does
+  *not* index) runs before cache_controller and writes `CacheMedia/by_cache_key.json`, which
+  is what lets a cache_controller entry link forward to a copy of its bytes found under
+  `Library/Caches`. The two reports are disjoint by construction — see
+  [report_cache_media.md](report_cache_media.md).
 
 So there is no circular dependency, and the back-links from the chat/Memories reports are static
 URLs that resolve to anchors the cache_controller report emits. Running cache_controller alone

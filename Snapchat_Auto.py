@@ -107,7 +107,7 @@ DISCLAIMER_TEXT = (
     "kind.\n\n"
     "It has NOT been thoroughly tested across the many different versions of the Snapchat app, "
     "and the database schemas vary between versions. Some artifacts may therefore be parsed "
-    "incompletely, or in rare cases incorrectly.\n\n"
+    "incompletely, or in rare cases incorrectly or potentially incorrectly in some cases.\n\n"
     "Use it as an aid to analysis — not as a sole authority. Always validate findings against the "
     "original artifacts and corroborate them with other tools before relying on them.")
 
@@ -163,8 +163,13 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
          "Snapchat Memories with all associated media (SCContent + caching-media) and geolocation.",
          "scauto_memories"),
         ("Cache controller (cache_controller.db)", f"{reports_subdir}/CacheController/CacheController_report.html",
-         "Every file indexed by cache_controller.db, linked to on-disk cache files, Memories and chats.",
+         "Every file indexed by cache_controller.db, i.e. the SCContent cache folders, linked to "
+         "on-disk cache files, Memories and chats.",
          "scauto_cache"),
+        ("Cached media (Library/Caches)", f"{reports_subdir}/CacheMedia/CacheMedia_report.html",
+         "Everything under Library/Caches that cache_controller.db does not index: story renders, "
+         "the URL-keyed caches, saved chat media, and the cached documents (DNS/HTTP caches, crash "
+         "state).", "scauto_cachemedia"),
         ("Communications (legacy)",
          f"{reports_subdir}/Communications_legacy/Communications_legacy_report.html",
          "The original single-page chats + contacts + groups report, kept until the Conversations "
@@ -222,6 +227,55 @@ def _map_timezone(tzval):
     return tzval
 
 
+def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
+        tile_server="", run_name=None, pause=False):
+    """Do one extraction + report run. Shared by the GUI and the command line.
+
+    Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
+    ``workdir``: ``ExtractedData/``, ``SnapFixedVideos/``, ``Reports/`` and ``index.html``.
+    ``run_name`` pins that folder name instead of using a timestamp, which is what makes a
+    scripted re-run land in the same place. Returns the run folder.
+
+    ``pause`` waits for a keypress at the end — the GUI wants that so the console does not vanish;
+    a scripted run must not, or it hangs forever with nobody there to press a key.
+    """
+    started = os.getcwd()
+    os.makedirs(workdir, exist_ok=True)
+    os.chdir(workdir)
+    run_root = run_name or ("Snapchat_Auto-"
+                            + datetime.datetime.today().strftime('%Y%m%d_%H%M%S'))
+    os.makedirs(run_root, exist_ok=True)
+    os.chdir(run_root)
+    run_folder = os.path.abspath(".")
+    add_log_file(".")
+    logger.info(f"Run folder: {run_folder}")
+
+    try:
+        if os_mode == "ios":
+            logger.info("You chose iOS")
+            extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
+            if not os.path.exists("SnapFixedVideos"):
+                parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
+            else:
+                logger.info("Found SnapFixedVideos folder, skipping that step")
+            ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
+                                   padding=padding, tz=tz, report_dir="./Reports",
+                                   tile_server=tile_server)
+            # Write the report index BEFORE the pause, so index.html exists when the "press any
+            # key" prompt appears (previously the pause lived inside the parser and blocked this).
+            write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
+            logger.info(f"Report index: {os.path.abspath('index.html')}")
+            if pause:
+                os.system("pause")
+        else:
+            logger.info("You chose Android")
+            extracted_files_dir = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
+            getCacheAndroid.main(extracted_files_dir)
+    finally:
+        os.chdir(started)
+    return run_folder
+
+
 def diag_keychain(path):
     """`--diag-keychain <file>`: read a keychain and report what it holds, without running an
     extraction. Lets a keychain be checked in seconds on the machine that holds the case data,
@@ -242,13 +296,83 @@ def diag_keychain(path):
 
 def print_usage():
     print(f"Snapchat Auto v{get_version()}\n\n"
-          "usage: Snapchat_Auto.exe [--diag-keychain <keychain file>] [--help]\n\n"
-          "  (no arguments)          Launch the GUI.\n"
-          "  --diag-keychain <file>  Check a keychain file (GrayKey/UFED plist or objection\n"
-          "                          JSON dump) and report what it holds, without running an\n"
-          "                          extraction. Exit code 0 if egocipher was recovered, 1\n"
-          "                          otherwise.\n"
-          "  --help, -h              Show this message.")
+          "usage: Snapchat_Auto.exe [options]\n\n"
+          "  (no arguments)          Launch the GUI.\n\n"
+          "Run an extraction without the GUI (everything below is optional except --zip):\n"
+          "  --zip <file>            Extraction ZIP to process. Implies a headless run.\n"
+          "  --keychain <file>       Keychain plist / objection JSON (iOS only).\n"
+          "  --workdir <dir>         Where the run folder is created (default: current dir).\n"
+          "  --os ios|android        Which parser to use (default: ios).\n"
+          "  --tz <spec>             local | utc | <IANA name> | <±HH:MM>  (default: local).\n"
+          "  --padding both|strip|keep   Memories media padding (default: both).\n"
+          "  --tile-server <url>     Offline map tile server, {z}/{x}/{y} template.\n"
+          "  --run-name <name>       Use this run-folder name instead of a timestamp, so a\n"
+          "                          repeated run lands in the same place.\n\n"
+          "Other:\n"
+          "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
+          "                          running an extraction. Exit code 0 if egocipher was\n"
+          "                          recovered, 1 otherwise.\n"
+          "  --help, -h              Show this message.\n\n"
+          "A headless run never pauses for a keypress, so it is safe to call from a script.")
+
+
+# The headless options, and whether each takes a value.
+_CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz": True,
+                "padding": True, "tile-server": True, "run-name": True}
+
+
+def _parse_cli(args):
+    """Parse the headless options. Returns (values, error message or None)."""
+    values, index = {}, 0
+    while index < len(args):
+        token = args[index]
+        name = token.lstrip("-/").lower()
+        if name not in _CLI_OPTIONS:
+            return values, f"unknown option '{token}'"
+        index += 1
+        if index >= len(args) or args[index].startswith("-"):
+            return values, f"'{token}' requires a value"
+        values[name] = args[index]
+        index += 1
+    return values, None
+
+
+def run_cli(args):
+    """`--zip …`: run headlessly and return an exit code."""
+    values, error = _parse_cli(args)
+    if error:
+        print(f"Snapchat Auto: {error}\n")
+        print_usage()
+        return 2
+    os_mode = (values.get("os") or "ios").lower()
+    if os_mode not in ("ios", "android"):
+        print(f"Snapchat Auto: --os must be 'ios' or 'android', not '{os_mode}'")
+        return 2
+    zip_path = values["zip"]
+    if not os.path.isfile(zip_path):
+        print(f"Snapchat Auto: extraction ZIP not found: {zip_path}")
+        return 2
+    keychain = values.get("keychain", "")
+    if keychain and not os.path.isfile(keychain):
+        print(f"Snapchat Auto: keychain not found: {keychain}")
+        return 2
+    padding = (values.get("padding") or "both").lower()
+    if padding not in ("both", "strip", "keep"):
+        print(f"Snapchat Auto: --padding must be both, strip or keep, not '{padding}'")
+        return 2
+
+    logger.info(f"Snapchat Auto v{get_version()}")
+    try:
+        folder = run(zip_path=zip_path, keychain=keychain,
+                     workdir=values.get("workdir", "."), os_mode=os_mode, padding=padding,
+                     tz=_map_timezone(values.get("tz", "local")),
+                     tile_server=(values.get("tile-server") or "").strip(),
+                     run_name=values.get("run-name"), pause=False)
+    except Exception as error:
+        logger.error(f"Run failed: {error}")
+        return 1
+    logger.info(f"Done: {folder}")
+    return 0
 
 
 def main(args):
@@ -258,6 +382,8 @@ def main(args):
         sys.exit(0)
     if flag in ("diag-keychain", "diagkeychain"):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
+    if flag in _CLI_OPTIONS:                                  # a headless run
+        sys.exit(run_cli(args))
     if flag:                                                  # an argument was given but not
         print_usage()                                         # recognized — don't silently fall
         sys.exit(2)                                           # through to the GUI
@@ -360,39 +486,17 @@ def main(args):
                 "tile_server": values.get("tile_server", "").strip()})
     save_config(cfg)
 
-    padding = PADDING_MAP.get(values.get("padding"), "both")
-    tz = _map_timezone(values.get("timezone"))
-    run_dt = datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
-
-    # Everything for this run lives under a single Snapchat_Auto-<dt> folder inside the chosen
-    # Working/Temp/Report directory: ExtractedData/, SnapFixedVideos/, Reports/ and index.html.
-    os.makedirs(values["workdir"], exist_ok=True)
-    os.chdir(values["workdir"])
-    run_root = "Snapchat_Auto-" + run_dt
-    os.makedirs(run_root, exist_ok=True)
-    os.chdir(run_root)
-    add_log_file(".")
-    logger.info(f"Run folder: {os.path.abspath('.')}")
-
-    if values[0]:
-        logger.info("You chose iOS")
-        extracted_files_dir = extract_zip.extract(values['zip'], 'ios', dest="ExtractedData")
-        if not os.path.exists("SnapFixedVideos"):
-            parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
-        else:
-            logger.info("Found SnapFixedVideos folder, skipping that step")
-        ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], values["keychain"],
-                               padding=padding, tz=tz, report_dir="./Reports",
-                               tile_server=values.get("tile_server", "").strip())
-        # Write the report index BEFORE the pause, so index.html exists when the "press any key"
-        # prompt appears (previously the pause lived inside the parser and blocked this step).
-        write_index(".", "Reports", zip_path=values["zip"], keychain_path=values["keychain"])
-        logger.info(f"Report index: {os.path.abspath('index.html')}")
-        os.system("pause")
-    elif values[1]:
-        logger.info("You chose Android")
-        extracted_files_dir = extract_zip.extract(values['zip'], 'android', dest="ExtractedData")
-        getCacheAndroid.main(extracted_files_dir)
+    # values[0]/values[1] are the iOS/Android radios. One is always selected (iOS is the default),
+    # but pick explicitly rather than treating "not iOS" as Android.
+    if not (values[0] or values[1]):
+        logger.error("Choose iOS or Android")
+        return
+    run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
+        os_mode="ios" if values[0] else "android",
+        padding=PADDING_MAP.get(values.get("padding"), "both"),
+        tz=_map_timezone(values.get("timezone")),
+        tile_server=values.get("tile_server", "").strip(),
+        pause=True)
 
 
 if __name__ == '__main__':

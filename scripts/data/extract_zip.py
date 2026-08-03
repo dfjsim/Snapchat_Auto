@@ -51,6 +51,27 @@ def discover_snapchat_containers(zip1, names):
     return data_uuids, group_guids
 
 
+# Characters iOS allows in a filename but Windows does not. The URL-keyed PINCache caches
+# (SCCache/*, global_scoped/sccache.*, user_scoped/**) name each entry after the CDN URL it was
+# fetched from, query string included — so those names carry "?" and, on some, "*" or "|". Writing
+# them unchanged fails on Windows, and the failure used to be swallowed by a bare `except: pass`,
+# which silently dropped exactly the files whose name IS their provenance.
+#
+# ":" keeps its long-standing "_" mapping (SCPersistentMedia names are matched on both spellings —
+# see _PERSISTENT_NAME_RE in ParseSnapchat_iOS.py). The rest are percent-encoded, which matches how
+# these names are already encoded and round-trips through the URL decode the cached-media report
+# does, so the original CDN URL is still recoverable from the name on disk.
+_ILLEGAL_WIN = {"?": "%3F", "*": "%2A", "<": "%3C", ">": "%3E", "|": "%7C", '"': "%22"}
+
+
+def _safe_rel(rel):
+    """A ZIP member's path made safe to write on Windows without losing what the name encodes."""
+    out = rel.replace(":", "_")
+    for bad, encoded in _ILLEGAL_WIN.items():
+        out = out.replace(bad, encoded)
+    return "".join(c if ord(c) >= 32 else "%%%02X" % ord(c) for c in out)
+
+
 def wanted(path, patterns):
     """Whether a ZIP entry is one we extract.
 
@@ -85,8 +106,15 @@ def extract(file_name, mode, dest="."):
         "Library/Caches/com.snap.file_manager_*_SCContent_*",
         "Documents/user.plist",
         "Documents/contentmanagerV3_",
-        "Library/Caches/SCPersistentMedia",
-        "Library/Caches/caching-media",  # Memories .pack media cache
+        # The AES key + fixed IV for sccache.gallery-stories-snap.data. A TSAF container despite
+        # the .plist name; no keychain needed. See docs/snapchat_ios_cache_media.md.
+        "Documents/ClientEncryptionService.plist",
+        # The whole Caches tree, not just the two folders below (which it already covers): the
+        # story renders at its root, Caches/tmp, the URL-keyed PINCache stores, the cronet HTTP
+        # cache and the sccache.* caches are all evidence, and which of them a device has varies by
+        # app version. This is the largest single contributor to extraction time — see the byte
+        # count logged below.
+        "Library/Caches",
         "group.snapchat.picaboo",
         "gallery_data_object",
         "scdb-27.sqlite",
@@ -188,6 +216,8 @@ Rename the folder and run again to extract Snapchat data from zip
             # of "Application"). Remember that dropped prefix per container so reports can rebuild
             # the full on-device path (e.g. private/var/mobile/Containers/Data/Application/<UUID>).
             container_prefixes = {}
+            renamed = {}
+            caches_bytes = sanitized = 0
             try:
                 for i in files_in_zip:
                     if not _in_snapchat(i):
@@ -201,7 +231,16 @@ Rename the folder and run again to extract Snapchat data from zip
                             except:
                                 index = i.find("AppGroup")
                             data = zip1.read(i)
-                            rel = i[index:].replace(":", "_")
+                            if "Library/Caches" in i.replace("\\", "/"):
+                                caches_bytes += len(data)
+                            original = i[index:].replace("\\", "/")
+                            rel = _safe_rel(i[index:])
+                            if rel.replace("\\", "/") != original:
+                                # record the exact on-device name: for the URL-keyed caches the
+                                # filename IS the provenance, so the report must be able to quote
+                                # it verbatim rather than the sanitised spelling
+                                renamed[rel.replace("\\", "/")] = original
+                                sanitized += 1
                             filename = _out(rel)
                             tail = i[index:].replace("\\", "/").split("/")
                             if len(tail) >= 2:
@@ -220,9 +259,18 @@ Rename the folder and run again to extract Snapchat data from zip
             except Exception as err:
                 pass
                 # logger.info(err)
+            if caches_bytes:
+                logger.info(f"Extracted {caches_bytes / (1024 * 1024):.1f} MB from Library/Caches "
+                            f"(cached media, PINCache stores, cronet HTTP cache)")
+            if sanitized:
+                logger.info(f"{sanitized} file name(s) contained characters Windows does not allow "
+                            f"(mostly the '?' in URL-keyed cache names) and were percent-encoded on "
+                            f"disk; their exact on-device names are in extraction_manifest.json")
             try:
                 with open(_out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
-                    json.dump({"container_prefixes": container_prefixes}, mf, indent=2)
+                    json.dump({"container_prefixes": container_prefixes,
+                               # sanitised path -> the exact name the file had on the device
+                               "renamed": renamed}, mf, indent=2)
             except Exception as err:
                 logger.debug(f"Could not write extraction manifest: {err}")
             if not os.path.exists(_out("Application")):

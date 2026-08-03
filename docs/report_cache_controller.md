@@ -36,7 +36,7 @@ Decoded by `parse_children`. Field `1` is one child or a list; each child is
 * **sharded file** (`TYPE=2`): names are byte ranges — `94208-693856`, `PREFETCH`. On disk these
   are stored as `<CACHE_KEY>_<start>-<end>` (the same split media `parseSnapvideos` reconstructs).
 * **bundle** (`TYPE=3`): names are child cache keys (often with a leading marker byte, e.g.
-  `zfe09d729…`) plus a filename such as `lar_lens_notifications_geofences_v6.json`.
+  `z<hex>`) plus a filename such as `lar_lens_notifications_geofences_v6.json`.
 
 ### `CACHE_FILE_METADATA.CONTENT_RETRIEVAL_METADATA` (protobuf)
 Decoded by `parse_retrieval`. Field `5.1`/`6.1` = the **CDN URL** the file was fetched from.
@@ -45,13 +45,13 @@ inspects the value rather than assuming a type:
 
 * most often a **CDN media token** (the same token after `/d/` in the URL, sometimes with a `.NNN`
   suffix) — e.g. `S8fDoGrkeolX01yylQtsf`;
-* a **64-hex content SHA-256** on newer app versions (only ~13% of entries on the 2026 device);
-* the **32-hex `CACHE_KEY`** on the 2023 device.
+* a **64-hex content SHA-256** on newer app versions (only ~13% of entries on the iOS 26 device);
+* the **32-hex `CACHE_KEY`** on the iOS 16 device.
 
 Even when field 8 **is** a 64-hex hash it is a **source-/server-side content hash that does NOT
 necessarily match the bytes actually cached on disk** — verified on an `app_install_screenshot`
-(`CACHE_KEY f1cd5e24…`) where field 8 (`5b99116f…`) matched neither the cached file's real SHA-256
-(`a57e0444…`) nor the download. The report therefore:
+entry whose field 8 matched neither the cached file's real SHA-256 nor the downloaded bytes. The
+report therefore:
 
 * labels field 8 by its real column name (`CONTENT_RETRIEVAL_METADATA field 8`) with a value-type
   hint ("source content hash (SHA-256; may differ from cached bytes)" / "CDN media token" /
@@ -102,11 +102,28 @@ detail:
 | encrypted, but decrypted by the Memories report | 🔓 button opening the decrypted copy in `../Memories/media/…`, with the decrypted file's own MD5/SHA-256, its Memory's `ZSNAPID`, and a "?" explaining it is a **derived** file |
 | a bundle | the child table (type + size + hashes + viewer per child) |
 | 0 bytes on disk | "0 bytes" — the index entry exists but no content was stored/captured |
+| a format this report cannot render | its **name** — "lens bundle (LZC)", "font", "WEBVTT subtitles", "binary plist", "zip archive", "text / JSON", "HTML", "protobuf" — plus a "?" saying it is not encrypted, just not displayable inline |
 | still encrypted | 🔒 encrypted (no key available for it) |
 
-On the 2023 test extraction that takes the openable share of the 228 on-disk entries from 109 to
-199 (90 via decrypted Memory copies), with 14 zero-byte and 15 still-encrypted entries labelled as
-such rather than silently blank.
+### "Encrypted" is measured, not assumed
+
+Until v1.5.0 this report identified files with `guess_media` alone — JPEG/MP4/PNG/WebP — and
+labelled **everything else** "🔒 encrypted". Across the four test devices that padlock sat on 600
+files of which only 19 were encrypted; the rest were 480 LZC lens bundles, 27 protobuf blobs, 10
+WEBVTT subtitle tracks, 9 ZIP archives, 9 JSON/text files, 4 HTML pages, 4 TrueType fonts and 2
+binary plists. Telling an examiner that readable evidence is locked away is worse than saying
+nothing, and it buried the handful of files that really were locked.
+
+Identification now goes through `scripts/data/sniff.py`, shared with the cached-media report.
+"Encrypted" requires **both** high Shannon entropy (≥ 7.5 bits/byte over the first 8 KB) **and** a
+length that is a multiple of the AES block size — the fingerprint of block-cipher output. High
+entropy without block alignment is reported as exactly that (typically a partially cached
+download), and anything unidentified is called "unrecognized", not encrypted. The header states
+how many entries hold encrypted bytes, how many of those the Memories report can open, and how
+many have no key at all; a filter selects each group.
+
+Per test device, after the change: 100 encrypted with **7** unopenable (was 253 padlocked);
+91 / **5**; 112 / **2**; 87 / **0**.
 
 ## Categorisation
 
@@ -155,13 +172,13 @@ and `files/` folders next to the HTML file.
 
 **No.** `cache_controller.db` does not index every physical file in the
 `com.snap.file_manager_*_SCContent_*` folders, and an on-disk copy can live in a **different
-user's** SCContent scope than the account that claims it. Worked example (2023 GK device, 2
+user's** SCContent scope than the account that claims it. Worked example (iOS 16 test device, 2
 accounts):
 
-* Memory media `6382911a…` is claimed **only** under owner `5803ed5b` as `g-media-EB854B71…`
+* One Memory's media is claimed **only** under the second account as a `g-media-<snapid>` key
   (context 19), stored range-sharded (`PREFETCH` + byte-range parts).
 * A **byte-identical, plaintext** (`ftyp mp42`) full copy of the same media also sits in the
-  **active** account `3559758e`'s SCContent folder — with **no** claim / metadata / tombstone /
+  **active** account's SCContent folder — with **no** claim / metadata / tombstone /
   virtualization row anywhere. It is an orphan: most likely a consolidated ("defragmented") copy
   materialized in the active account's file-manager scope during playback/use, not a second Memory.
 

@@ -29,6 +29,7 @@ import sqlite3
 import logging
 
 from scripts import report_ui
+from scripts.data import sqlite_open
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +297,11 @@ def load_identifiers(primary):
     if not (primary and os.path.isfile(str(primary))):
         return out
     try:
-        conn = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
+        # both readings of primary.docobjects: a username row the write-ahead log has since
+        # replaced is a *previous* username for that account, which is exactly what this table
+        # exists to show
+        views = sqlite_open.open_views(primary)
+        conn = views.merged
     except sqlite3.DatabaseError as error:
         logger.debug(f"Could not open {primary}: {error}")
         return out
@@ -316,23 +321,27 @@ def load_identifiers(primary):
             select.append(f"l.{legacy_col} as legacy_username")
             joins += " left join index_snapchatterlegacyUsername l on l.rowid = s.rowid"
         query = f"select {', '.join(select)} from snapchatter s{joins}"
-        cur = conn.execute(query)
-        names = [d[0] for d in cur.description]
-        for row in cur.fetchall():
+        names = [d[0] for d in conn.execute(f"{query} limit 0").description]
+        rows, marks = sqlite_open.query_both(views, query)
+        for row, mark in zip(rows, marks):
             record = dict(zip(names, row))
             user_id = cell(record.get("user_id"))
             if not user_id:
                 continue
-            entry = out.setdefault(user_id.lower(), {"username": "", "legacy_username": ""})
+            entry = out.setdefault(user_id.lower(), {"username": "", "legacy_username": "",
+                                                     "superseded": []})
             for key in ("username", "legacy_username"):
                 value = cell(record.get(key))
                 if value and not entry[key]:
                     entry[key] = value
+                elif value and mark == sqlite_open.MAIN_ONLY and value != entry[key]:
+                    # a name this account had before the last checkpoint, replaced since
+                    entry.setdefault("superseded", []).append(value)
     except sqlite3.DatabaseError as error:
         logger.info(f"Contacts: could not read the username tables from primary.docobjects "
                     f"({error}) — usernames will be whatever the friends list held")
     finally:
-        conn.close()
+        views.close()
     if out:
         legacy = sum(1 for v in out.values()
                      if v["legacy_username"] and v["legacy_username"] != v["username"])
