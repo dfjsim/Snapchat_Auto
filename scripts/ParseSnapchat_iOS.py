@@ -1820,13 +1820,27 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # It also writes the chat-attachment manifest the cache_controller report links back with, so
     # it has to run before that report.
     conv_index = {}
+    primary_doc = primaryDoc[0] if primaryDoc else None
+
+    # Both chat reports show the same username / legacy-username pair out of primary.docobjects,
+    # and each used to read it for itself: the same file, the same rows, and the same "N identifier
+    # record(s)" line logged twice, which reads like two different findings. Read it here once and
+    # hand the result to both. load_identifiers never raises, so a failure here still leaves both
+    # reports able to run (they re-read it when given None).
+    identifiers = None
+    try:
+        from scripts import contacts_report
+        identifiers = contacts_report.load_identifiers(primary_doc)
+    except Exception as Error:
+        logger.error(f"Reading contact identifiers failed: {Error}")
+
     try:
         from scripts import conversations_report
         _report, conv_index = conversations_report.main(
             msg_df, friends_df, group_df, report_dir + "/Conversations", cachefiles_dir,
             arroyo=arroyo[0], tz=tz, owner_user_id=uuid, owner_username=current_username,
             cache_key_for=cacheControllerKey, report_dir=report_dir,
-            primary=primaryDoc[0] if primaryDoc else None)
+            primary=primary_doc, identifiers=identifiers)
     except Exception as Error:
         logger.error(f"Conversations report failed: {Error}")
 
@@ -1836,7 +1850,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         contacts_report.main(friends_df, report_dir + "/Contacts", conv_index=conv_index,
                              owner_user_id=uuid, owner_username=current_username,
                              friends_source=friends_source, tz=tz, report_dir=report_dir,
-                             primary=primaryDoc[0] if primaryDoc else None)
+                             primary=primary_doc, identifiers=identifiers)
     except Exception as Error:
         logger.error(f"Contacts report failed: {Error}")
 

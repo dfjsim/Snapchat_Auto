@@ -389,7 +389,7 @@ def map_userids(app):
     return out
 
 
-def _open_gallery_with_module(local, egocipher_hex):
+def _open_gallery_with_module(local, egocipher_hex, reading=""):
     """Open the database in-process with a sqlcipher3 binding. Connection or None."""
     if _SQLCIPHER is None:
         return None
@@ -398,14 +398,14 @@ def _open_gallery_with_module(local, egocipher_hex):
         conn.execute('PRAGMA key = "x\'' + egocipher_hex + '\'"')
         conn.execute("PRAGMA cipher_compatibility = 3")
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()   # fails on a bad key
-        logger.info("Decrypted gallery.encrypteddb with the sqlcipher3 module")
+        logger.info(f"Decrypted gallery.encrypteddb{reading} with the sqlcipher3 module")
         return conn
     except Exception as error:
         logger.debug(f"sqlcipher3 module could not open gallery.encrypteddb: {error}")
         return None
 
 
-def _open_gallery_with_exe(local, egocipher_hex, workdir):
+def _open_gallery_with_exe(local, egocipher_hex, workdir, reading=""):
     """Dump the database with the sqlcipher CLI and rebuild it as plain SQLite."""
     exe = _sqlcipher_exe()
     if not exe:
@@ -434,7 +434,7 @@ def _open_gallery_with_exe(local, egocipher_hex, workdir):
     except sqlite3.DatabaseError as error:
         logger.warning(f"Could not load decrypted gallery dump: {error}")
         return None
-    logger.info(f"Decrypted gallery.encrypteddb with {os.path.basename(exe)}")
+    logger.info(f"Decrypted gallery.encrypteddb{reading} with {os.path.basename(exe)}")
     return conn
 
 
@@ -460,9 +460,14 @@ def decrypt_gallery_db(gallery_path, egocipher_hex, workdir, with_wal=True):
         if os.path.exists(src):
             shutil.copy(src, local + suffix)
 
-    conn = _open_gallery_with_module(local, egocipher_hex)
+    # Both readings decrypt the same file, so name which one this is: two identical log lines
+    # look like the database was needlessly decrypted twice rather than read as the double-read
+    # rule requires.
+    reading = (" (the app's current state, -wal applied)" if with_wal else
+               " (the state as of the last checkpoint, -wal set aside)")
+    conn = _open_gallery_with_module(local, egocipher_hex, reading)
     if conn is None:
-        conn = _open_gallery_with_exe(local, egocipher_hex, workdir)
+        conn = _open_gallery_with_exe(local, egocipher_hex, workdir, reading)
     if conn is None and with_wal:
         logger.warning(
             f"Could not decrypt {os.path.basename(gallery_path)}: no working SQLCipher found. "

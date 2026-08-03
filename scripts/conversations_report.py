@@ -1370,7 +1370,8 @@ def conversation_index(conversations):
 # --------------------------------------------------------------------------- entry
 
 def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="local",
-         owner_user_id="", owner_username="", cache_key_for=None, report_dir=None, primary=None):
+         owner_user_id="", owner_username="", cache_key_for=None, report_dir=None, primary=None,
+         identifiers=None):
     """Build the conversations report.
 
     msg_df         : the parser's message frame (see the COL_* names) — **before** its content is
@@ -1382,6 +1383,8 @@ def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="
     cache_key_for  : callable(attachment file name) -> (CACHE_KEY | None, explanation), used for the
                      link to the cache_controller report (ParseSnapchat_iOS.cacheControllerKey).
     primary        : primary.docobjects path, for the contacts' username / legacy-username pair.
+    identifiers    : an already-loaded ``load_identifiers(primary)``, shared with the Contacts
+                     report so that file is read once per run; None re-reads it from ``primary``.
     Returns ``(report_path, conversation_index)``; the index feeds the Contacts report's links.
     """
     os.makedirs(outdir, exist_ok=True)
@@ -1392,8 +1395,9 @@ def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="
 
     # the same contact model the Contacts report builds, so a participant here and a row there are
     # the same person with the same identifiers
-    contacts = apply_identifiers(normalize_contacts(friends_df, owner_user_id, owner_username),
-                                 load_identifiers(primary))
+    contacts = apply_identifiers(
+        normalize_contacts(friends_df, owner_user_id, owner_username),
+        load_identifiers(primary) if identifiers is None else identifiers)
     contact_links = contact_link_index(contacts)               # hrefs relative to the reports root
     groups = normalize_groups(group_df)
     owner_names = [c["username"] or c["display"] for c in contacts if c["is_owner"]]

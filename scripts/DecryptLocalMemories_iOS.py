@@ -1,5 +1,6 @@
 import os
 import base64
+import copy
 import plistlib
 from sqlite3.dbapi2 import DatabaseError
 from Crypto.Cipher import AES
@@ -862,8 +863,27 @@ def BytesIO_load(raw):
     return ccl_bplist.load(BytesIO(raw))
 
 
+# One run reads the keychain twice with the same path — once for the legacy Memories report
+# (`main` below) and once for `memories_media_report` — and the read is a pure function of the
+# file, so the second one is served from here. It saves ~1 s of UFED decryption, but the reason
+# it matters is the log: repeating the findings (including the `persistedkey` WARNING) verbatim
+# reads like two separate failures rather than one file described once. Keyed on
+# (path, mtime, size), so a keychain replaced mid-session is still re-read.
+_KEYCHAIN_CACHE = {}
+
+
+def clear_keychain_cache():
+    """Forget any cached keychain read. `Snapchat_Auto.run` calls this per run so that key
+    material is not carried from one case into the next, and so each run folder gets its own
+    `decrypted_keychain.plist` rather than inheriting the previous run's."""
+    _KEYCHAIN_CACHE.clear()
+
+
 def read_keychain_status(keychain):
     """Read a keychain dump and report exactly what was found.
+
+    Repeat calls for an unchanged file are answered from `_KEYCHAIN_CACHE` (a copy, so a caller
+    editing the result cannot affect the next one); `_read_keychain_status` does the real work.
 
     Returns a dict:
         egocipher / persistedkey : hex strings, "" when absent (the first item of each kind)
@@ -879,6 +899,26 @@ def read_keychain_status(keychain):
     Never raises — a keychain problem degrades the run instead of aborting it. Unlike the previous
     version, though, every outcome is logged at INFO or above (the run log is INFO-level, so DEBUG
     diagnostics would never reach the examiner's log file)."""
+    path = str(keychain or "")
+    try:
+        stat = os.stat(path)
+        key = (os.path.abspath(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        key = None            # no file to stat — the uncached read is trivial for that case
+    if key is not None and key in _KEYCHAIN_CACHE:
+        # Say that this is the earlier result rather than restating it, so the log cannot be read
+        # as a second, independent examination of the keychain.
+        logger.info(f"Keychain: reusing the read of {os.path.basename(path)} logged above "
+                    "(same file, unchanged since)")
+        return copy.deepcopy(_KEYCHAIN_CACHE[key])
+    res = _read_keychain_status(keychain)
+    if key is not None:
+        _KEYCHAIN_CACHE[key] = copy.deepcopy(res)
+    return res
+
+
+def _read_keychain_status(keychain):
+    """The uncached read; `read_keychain_status` documents the result and caches it."""
     res = {"egocipher": "", "persistedkey": "", "persistedkeys": {}, "egociphers": [],
            "status": "none", "detail": "", "format": "",
            "items": 0, "snap_items": 0, "path": str(keychain or "")}

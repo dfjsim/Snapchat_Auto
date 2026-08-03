@@ -596,7 +596,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
 
 
 def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="",
-         friends_source="", tz="local", report_dir=None, primary=None):
+         friends_source="", tz="local", report_dir=None, primary=None, identifiers=None):
     """Build the contacts report from the friends DataFrame ``ParseSnapchat_iOS`` recovered.
 
     friends_df   : whichever getFriends* source answered (columns vary — see the normalizers).
@@ -606,6 +606,9 @@ def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="
     tz           : only used to label the times this report shows, which the Conversations report
                    has already formatted; imported lazily so this module stays dependency-free.
     primary      : primary.docobjects path, for the username / legacy-username identifiers.
+    identifiers  : an already-loaded ``load_identifiers(primary)``. The caller reads that file once
+                   and gives the same result to both chat reports; passing None re-reads it from
+                   ``primary``, which keeps this report usable on its own.
     """
     try:
         from scripts.memories_media_report import make_time_formatter
@@ -616,7 +619,7 @@ def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     run_id = report_ui.run_id(rdir)
     report_ui.write_selection_stub(rdir, run_id)
-    identifiers = load_identifiers(primary)
+    identifiers = load_identifiers(primary) if identifiers is None else identifiers
     contacts = apply_identifiers(
         normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)
     report = generate_report(contacts, outdir, conv_index=conv_index,
