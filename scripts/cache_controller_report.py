@@ -565,6 +565,11 @@ def publish_view(paths, files_dir, name_base, ext, total, max_reconstruct_bytes)
 # without one, a page of cached video tells the examiner nothing about any of it.
 POSTER_EXTS = ("mp4", "mov", "m4v", "webm")
 
+# What a ▶ may be put on. Now that an "....ftyp" container is typed by its brand rather than all
+# being called .mp4, the cache holds recognised media that does not play — a HEIC or AVIF still —
+# and a play button on a photograph is the same kind of wrong statement as calling it a video.
+PLAYABLE_EXTS = ("mp4", "mov", "m4v", "webm", "3gp", "m4a", "mp3", "ogg")
+
 POSTER_BASIS = (
     "This still is DERIVED by this tool from the video next to it (OpenCV, the frame at about one "
     "second, or the first frame that decodes when the cached video is incomplete). It is not data "
@@ -1223,6 +1228,11 @@ def _file_cell(entry, rel_prefix):
                     f'tool, not a cached file)">'
                     f'<img src="{_esc(entry["poster"])}" loading="lazy">'
                     f'<span class="lbl">▶ {_esc(ext)}</span></a>')
+        if ext not in PLAYABLE_EXTS:
+            # recognised media this report cannot render inline (a HEIC/AVIF still): openable, and
+            # named for what it is, but not dressed up as something that plays
+            return (f'<a class="filebtn" href="{_esc(entry["view"])}" target="_blank" '
+                    f'title="open the cached {_esc(ext)}">{_esc(ext)}</a>')
         return (f'<a class="filebtn play" href="{_esc(entry["view"])}" target="_blank" '
                 f'title="open the cached {_esc(ext)}">▶ <span class="lbl">{_esc(ext)}</span></a>')
     dec = (entry.get("decrypted") or [])

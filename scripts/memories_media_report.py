@@ -1193,10 +1193,15 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
         return False
 
 
-# ISO-BMFF brands that are audio-only containers. They start with the same "....ftyp" bytes as an
-# .mp4, so anything that identifies media by magic bytes calls them video — and asking a decoder for
-# a frame of an audio file is how a poster pass meets a file with no frames in it.
-_AUDIO_BRANDS = (b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B ")
+# Extensions sniff.guess_media returns for something that holds no video frames. An audio recording
+# and a still photo are both ISO base media files — the same "....ftyp" magic bytes as an .mp4 — so
+# the container alone cannot tell them apart; the brand can, which is what guess_media reads.
+_FRAMELESS_EXTS = ("m4a", "heic", "avif")
+
+# ...and the ones that do hold video. Kept as a set because guess_media reads the ftyp brand: a
+# QuickTime or iTunes-video memory is "mov"/"m4v", not "mp4", and testing for "mp4" alone would
+# stop calling it a video.
+VIDEO_EXTS = ("mp4", "mov", "m4v", "webm")
 
 # A single unreadable video must never be able to stall a report. Measured on a test device: a
 # 1,859-byte cached "video" (ftyp brand M4A) opened fine and then blocked inside a single
@@ -1205,13 +1210,14 @@ _POSTER_TIMEOUT_S = 20
 
 
 def has_video_track(path):
-    """False when the file is an audio-only ISO-BMFF container (no frame can be extracted)."""
+    """False when the file's magic bytes say it holds no video frames to extract."""
     try:
         with open(path, "rb") as fh:
-            head = fh.read(12)
+            head = fh.read(16)
     except OSError:
         return True                                        # let the decoder decide
-    return not (head[4:8] == b"ftyp" and head[8:12] in _AUDIO_BRANDS)
+    ext = guess_media(head)
+    return ext not in _FRAMELESS_EXTS
 
 
 def poster_within(video_path, out_path, timeout=_POSTER_TIMEOUT_S, **kw):
@@ -1445,7 +1451,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
             continue
         # A complete video makes the better poster (we can seek into it), so prefer one; among
         # equals the largest file has the most of the media in it.
-        vids = sorted((f for f in m["media_files"] if f["ext"] == "mp4"),
+        vids = sorted((f for f in m["media_files"] if f["ext"] in VIDEO_EXTS),
                       key=lambda f: (f.get("complete") is False, -f["bytes"]))
         if vids:
             todo.append((sid, m, vids[0]))
@@ -2131,9 +2137,9 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     single = len(members) == 1
     lead = members[0]
     is_video = (lead["media_type"] == 1 if lead["media_type"] is not None
-                else any(f["ext"] in ("mp4", "mov") for f in files))
+                else any(f["ext"] in VIDEO_EXTS for f in files))
     kind = "🎬 Video" if is_video else "🖼️ Image"
-    if is_video and not any(f["ext"] == "mp4" for f in files):
+    if is_video and not any(f["ext"] in VIDEO_EXTS for f in files):
         kind += " <span class='muted'>(preview only — full video not cached)</span>"
     meo = ' <span class="meo">My Eyes Only</span>' if any(m["is_meo"] for m in members) else ""
 
@@ -2532,7 +2538,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # ZMEDIATYPE is authoritative when there is a row to read it from; a carved Memory has
             # none, so fall back to what the recovered media actually turned out to be.
             is_video = (m["media_type"] == 1 if m["media_type"] is not None
-                        else any(f["ext"] in ("mp4", "mov") for f in m["media_files"]))
+                        else any(f["ext"] in VIDEO_EXTS for f in m["media_files"]))
             kind = "🎬" if is_video else "🖼️"
             if is_meo:                                     # My Eyes Only — the private album
                 kind += "<div class='meo' title='My Eyes Only'>MEO</div>"

@@ -1,8 +1,9 @@
-"""The two guards around poster-frame extraction from cached video.
+"""Identifying what an "....ftyp" container holds, and the guards around poster extraction.
 
-Both come from a real cached file, and both are the difference between a missing thumbnail and a
-report that never finishes: an audio container that every magic-byte identifier calls an .mp4, and
-a decoder read that does not return. A thumbnail is a convenience — it must never be able to cost
+All of this comes from one real cached file: 1,859 bytes whose ftyp brand is `M4A `. It was
+reported to the examiner as a video, and then handed to a video decoder, which blocked inside a
+single read indefinitely. So: the brand is read, so an audio recording or a photo is not called a
+video; and extraction is bounded, because a thumbnail is a convenience and no convenience may cost
 the examiner their report.
 
 Every input is synthetic. No extraction data is required or used.
@@ -10,6 +11,7 @@ Every input is synthetic. No extraction data is required or used.
 import time
 
 from scripts import memories_media_report as memories_report
+from scripts.data import sniff
 
 
 def _iso_bmff(tmp_path, name, brand):
@@ -25,8 +27,14 @@ def test_an_audio_only_container_is_not_offered_to_the_decoder(tmp_path):
     assert not memories_report.has_video_track(_iso_bmff(tmp_path, "b.mp4", b"M4B "))
 
 
+def test_a_still_image_container_is_not_offered_to_the_decoder(tmp_path):
+    """HEIF and AVIF are ISO base media files too, and hold no video frames."""
+    assert not memories_report.has_video_track(_iso_bmff(tmp_path, "i.mp4", b"heic"))
+    assert not memories_report.has_video_track(_iso_bmff(tmp_path, "j.mp4", b"avif"))
+
+
 def test_a_video_brand_is_left_to_the_decoder(tmp_path):
-    for brand in (b"isom", b"mp42", b"qt  "):
+    for brand in (b"isom", b"mp42", b"qt  ", b"M4V "):
         assert memories_report.has_video_track(_iso_bmff(tmp_path, "v.mp4", brand))
 
 
@@ -60,3 +68,45 @@ def test_poster_within_skips_audio_without_starting_a_thread(monkeypatch, tmp_pa
     assert memories_report.poster_within(_iso_bmff(tmp_path, "a.mp4", b"M4A "),
                                          str(tmp_path / "out.jpg")) is False
     assert not calls
+
+
+# --------------------------------------------------------------- what the container actually holds
+
+def test_an_ftyp_container_is_typed_by_its_brand():
+    """An audio recording, a photo and a video share the .mp4 magic bytes; the brand separates them."""
+    def ext(brand):
+        return sniff.guess_media(b"\x00\x00\x00\x1c" + b"ftyp" + brand + b"\x00" * 32)
+
+    assert ext(b"M4A ") == "m4a"                   # a voice note reported as a video, until now
+    assert ext(b"M4B ") == "m4a"
+    assert ext(b"qt  ") == "mov"
+    assert ext(b"M4V ") == "m4v"
+    assert ext(b"heic") == "heic"
+    assert ext(b"avif") == "avif"
+    assert ext(b"3gp4") == "3gp"
+
+
+def test_generic_brands_are_still_mp4():
+    """Only brands with an unambiguous meaning are mapped; the rest do mean .mp4."""
+    for brand in (b"isom", b"mp42", b"iso5", b"avc1", b"dash", b"\x00\x00\x00\x00"):
+        assert sniff.guess_media(b"\x00\x00\x00\x1c" + b"ftyp" + brand + b"\x00" * 32) == "mp4"
+
+
+def test_reading_the_brand_does_not_change_what_counts_as_media():
+    """guess_media is the Memories linker's acceptance test — it must accept exactly what it did."""
+    for brand in (b"M4A ", b"heic", b"isom", b"qt  "):
+        assert sniff.guess_media(b"\x00\x00\x00\x1c" + b"ftyp" + brand + b"\x00" * 32)
+    assert sniff.guess_media(b"\xff\xd8\xff" + b"\x00" * 32) == "jpg"
+    assert sniff.guess_media(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32) == "png"
+    assert sniff.guess_media(b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 32) == "webp"
+    assert sniff.guess_media(b"not media at all") is None
+    assert sniff.guess_media(b"short") is None
+
+
+def test_an_audio_container_is_still_grouped_as_media():
+    """kind drives the report's category; only the extension changes, as for mp3 and ogg."""
+    head = b"\x00\x00\x00\x1c" + b"ftyp" + b"M4A " + b"\x00" * 32
+    assert sniff.sniff_content(head) == ("media", "m4a")
+    kind, ext, label, encrypted = sniff.classify(head, 1859)
+    assert (kind, ext, encrypted) == ("media", "m4a", False)
+    assert label == "m4a"
