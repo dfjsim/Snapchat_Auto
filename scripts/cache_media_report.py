@@ -56,7 +56,7 @@ from scripts.memories_media_report import (
 )
 from scripts.cache_controller_report import (
     find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
-    load_memory_pages, load_memory_packs, POSTER_BASIS, _fmt_bytes, _esc, _info,
+    load_memory_pages, load_memory_packs, POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
 )
 
 try:
@@ -97,6 +97,13 @@ sniff_content = sniff.sniff_content
 
 
 _IMAGE_EXTS = ("jpg", "png", "webp", "gif")
+
+# Everything sniff.guess_media resolves an "....ftyp" container to. They all carry the same magic
+# bytes and only the brand tells them apart, so the mvhd atom (creation/modification time, duration)
+# is worth looking for in any of them — an audio recording's timestamps are as much evidence as a
+# video's. read_mvhd returns {} when the atom is absent, which is the answer for the still-image
+# brands.
+_ISOBMFF_EXTS = ("mp4", "mov", "m4v", "m4a", "3gp", "heic", "avif")
 
 
 # --------------------------------------------------------------------------- key material
@@ -1076,7 +1083,7 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
                 "inner_url": inner_bolt_url(url),
                 "decoded": payload is not None and payload is not raw,
                 "recovered": payload is not None,
-                "mvhd": read_mvhd(full) if ext in ("mp4", "mov") else {},
+                "mvhd": read_mvhd(full) if ext in _ISOBMFF_EXTS else {},
                 "tsaf": tsaf_fields(content) if kind == "tsaf" else [],
             "members": bundle_members(content) if kind == "bundle" else [],
                 "links": [],
@@ -1173,6 +1180,11 @@ def _file_cell(entry, rel_prefix="../"):
                 f'tool, not a cached file)">'
                 f'<img src="{_esc(entry["poster"])}" loading="lazy">'
                 f'<span class="lbl">▶ {_esc(entry["ext"])}</span></a>')
+    if entry.get("view") and entry["ext"] not in PLAYABLE_EXTS:
+        # recognised media this report cannot render inline (a HEIC/AVIF still): openable, and named
+        # for what it is, but not dressed up as something that plays
+        return (f'<a class="filebtn" href="{_esc(entry["view"])}" target="_blank">'
+                f'{_esc(entry["ext"])}</a>')
     if entry.get("view"):
         return (f'<a class="filebtn play" href="{_esc(entry["view"])}" target="_blank">'
                 f'▶ <span class="lbl">{_esc(entry["ext"])}</span></a>')

@@ -17,6 +17,12 @@ in fact readable, and buries the handful of files that really are encrypted.
 :func:`classify` is therefore deliberately conservative about the word "encrypted": it is used
 only for bytes that look like a block cipher's output — high Shannon entropy *and* a length that
 is a multiple of the AES block size. Anything merely unrecognised is reported as unrecognised.
+
+The same principle applies to the type a file is *given*. An ISO base media file's magic bytes say
+only "this is an ISO base media file"; its **major brand** says whether it holds a video, an audio
+recording or a still photo. Stopping at the magic bytes and calling all of them ".mp4" is not a
+neutral simplification — it tells the examiner a voice note is a video. :func:`guess_media` reads
+the brand.
 """
 
 import math
@@ -25,19 +31,49 @@ import collections
 # --------------------------------------------------------------------------- media magic bytes
 
 
+# An ISO base media file (".....ftyp....") is a *container*, and its major brand — the four bytes
+# right after `ftyp` — says what is actually in it. They all start with the same magic bytes, so a
+# check that stops at `ftyp` calls an audio recording, a still photo and a video the same thing:
+# ".mp4". That is a statement about content, and on the test corpus it was a false one — a cached
+# 1,859-byte M4A audio file was reported as a video (and then handed to a video decoder, which hung
+# on it). Only brands whose meaning is unambiguous are mapped; anything else stays "mp4", which is
+# what the generic brands (isom, mp42, iso2/4/5/6, avc1, dash) do mean.
+_FTYP_BRANDS = {
+    # audio-only containers
+    b"M4A ": "m4a", b"M4B ": "m4a", b"M4P ": "m4a", b"M4R ": "m4a",
+    b"F4A ": "m4a", b"F4B ": "m4a",
+    # QuickTime
+    b"qt  ": "mov",
+    # iTunes video
+    b"M4V ": "m4v", b"M4VH": "m4v", b"M4VP": "m4v",
+    # HEIF still images / sequences
+    b"heic": "heic", b"heix": "heic", b"heim": "heic", b"hesp": "heic",
+    b"hevc": "heic", b"hevx": "heic", b"mif1": "heic", b"msf1": "heic",
+    # AV1 still images
+    b"avif": "avif", b"avis": "avif",
+    # 3GPP
+    b"3gp4": "3gp", b"3gp5": "3gp", b"3g2a": "3gp",
+}
+
+
 def guess_media(data):
     """Return a file extension for known media magic bytes, else None.
 
-    Deliberately narrow: this is the predicate the Memories decrypt-and-match linker uses to decide
-    whether a candidate key produced real media, so anything it accepts becomes an evidential
-    claim. Broaden :func:`sniff_content` instead.
+    Deliberately narrow about *what counts as media*: this is the predicate the Memories
+    decrypt-and-match linker uses to decide whether a candidate key produced real media, so anything
+    it accepts becomes an evidential claim. Broaden :func:`sniff_content` instead.
+
+    It is not narrow about *which* media: an ISO base media file's major brand is read
+    (:data:`_FTYP_BRANDS`) so an audio container or a still image is not reported as a video. The
+    set of byte patterns accepted is unchanged by that — only the extension returned for them — so
+    the linker's acceptance is exactly what it always was.
     """
     if len(data) < 12:
         return None
     if data[:3] == b"\xff\xd8\xff":
         return "jpg"
     if data[4:8] == b"ftyp":
-        return "mp4"
+        return _FTYP_BRANDS.get(bytes(data[8:12]), "mp4")
     if data[:4] == b"\x89PNG":
         return "png"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
@@ -54,11 +90,11 @@ def sniff_content(head):
     """
     if not head:
         return ("empty", "")
-    ext = guess_media(head)                                    # jpg / mp4 / png / webp
+    # jpg / png / webp, or the ftyp brand's real type. Audio stays kind "media", as mp3 and ogg
+    # below already are — "media" groups a row for a report, and the extension is what says whether
+    # it is a video, a photo or a recording.
+    ext = guess_media(head)
     if ext:
-        # an ftyp box with the 'qt  ' brand is a QuickTime .mov, not an .mp4
-        if ext == "mp4" and head[8:12] == b"qt  ":
-            return ("media", "mov")
         return ("media", ext)
     if head[:8] == b"bplist00":
         return ("bplist", "plist")

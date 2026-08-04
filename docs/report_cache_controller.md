@@ -55,11 +55,18 @@ found on the test corpus:
   the frame is taken by reading forward from the start rather than by seeking to ~1 s: seeking into
   bytes that are not there fails *and* costs a full re-read of the file.
 * **A single unreadable file must not be able to stall the report.** A 1,859-byte cached "video"
-  whose ftyp brand is `M4A ` — an audio container, which every magic-byte identifier calls an
-  `.mp4` — opened fine and then blocked inside one OpenCV `read()` indefinitely (killed at 70 s).
-  `poster_within` skips audio-only brands and gives the extraction a hard time bound on a daemon
-  thread, so the worst case is a missing thumbnail. With both, 45 of 47 posters on the iOS 16 device
-  take **1.5 s**.
+  whose ftyp brand is `M4A ` — an audio container — opened fine and then blocked inside one OpenCV
+  `read()` indefinitely (killed at 70 s). `poster_within` skips containers with no video track and
+  gives the extraction a hard time bound on a daemon thread, so the worst case is a missing
+  thumbnail. With both, 45 of 47 posters on the iOS 16 device take **1.5 s**.
+
+That file also exposed a mislabel worth stating on its own: an ISO base media file's magic bytes
+(`....ftyp`) say only that it *is* one. Its **major brand** says what is in it, and
+`sniff.guess_media` now reads it — so `M4A `/`M4B ` is `m4a`, `qt  ` is `mov`, `heic`/`avif` are
+still images, and only the generic brands (`isom`, `mp42`, `iso*`, `avc1`, `dash`) stay `mp4`.
+Reporting a voice note as a video is a claim about content, and it was a false one. The set of
+bytes accepted **as media** is unchanged, so the Memories decrypt-and-match linker accepts exactly
+what it always did — only the extension it is given changed.
 
 ## Tables used
 
