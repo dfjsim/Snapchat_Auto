@@ -44,6 +44,7 @@ import uuid
 import shutil
 import logging
 from datetime import datetime
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,26 @@ HINT_CSS = """
 """
 
 
+def find_fragment(tokens):
+    """The ``#find=…`` fragment for a link whose target is a **set** of rows, not one row.
+
+    The receiving report filters itself to these tokens (matched with OR) and expands every row that
+    matches — see ``findAll`` in :data:`VTABLE_JS`. Use it instead of an ``#anchor`` when one entry
+    corresponds to several rows in the other report: an anchor can only reach the first of them, and
+    one chip per row makes the cell unreadable.
+
+    Each token must be something the target rows carry in their search text (a CACHE_KEY, a snap id,
+    a hash). Returns "" when nothing usable was passed, so the caller falls back to a plain link.
+    """
+    seen, parts = set(), []
+    for token in tokens or ():
+        text = str(token or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            parts.append(quote(text, safe=""))
+    return "#find=" + "|".join(parts) if parts else ""
+
+
 def info_icon(text):
     """A small round "?" the examiner can click for an explanation of how something was derived.
 
@@ -182,6 +203,8 @@ function scFlash(el){
 function scGo(hash){
  if(!hash||hash.length<2)return;
  var id=decodeURIComponent(hash.slice(1));
+ // "#find=<token>[|<token>…]" — a link whose target is a SET of rows, not one row
+ if(id.slice(0,5)==='find='&&window.SCV&&SCV.findAll){SCV.findAll(id.slice(5));return;}
  if(window.SCV&&SCV.hasRow(id)){SCV.goTo(id,true);return;}
  var el=document.getElementById(id);
  if(!el)return;
@@ -528,13 +551,25 @@ function init(o){
  if(C.selCount&&window.SCSel)C.selCount(SCSel.count(o.selKind));}
 
 /* ---------- filtering / sorting ---------- */
+/* A query is split on '|', and a row matches when it contains ANY of the parts. One token behaves
+   exactly as it always did; the OR form is what lets a single cross-report link land on every row
+   an entry corresponds to (see findAll) instead of silently picking the first of them. */
+function terms(q){
+ var out=[],p=q.split('|');
+ for(var i=0;i<p.length;i++){var t=p[i].trim();if(t)out.push(t);}
+ return out;}
+
+function hit(text,ts){
+ for(var i=0;i<ts.length;i++)if(text.indexOf(ts[i])>=0)return true;
+ return false;}
+
 function refilter(){
  if(!C)return;
- var q=(C.query?C.query():'').toLowerCase(),m=C.match||null;
+ var ts=terms((C.query?C.query():'').toLowerCase()),m=C.match||null;
  view=[];
  for(var i=0;i<rows.length;i++){
   var r=rows[i];
-  if(q&&r[2].indexOf(q)<0)continue;
+  if(ts.length&&!hit(r[2],ts))continue;
   if(m&&!m(r[5]||{},r))continue;
   view.push(i);}
  if(sortCol>=0)sortView();
@@ -743,6 +778,26 @@ function selectShown(on){
 /* ---------- anchor navigation ---------- */
 function hasRow(id){return byId[id]!==undefined;}
 
+/* The target of a "#find=<token>[|<token>…]" link: filter this table to those tokens and open
+   every row that matches.
+
+   One entry in one report is regularly several rows in another — the same cached bytes can sit
+   under more than one path, and one Memory owns many cached files. Linking to the first of them
+   would hide the rest, and emitting one link per row makes a cell unreadable. So a link that has
+   several targets carries them all and lands on a filtered, expanded page: what the examiner
+   arrives at is the complete set, with the query that produced it visible in the search box. */
+function findAll(token){
+ if(!C||!token)return false;
+ if(C.reset)C.reset();                                 // drop filters that would hide a match
+ if(C.setQuery)C.setQuery(token);
+ else{var q=document.getElementById('q');if(q)q.value=token;}
+ page=0;
+ refilter();
+ expandAll(true,500);
+ window.scrollTo(0,Math.max(0,mount.getBoundingClientRect().top+window.pageYOffset-
+   (window.scStick?scStick():60)));
+ return true;}
+
 function goTo(id,expand){
  var i=byId[id];
  if(i===undefined)return false;
@@ -765,8 +820,9 @@ function scrollTo(i){
  dirty=true;render();}
 
 return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
-        expandAll:expandAll,goTo:goTo,hasRow:hasRow,selectShown:selectShown,remeasure:remeasure,
-        setPage:setPage,setPageSize:setPageSize,page:function(){return page;},
+        expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
+        remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,
+        page:function(){return page;},
         pages:pageCount,count:function(){return view.length;}};
 })();
 """

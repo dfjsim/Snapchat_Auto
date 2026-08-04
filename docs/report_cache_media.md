@@ -27,6 +27,15 @@ and reporting 14 would overstate what is on the device.
 
 Anchor: `cm-<sha256>`.
 
+The index columns are in the **same order as the cache_controller report** and cached video carries
+a poster frame, both described in
+[report_cache_controller.md](report_cache_controller.md#index-columns--the-same-order-as-the-librarycaches-report).
+
+App assets are hidden by default. That filter is cleared — not re-applied — when another report
+links to a row, because `reset` means *stop hiding anything*; re-hiding them left every link to an
+app-asset row (an icon or lens resource the cache_controller report matched by content) landing on
+nothing at all.
+
 ## What it recovers
 
 Content is identified by **magic bytes, never by name or extension** — the story thumbnails are
@@ -79,11 +88,23 @@ Three counts are now reported separately, and the File column says which one a r
 
 | | File column | Counted as |
 |---|---|---|
-| owned by another report | `↗ decoded in the Memories/Conversations report` | *left to the report that owns them* |
+| owned by another report | that report's own decrypted copy, shown inline (below) | *left to the report that owns them* |
 | app assets (LZC bundles, fonts, CoreML) | `<type> app asset` | *app assets not decoded* |
 | genuinely unrecoverable | `🔒 not recovered` | **not recovered** |
 
 After the change, per test device: 120 not recovered (97 elsewhere, 80 assets excluded); 13; 7; 4.
+
+### Bytes another report decrypted are *shown*, not described
+
+Saying "↗ decoded in the Memories report" next to no image still reads as a failure — and it was
+next to the one group of rows whose plaintext certainly exists, since the Memories report holds the
+per-snap key. Those rows now display **that report's copy** (`_decrypted_elsewhere`, from the
+`media_by_pack.json` record's `path`), in the green "decrypted" style, linking into the Memories
+report; the expanded row states which Memory the key came from and where the plaintext file is. On
+the iOS 16 test device that is 97 rows that used to look unrecovered.
+
+The same rows carry **two** Memory chips — the index row and the Memory's own detail page — as the
+cache_controller report has always done.
 
 ## Attribution — exact only
 

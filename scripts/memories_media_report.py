@@ -37,6 +37,7 @@ import shutil
 import hashlib
 import sqlite3
 import logging
+import threading
 import subprocess
 import contextlib
 from io import BytesIO
@@ -1192,6 +1193,49 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
         return False
 
 
+# ISO-BMFF brands that are audio-only containers. They start with the same "....ftyp" bytes as an
+# .mp4, so anything that identifies media by magic bytes calls them video — and asking a decoder for
+# a frame of an audio file is how a poster pass meets a file with no frames in it.
+_AUDIO_BRANDS = (b"M4A ", b"M4B ", b"M4P ", b"F4A ", b"F4B ")
+
+# A single unreadable video must never be able to stall a report. Measured on a test device: a
+# 1,859-byte cached "video" (ftyp brand M4A) opened fine and then blocked inside a single
+# cv2 read() indefinitely — killed after 70 s, and it would have hung the whole run.
+_POSTER_TIMEOUT_S = 20
+
+
+def has_video_track(path):
+    """False when the file is an audio-only ISO-BMFF container (no frame can be extracted)."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(12)
+    except OSError:
+        return True                                        # let the decoder decide
+    return not (head[4:8] == b"ftyp" and head[8:12] in _AUDIO_BRANDS)
+
+
+def poster_within(video_path, out_path, timeout=_POSTER_TIMEOUT_S, **kw):
+    """:func:`generate_poster` with a hard time bound. False if it did not finish in time.
+
+    OpenCV offers no way to interrupt a read that is not returning, so the work runs on a daemon
+    thread the caller stops waiting for. The thread may still be running when this returns — it dies
+    with the process, and the report goes on. Which is the point: a thumbnail is a convenience, and
+    no convenience may cost the examiner their report.
+    """
+    if not has_video_track(video_path):
+        return False
+    result = []
+    worker = threading.Thread(target=lambda: result.append(generate_poster(video_path, out_path,
+                                                                           **kw)),
+                              daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        logger.debug(f"poster extraction exceeded {timeout}s and was abandoned: {video_path}")
+        return False
+    return bool(result and result[0])
+
+
 def _hashes(data):
     return hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
 
@@ -1412,8 +1456,9 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
             logger.info(f"  posters: {done}/{len(todo)}, {made} extracted")
         video_out = os.path.join(outdir, vid["out"])
         poster_name = f"{sid}_poster.jpg"
-        if not generate_poster(video_out, os.path.join(outdir, poster_name),
-                               complete=vid.get("complete") is not False):
+        # time-bounded: one undecodable video must not be able to stall the run (see poster_within)
+        if not poster_within(video_out, os.path.join(outdir, poster_name),
+                             complete=vid.get("complete") is not False):
             continue
         made += 1
         data = open(os.path.join(outdir, poster_name), "rb").read()
@@ -2053,6 +2098,15 @@ def _primary_media(m):
     return max(cands, key=lambda f: f["bytes"]) if cands else None
 
 
+PACK_IN_CACHEMEDIA_BASIS = (
+    "caching-media packs are NOT indexed by cache_controller.db, so the cache_controller report "
+    "does not list them; the Library/Caches report inventories them instead. One pack is stored as "
+    "a numbered series of .pack chunk files, which are several rows there, so this link opens that "
+    "report filtered to this pack's item hash with every chunk expanded rather than pointing at one "
+    "of them. The plaintext shown here was produced by concatenating those chunks and decrypting "
+    "them with this Memory's key.")
+
+
 # --------------------------------------------------------------------------- detail sub-page
 
 def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
@@ -2175,6 +2229,17 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             source_cell += (f" <a class='cclink' target='scauto_cache' "
                             f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
                             f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>")
+        elif f.get("source") == "caching-media" and f.get("item"):
+            # cache_controller.db does not index these, so the only report that inventories the
+            # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
+            # several rows there — so the link filters that report to this pack's item hash and
+            # opens every chunk, rather than pointing at one of them.
+            source_cell += (f" <a class='cclink' target='scauto_cachemedia' "
+                            f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
+                            f"{report_ui.find_fragment([f['item']])}\" "
+                            f"title=\"open the Library/Caches report filtered to this pack's "
+                            f"chunk file(s), all expanded\">🗂 Library/Caches</a>"
+                            + _info(PACK_IN_CACHEMEDIA_BASIS))
         if f.get("cross_scope"):
             source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
                             + _info(_cross_scope_note(f)))

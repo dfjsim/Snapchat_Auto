@@ -17,6 +17,50 @@ also yields exactly one `#ck-<CACHE_KEY>` anchor per file.
 
 `CACHE_KEY` is also the **on-disk filename** in `Documents/com.snap.file_manager_*_SCContent_*/`.
 
+## Index columns — the same order as the Library/Caches report
+
+Both reports describe the same kind of thing from two sides, and laid it out differently, so moving
+between them meant re-orienting every time. They now share one order — widths differ where the
+content does:
+
+| | cache_controller | Cached media (Library/Caches) |
+|---|---|---|
+| ▸ | expand | expand |
+| Category | | |
+| identity | `CACHE_KEY` | path under `Library/Caches` |
+| secondary | `EXTERNAL_KEY` | producer |
+| context | user | copies |
+| Type / Size | | |
+| File | the bytes, previewed | the bytes, previewed |
+| Links | | |
+
+The Category cell holds badges (`-wal only`, `changed`) and their "?" icons. The row is a fixed
+height, so a line that does not fit is **cut through the middle** rather than dropped — which is how
+a "?" came out sliced in half. The badges are held on one line of their own and the column is wide
+enough for them, so the cell is never more than two lines.
+
+## Poster frames for cached video
+
+A play button says *this is a video*; it does not say **which** video, so a page of cached video
+told the examiner nothing. Every published video gets a still (`publish_posters`, shared with the
+Library/Caches report) written as `files/<name>_poster.jpg` and shown in the File cell and the
+expanded row. It is **derived data** — this tool's own frame, not anything from the device — and
+says so wherever it appears (`POSTER_BASIS`). Posters left by an earlier run into the same folder
+are reused.
+
+Two properties of a *cache* make this different from posting a normal video file, and both were
+found on the test corpus:
+
+* **Cached video is routinely truncated** (the cache holds the byte ranges the device streamed), so
+  the frame is taken by reading forward from the start rather than by seeking to ~1 s: seeking into
+  bytes that are not there fails *and* costs a full re-read of the file.
+* **A single unreadable file must not be able to stall the report.** A 1,859-byte cached "video"
+  whose ftyp brand is `M4A ` — an audio container, which every magic-byte identifier calls an
+  `.mp4` — opened fine and then blocked inside one OpenCV `read()` indefinitely (killed at 70 s).
+  `poster_within` skips audio-only brands and gives the extraction a hard time bound on a daemon
+  thread, so the worst case is a missing thumbnail. With both, 45 of 47 posters on the iOS 16 device
+  take **1.5 s**.
+
 ## Tables used
 
 Columns are read **dynamically** (`SELECT *` + `cursor.description`), because they differ between

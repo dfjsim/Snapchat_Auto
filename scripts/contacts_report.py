@@ -64,7 +64,7 @@ SOURCE_NOTES = {
 }
 
 # Index-table geometry: one fixed row height and one column track list for the header and the rows.
-CT_COLS = ("minmax(140px,1fr) minmax(130px,1fr) minmax(120px,0.9fr) 250px minmax(180px,1.1fr) "
+CT_COLS = ("24px minmax(140px,1fr) minmax(130px,1fr) minmax(120px,0.9fr) 250px minmax(180px,1.1fr) "
            "74px 148px 148px")
 CT_ROW_H = 46
 
@@ -406,38 +406,163 @@ def _source_block(friends_source):
             + (f' &mdash; {_esc(note.split("WARNING: ")[-1])}' if warn else "") + '</div>')
 
 
+MULTI_CONV_NOTE = (
+    "The friends artifact records ONE conversation id against a contact — their private "
+    "conversation with this device. It is not the only conversation they take part in: every group "
+    "chat they are a member of is another one. This column therefore lists every conversation whose "
+    "participant list (arroyo.db user_conversation, or the groups list) carries this contact's "
+    "USER ID, with the friends artifact's own id marked 'from the friends list'. Expand the row to "
+    "see them all with their conversation ids. Matching is on the user id alone — never on a "
+    "username or display name, which can be changed, reused or shared between accounts, so a name "
+    "match would attribute a conversation to a person on evidence that does not identify them. A "
+    "contact whose user id was not recovered therefore shows only the friends list's conversation.")
+
+
+def contact_conversations(contact, conv_index):
+    """Every conversation this contact takes part in — not just the one the friends list names.
+
+    Returns ``[{id, why, …the conversation summary}]``, the friends artifact's own conversation
+    first and the rest by message count. ``why`` records which of the two made the association, so
+    the report can say it rather than presenting both as the same kind of fact.
+
+    Membership is matched on the **permanent user id only**. A display name is set locally by this
+    device's user and two accounts can share one; a username can be changed and the old one reused
+    by somebody else. Matching on either would put a conversation on a person's row on the strength
+    of a name — a false attribution, and the worst kind, because it looks exactly like a true one.
+    A contact whose user id was never recovered is therefore listed only with the conversation the
+    friends artifact names, which is the honest answer rather than a guessed one.
+    """
+    key = str(contact.get("user_id") or "").lower()
+    out, seen = [], set()
+
+    def add(conv_id, why):
+        conv = conv_index.get(conv_id)
+        if not conv_id or conv_id in seen or conv is None:
+            return
+        seen.add(conv_id)
+        out.append(dict(conv, id=conv_id, why=why))
+
+    add(contact.get("conv_id"), "friends")
+    if key:
+        for conv_id, conv in conv_index.items():
+            for part in conv.get("participants") or []:
+                if str(part.get("user_id") or "").lower() == key:
+                    add(conv_id, "participant")
+                    break
+    first = out[:1] if out and out[0]["why"] == "friends" else []
+    rest = sorted(out[len(first):], key=lambda c: -(c.get("messages") or 0))
+    return first + rest
+
+
+_WHY_LABEL = {
+    "friends": ("from the friends list",
+                "This is the CONVERSATION_ID the friends artifact records against this contact — "
+                "the app's own association between the person and a conversation."),
+    "participant": ("participant list carries this user ID",
+                    "This conversation's participant list (arroyo.db user_conversation, or the "
+                    "groups list in the friends artifact) carries this contact's permanent user id. "
+                    "That is what makes a contact a member of a group chat as well as of their "
+                    "private conversation. The match is on the user id alone, so it does not depend "
+                    "on a display name or a username, either of which can change."),
+}
+
+
+def _contact_detail(contact, convs, rel_prefix):
+    """The expanded contact row: every conversation they are in, with its conversation id."""
+    if convs:
+        rows = "".join(
+            "<tr>"
+            + (f'<td><a class="openbtn" target="scauto_conv_page" '
+               f'href="{rel_prefix}Conversations/{_esc(c["page"])}#conv-{_esc(c["id"])}" '
+               f'title="open this conversation in its own tab">'
+               f'{text_html(c.get("title") or c["id"])} &#9656;</a></td>'
+               if c.get("page") else
+               f'<td>{text_html(c.get("title") or c["id"])}</td>')
+            + f'<td class="mono">{_esc(c["id"])}</td>'
+            + f'<td>{_esc(c.get("kind") or "")}</td>'
+            + f'<td class="num">{c.get("messages") or 0}</td>'
+            + f'<td>{_esc(c.get("first") or "")}</td>'
+            + f'<td>{_esc(c.get("last") or "")}</td>'
+            + f'<td>{_esc(_WHY_LABEL.get(c["why"], (c["why"], ""))[0])}'
+            + report_ui.info_icon(_WHY_LABEL.get(c["why"], ("", ""))[1]) + "</td>"
+            "</tr>" for c in convs)
+        table = ('<table class="sub"><tr><th>Conversation</th><th>Conversation ID</th><th>Type</th>'
+                 '<th>Msgs</th><th>First message</th><th>Last message</th><th>Listed because</th>'
+                 f'</tr>{rows}</table>')
+    elif contact.get("conv_id"):
+        table = (f'<div class="mono">{_esc(contact["conv_id"])}</div>'
+                 '<span class="muted">The friends list gives this contact a conversation id, but '
+                 'arroyo.db holds no conversation for it in this extraction.</span>')
+    else:
+        table = ('<span class="muted">No conversation in this extraction names this contact.'
+                 '</span>')
+    ids = [("Display name", text_html(contact["display"])),
+           ("Username", text_html(contact["username"])),
+           ("Legacy username", text_html(contact.get("legacy_username") or "")),
+           ("User ID", f'<span class="mono">{_esc(contact["user_id"])}</span>')]
+    grid = "".join(f'<div class="k">{k}</div><div class="v">{v}</div>' for k, v in ids if v)
+    return (f'<div class="sect">Conversations ({len(convs)})'
+            + report_ui.info_icon(MULTI_CONV_NOTE) + "</div>" + table
+            + '<div class="sect">Identifiers' + report_ui.info_icon(IDENTIFIER_NOTE) + "</div>"
+            + f'<div class="grid">{grid}</div>')
+
+
 def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_label="",
                     run_id="default", rel_prefix="../", identifiers_read=False):
     """Write ``Contacts_report.html`` (+ ``data/index.js``) and return its path.
 
     ``conv_index`` maps a conversation id to what the Conversations report knows about it
-    (``{page, title, messages, attachments, first, last, first_sort, last_sort}``), which is what
-    lets each contact row link straight to that conversation's detail page.
+    (``{page, title, kind, messages, attachments, first, last, first_sort, last_sort,
+    participants}``), which is what lets each contact row link to **every** conversation that
+    contact takes part in — see :func:`contact_conversations`.
     """
     conv_index = conv_index or {}
     os.makedirs(outdir, exist_ok=True)
 
+    data_dir = os.path.join(outdir, "data")
+    all_convs = {contact_anchor(c): contact_conversations(c, conv_index) for c in contacts}
+    details = [(contact_anchor(c), _contact_detail(c, all_convs[contact_anchor(c)], rel_prefix))
+               for c in contacts]
+    chunk_of = report_ui.write_details(data_dir, details)
+
     rows = []
-    with_conv = with_msgs = with_legacy = 0
+    with_conv = with_msgs = with_legacy = multi_conv = 0
     for contact in contacts:
         if contact.get("legacy_username"):
             with_legacy += 1
+        anchor = contact_anchor(contact)
+        convs = all_convs[anchor]
         conv_id = contact["conv_id"]
-        conv = conv_index.get(conv_id) or {}
-        n_msgs = conv.get("messages", 0)
-        if conv_id:
+        # The counts summarise every conversation the contact is in, not only the friends list's
+        # one: for a contact in three group chats, one conversation's figures are not their activity.
+        n_msgs = sum(c.get("messages") or 0 for c in convs)
+        firsts = [c["first_sort"] for c in convs if c.get("first_sort")]
+        lasts = [c["last_sort"] for c in convs if c.get("last_sort")]
+        first_sort, last_sort = (min(firsts) if firsts else 0), (max(lasts) if lasts else 0)
+        first_txt = next((c.get("first") or "" for c in convs
+                          if c.get("first_sort") == first_sort), "")
+        last_txt = next((c.get("last") or "" for c in convs if c.get("last_sort") == last_sort), "")
+        if conv_id or convs:
             with_conv += 1
         if n_msgs:
             with_msgs += 1
-        anchor = contact_anchor(contact)
+        if len(convs) > 1:
+            multi_conv += 1
         owner = (' <span class="ownerbadge" title="the account this extraction came from">'
                  'device owner</span>') if contact["is_owner"] else ""
-        if conv_id and conv.get("page"):
-            conv_cell = (f'<a class="openbtn" target="scauto_conv_page" '
-                         f'href="{rel_prefix}Conversations/{_esc(conv["page"])}'
-                         f'#conv-{_esc(conv_id)}" title="open this conversation in its own tab">'
-                         f'{text_html(conv.get("title") or conv_id)} &#9656;</a>'
-                         f'<div class="cid">{_esc(conv_id)}</div>')
+        if convs:
+            lead = convs[0]
+            more = (f' <span class="more" title="in {len(convs) - 1} more conversation(s) — expand '
+                    f'this row to see them all">+{len(convs) - 1}</span>') if len(convs) > 1 else ""
+            if lead.get("page"):
+                conv_cell = (f'<a class="openbtn" target="scauto_conv_page" '
+                             f'href="{rel_prefix}Conversations/{_esc(lead["page"])}'
+                             f'#conv-{_esc(lead["id"])}" title="open this conversation in its own '
+                             f'tab">{text_html(lead.get("title") or lead["id"])} &#9656;</a>{more}'
+                             f'<div class="cid">{_esc(lead["id"])}</div>')
+            else:
+                conv_cell = (f'{text_html(lead.get("title") or lead["id"])}{more}'
+                             f'<div class="cid">{_esc(lead["id"])}</div>')
         elif conv_id:
             # A conversation id from the friends list that the chat database has no messages for:
             # the contact exists, the conversation does not (yet) in this extraction.
@@ -452,6 +577,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
         else:
             legacy_cell = '<span class="muted">&mdash;</span>'
         cells = [
+            "&#9656;",
             text_html(contact["display"]) or '<span class="muted">&mdash;</span>',
             (text_html(contact["username"]) or '<span class="muted">&mdash;</span>') + owner,
             legacy_cell,
@@ -459,33 +585,39 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
                                         'extraction came from">owner</span>'
                                         if contact["is_owner"] else ""),
             conv_cell,
-            str(n_msgs) if conv_id else "",
-            _esc(conv.get("first", "")),
-            _esc(conv.get("last", "")),
+            str(n_msgs) if (conv_id or convs) else "",
+            _esc(first_txt),
+            _esc(last_txt),
         ]
-        searchable = [contact["display"], contact["username"], legacy, contact["user_id"], conv_id,
-                      conv.get("title", "")]
+        searchable = [contact["display"], contact["username"], legacy, contact["user_id"], conv_id]
+        # every conversation id and title the contact is in, so searching an id finds the people in
+        # it — and so a group chat's members are findable from the group's own id
+        searchable += [c["id"] for c in convs] + [c.get("title") or "" for c in convs]
         if contact["is_owner"]:
             searchable.append("device owner")
         rows.append([
             anchor, cells,
             " ".join(s for s in searchable if s).lower(),
-            {"0": contact["display"].lower(), "1": contact["username"].lower(),
-             "2": legacy.lower(), "3": contact["user_id"],
-             "4": (conv.get("title") or conv_id).lower(),
-             "5": n_msgs, "6": conv.get("first_sort") or 0, "7": conv.get("last_sort") or 0},
-            None,
-            {"conv": "y" if conv_id else "n", "msg": "y" if n_msgs else "n",
+            {"1": contact["display"].lower(), "2": contact["username"].lower(),
+             "3": legacy.lower(), "4": contact["user_id"],
+             "5": ((convs[0].get("title") if convs else "") or conv_id).lower(),
+             "6": n_msgs, "7": first_sort, "8": last_sort},
+            chunk_of.get(anchor),
+            {"conv": "y" if (conv_id or convs) else "n", "msg": "y" if n_msgs else "n",
              "owner": "y" if contact["is_owner"] else "n",
-             "legacy": "y" if legacy else "n"},
+             "legacy": "y" if legacy else "n",
+             "multi": "y" if len(convs) > 1 else "n"},
         ])
-    report_ui.write_rows(os.path.join(outdir, "data"), rows)
+    report_ui.write_rows(data_dir, rows)
 
     index_css = """
  .vcells>.vc{font-size:12.5px}
- .vcells>.vc.c3{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
- .vcells>.vc.c5{text-align:right;font-weight:600;color:#2d2d71}
- .vcells>.vc.c6,.vcells>.vc.c7{font-size:11.5px;color:#555}
+ .vcells>.vc.c0{color:#2d2d71;font-weight:700;text-align:center;padding-left:4px;padding-right:4px}
+ .vr.open .vc.c0{color:#8a1f5a}
+ .vcells>.vc.c4{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
+ .vcells>.vc.c6{text-align:right;font-weight:600;color:#2d2d71}
+ .vcells>.vc.c7,.vcells>.vc.c8{font-size:11.5px;color:#555}
+ table.sub td.num{text-align:right;font-weight:600;color:#2d2d71}
  .cid{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#888}
  .legacy{color:#8a1f5a}
  .ownerbadge{background:#2d2d71;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
@@ -496,9 +628,12 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
  .foot{padding:14px 24px;color:#777;font-size:11.5px}
 """
 
-    counts_hint = ("Message and time counts come from the Conversations report for the "
-                   "conversation id on this row; a contact with a conversation id but 0 messages "
-                   "means arroyo.db held no message for that conversation in this extraction.")
+    counts_hint = ("Message and time counts are the total across EVERY conversation this contact "
+                   "takes part in (see the Conversations column), taken from the Conversations "
+                   "report — not just the conversation the friends list names. First / last are the "
+                   "earliest and latest message across those conversations. A contact with a "
+                   "conversation id but 0 messages means arroyo.db held no message for it in this "
+                   "extraction.")
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Snapchat contacts</title>'
@@ -510,7 +645,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'
            f'<header><h1>Snapchat contacts</h1>'
            f'<div class="sum"><b>{len(contacts)}</b> contact(s) &middot; '
-           f'<b>{with_conv}</b> with a conversation id &middot; '
+           f'<b>{with_conv}</b> in a conversation &middot; '
+           f'<b>{multi_conv}</b> in more than one'
+           f'{report_ui.info_icon(MULTI_CONV_NOTE)} &middot; '
            f'<b>{with_msgs}</b> with messages &middot; '
            f'<b>{with_legacy}</b> whose username changed'
            + (f' &middot; times in <b>{_esc(tz_label)}</b>' if tz_label else '') +
@@ -540,6 +677,11 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'Username changed <select id="legacy" onchange="flt()">'
            f'<option value="">any</option><option value="y">yes</option>'
            f'<option value="n">no</option></select></label>'
+           f'<label title="Contacts who take part in more than one conversation — a private '
+           f'conversation and one or more group chats">In several <select id="multi" '
+           f'onchange="flt()"><option value="">any</option>'
+           f'<option value="y">several conversations</option>'
+           f'<option value="n">one or none</option></select></label>'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("contact")}</div>'
            f'<div class="pager" id="pager"></div>'
@@ -547,18 +689,21 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<div class="vc sel"><input type="checkbox" class="selall"'
            f' title="Select / unselect every contact matching the current filters"'
            f' onclick="SCV.selectShown(this.checked)"></div>'
-           f'<div class="vc" onclick="SCV.setSort(0)">Display name'
+           f'<div class="vc nosort" title="expand a row for every conversation this contact is in">'
+           f'</div>'
+           f'<div class="vc" onclick="SCV.setSort(1)">Display name'
            f'{report_ui.info_icon(DISPLAY_NAME_NOTE)} <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(1)">Username'
+           f'<div class="vc" onclick="SCV.setSort(2)">Username'
            f'{report_ui.info_icon(USERNAME_NOTE)} <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(2)">Legacy username'
+           f'<div class="vc" onclick="SCV.setSort(3)">Legacy username'
            f'{report_ui.info_icon(LEGACY_NOTE)} <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(3)">User ID'
+           f'<div class="vc" onclick="SCV.setSort(4)">User ID'
            f'{report_ui.info_icon(USER_ID_NOTE)} <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(4)">Conversation <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(5)">Msgs <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(6)">First message <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(7)">Last message <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(5)">Conversations'
+           f'{report_ui.info_icon(MULTI_CONV_NOTE)} <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(6)">Msgs <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(7)">First message <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(8)">Last message <span class="ar">&#8597;</span></div>'
            f'</div></div>'
            f'<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div>'
            f'<div class="vwin" id="vwin"></div></div>'
@@ -570,12 +715,13 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            'var flt_t=0;'
            'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
-           f'empty:"vempty",pager:"pager",pageSize:500,selKind:"ct",sort:5,sortDir:-1,'
-           f'rowHeight:{CT_ROW_H},cols:"{CT_COLS}",detailBase:null,'
+           f'empty:"vempty",pager:"pager",pageSize:500,selKind:"ct",sort:6,sortDir:-1,'
+           f'rowHeight:{CT_ROW_H},estDetail:200,cols:"{CT_COLS}",detailBase:"data/detail-",'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var c=document.getElementById("conv").value,'
-           'g=document.getElementById("msg").value,l=document.getElementById("legacy").value;'
-           'return (!c||m.conv===c)&&(!g||m.msg===g)&&(!l||m.legacy===l)'
+           'g=document.getElementById("msg").value,l=document.getElementById("legacy").value,'
+           'x=document.getElementById("multi").value;'
+           'return (!c||m.conv===c)&&(!g||m.msg===g)&&(!l||m.legacy===l)&&(!x||m.multi===x)'
            '&&(!document.getElementById("selonly").checked||SCSel.get("ct",r[0]));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
@@ -584,7 +730,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            'n===t?(n+" contacts"):(n+" of "+t+" shown");},'
            'reset:function(){document.getElementById("q").value="";'
            'document.getElementById("conv").value="";document.getElementById("msg").value="";'
-           'document.getElementById("legacy").value="";'
+           'document.getElementById("legacy").value="";document.getElementById("multi").value="";'
            'document.getElementById("selonly").checked=false;}});'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
