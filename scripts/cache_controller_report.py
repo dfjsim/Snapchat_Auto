@@ -46,9 +46,10 @@ from scripts.data import sniff
 from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, _collapse_part_paths, guess_media,
-    poster_within, _scope_user, _UUID_RE, _SC_SPLIT_RE,
+    has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE,
 )
 from scripts.data import ffmpeg_log
+from scripts.data import poster_worker
 
 try:
     import blackboxprotobuf                                    # already a project dependency
@@ -577,21 +578,27 @@ POSTER_BASIS = (
     "can be read at a glance. Open the video itself for the content.")
 
 
-def publish_posters(entries, files_dir, get_view=None):
+def publish_posters(entries, files_dir, get_view=None,
+                    file_timeout=poster_worker.FILE_TIMEOUT_S, budget=poster_worker.BUDGET_S):
     """Extract a poster frame beside every published video: ``files/<name>_poster.jpg``.
 
     Sets ``entry["poster"]`` (a URL relative to the report) on each entry that gets one and returns
-    how many were made. A poster left by an earlier run into the same folder is reused rather than
-    re-extracted, which is what keeps a re-run into an existing report folder cheap.
+    ``(made, skipped)``. A poster left by an earlier run into the same folder is reused rather than
+    re-extracted, which keeps a re-run into an existing report folder cheap.
 
-    ``complete=False`` is not a guess about these files, it is the only safe setting for them: a
-    cache holds whatever byte ranges the device streamed, so a cached video is routinely truncated.
-    Seeking to one second in a truncated file fails and costs a full re-read of it — measured at
-    minutes on a single multi-megabyte partial video, which stalled the whole report. Reading
-    forward from the start is bounded and works on complete and partial files alike; the frame is a
-    thumbnail, labelled as derived, so which frame it is does not matter evidentially.
+    The work runs in a **killable subprocess**, one video at a time, because a cached video that
+    cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of them
+    does. The worker announces each file before it starts, so when it stops answering the parent
+    knows which file to skip and restarts it on the rest. Nothing is ever merely abandoned: see
+    :mod:`scripts.data.poster_worker` for what abandoning it cost.
+
+    ``complete=False`` (set by the worker) is the only safe setting here: a cache holds whatever
+    byte ranges the device streamed, so a cached video is routinely truncated, and seeking to one
+    second in a truncated file fails *and* costs a full re-read. Reading forward from the start
+    works on complete and partial files alike; the frame is a labelled thumbnail, so which frame it
+    is does not matter evidentially.
     """
-    made, tried, skipped = 0, 0, 0
+    jobs = []
     for entry in entries:
         view = (get_view(entry) if get_view else entry.get("view")) or ""
         ext = (entry.get("view_ext") or entry.get("ext") or "").lower()
@@ -603,25 +610,28 @@ def publish_posters(entries, files_dir, get_view=None):
             continue
         poster = os.path.splitext(name)[0] + "_poster.jpg"
         dst = os.path.join(files_dir, poster)
-        if os.path.exists(dst):
+        if os.path.exists(dst):                                # left by an earlier run
             entry["poster"] = "files/" + poster
             continue
-        tried += 1
-        if poster_within(src, dst, complete=False):
-            entry["poster"] = "files/" + poster
+        if not has_video_track(src):                           # audio or a still: no frame exists
+            continue
+        jobs.append((src, dst, entry, "files/" + poster))
+    if not jobs:
+        return 0, 0
+
+    # complete=False: a cache holds whatever byte ranges the device streamed, so seeking into a
+    # cached video regularly lands past the bytes that are there.
+    done, stderr_chunks = poster_worker.run_jobs([(j[0], j[1], False) for j in jobs],
+                                                 file_timeout, budget)
+    # "moov atom not found" here means the device cached only part of that video — a finding, so
+    # FFmpeg's chatter is summarised into the log rather than dropped on the floor.
+    ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
+    made = 0
+    for src, _dst, entry, rel in jobs:
+        if done.get(src):
+            entry["poster"] = rel
             made += 1
-        else:
-            skipped += 1
-    if skipped:
-        logger.debug(f"{skipped} cached video(s) produced no poster (audio-only container, "
-                     f"undecodable, or the extraction exceeded its time bound)")
-    if tried:
-        # "moov atom not found" here means the device cached only part of that video — a finding,
-        # so FFmpeg's chatter is summarised into the log rather than dropped on the floor.
-        from scripts.memories_media_report import _FFMPEG_OUTPUT
-        ffmpeg_log.log_summary(_FFMPEG_OUTPUT, "poster-frame extraction from cached video", logger)
-        _FFMPEG_OUTPUT.clear()
-    return made
+    return made, len(jobs) - made
 
 
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
@@ -1910,10 +1920,12 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
-    posters = publish_posters(all_entries, os.path.join(outdir, "files"))
-    if posters:
+    posters, no_poster = publish_posters(all_entries, os.path.join(outdir, "files"))
+    if posters or no_poster:
         logger.info(f"  {posters} poster frame(s) extracted from cached video (derived thumbnails, "
-                    f"labelled as such in the report)")
+                    f"labelled as such in the report)"
+                    + (f"; {no_poster} cached video(s) could not be decoded and are listed without "
+                       f"one" if no_poster else ""))
     # for entries whose cached bytes are encrypted, point at the copy the Memories report decrypted
     for e in all_entries:
         e["decrypted"] = memory_media.get(e["cache_key"].lower(), [])

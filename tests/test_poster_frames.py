@@ -8,10 +8,13 @@ the examiner their report.
 
 Every input is synthetic. No extraction data is required or used.
 """
+import os
+import subprocess
+import sys
 import time
 
 from scripts import memories_media_report as memories_report
-from scripts.data import sniff
+from scripts.data import poster_worker, sniff
 
 
 def _iso_bmff(tmp_path, name, brand):
@@ -44,30 +47,118 @@ def test_an_unreadable_file_is_left_to_the_decoder(tmp_path):
     assert memories_report.has_video_track(missing)
 
 
-def test_poster_within_gives_up_instead_of_blocking(monkeypatch, tmp_path):
-    """A read that never returns must cost the time bound, not the run."""
-    monkeypatch.setattr(memories_report, "generate_poster",
-                        lambda *a, **k: time.sleep(30) or True)
+# ------------------------------------------------------------------ the pass survives a hung file
+
+def _fake_worker(tmp_path, script):
+    """A stand-in worker process, so the contract can be tested without OpenCV or a real video."""
+    path = tmp_path / "fake_worker.py"
+    path.write_text(script, encoding="utf-8")
+    return [sys.executable, str(path)]
+
+
+HANGS_ON_SECOND = """
+import sys, time
+for line in sys.stdin:
+    src = line.split("\\t")[0]
+    sys.stdout.write("START %s\\n" % src); sys.stdout.flush()
+    if src.endswith("b"):
+        time.sleep(600)                      # the file that blocks the decoder for good
+    sys.stdout.write("OK %s\\n" % src); sys.stdout.flush()
+"""
+
+
+def test_a_hung_file_is_skipped_and_the_rest_still_run(monkeypatch, tmp_path):
+    """The whole point: one undecodable video costs its timeout, not the pass."""
+    monkeypatch.setattr(poster_worker, "_spawn",
+                        lambda: subprocess.Popen(_fake_worker(tmp_path, HANGS_ON_SECOND),
+                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE, text=True, bufsize=1))
+    jobs = [(n, n + ".jpg", False) for n in ("a", "b", "c")]
     started = time.monotonic()
-    got = memories_report.poster_within(_iso_bmff(tmp_path, "v.mp4", b"isom"),
-                                        str(tmp_path / "out.jpg"), timeout=0.2)
-    assert got is False
-    assert time.monotonic() - started < 5
+    results, _ = poster_worker.run_jobs(jobs, file_timeout=0.5, budget=30)
+    elapsed = time.monotonic() - started
+
+    assert results.get("a") is True                 # before the hang
+    assert "b" not in results                       # the hung one is skipped, not waited out
+    assert results.get("c") is True                 # after it — the worker was restarted
+    assert elapsed < 20                             # it cost the timeout, not ten minutes
 
 
-def test_poster_within_returns_the_frame_when_extraction_finishes(monkeypatch, tmp_path):
-    monkeypatch.setattr(memories_report, "generate_poster", lambda *a, **k: True)
-    assert memories_report.poster_within(_iso_bmff(tmp_path, "v.mp4", b"isom"),
-                                         str(tmp_path / "out.jpg"), timeout=5) is True
+def test_the_budget_stops_a_pass_that_would_run_too_long(monkeypatch, tmp_path):
+    """A case where most of the cached video is undecodable must not hold the report."""
+    monkeypatch.setattr(poster_worker, "_spawn",
+                        lambda: subprocess.Popen(_fake_worker(tmp_path, HANGS_ON_SECOND),
+                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE, text=True, bufsize=1))
+    jobs = [("b", "b.jpg", False)] * 50             # every one of them hangs
+    started = time.monotonic()
+    poster_worker.run_jobs(jobs, file_timeout=0.4, budget=2.0)
+    assert time.monotonic() - started < 25          # bounded by the budget, not by 50 x timeout
 
 
-def test_poster_within_skips_audio_without_starting_a_thread(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(memories_report, "generate_poster",
-                        lambda *a, **k: calls.append(1) or True)
-    assert memories_report.poster_within(_iso_bmff(tmp_path, "a.mp4", b"M4A "),
-                                         str(tmp_path / "out.jpg")) is False
-    assert not calls
+ECHOES_THE_PATH = """
+import os, sys
+for line in sys.stdin:
+    src, dst = line.rstrip("\\n").split("\\t")[:2]
+    sys.stdout.write("START %s\\n" % src); sys.stdout.flush()
+    # the worker runs from a different directory than the caller, so it can only find the file if
+    # the path it was given was resolved before it was sent
+    sys.stdout.write("%s %s\\n" % ("OK" if os.path.isfile(src) else "NO", src)); sys.stdout.flush()
+"""
+
+
+def test_relative_paths_reach_the_worker_as_the_caller_meant_them(monkeypatch, tmp_path):
+    """The worker's working directory is not the caller's, so a relative path is a different file.
+
+    The reports pass paths relative to the run folder ("./Reports/CacheController/files/x.mp4"),
+    and against the worker's own directory those resolve to nothing at all — every video silently
+    got no thumbnail.
+    """
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"\x00" * 16)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(poster_worker, "_spawn",
+                        lambda: subprocess.Popen(_fake_worker(tmp_path, ECHOES_THE_PATH),
+                                                 cwd=str(tmp_path.parent),   # not the caller's cwd
+                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE, text=True, bufsize=1))
+
+    results, _ = poster_worker.run_jobs([("clip.mp4", "clip.jpg", False)], file_timeout=10,
+                                        budget=30)
+    assert results == {"clip.mp4": True}, "a relative path did not survive the trip to the worker"
+
+
+def test_a_packaged_build_re_enters_itself_rather_than_looking_for_python(monkeypatch):
+    """sys.executable is the application in a build — "-m" there would start a GUI per video."""
+    monkeypatch.setattr(sys, "executable", r"C:\Program Files\Snapchat Auto\Snapchat_Auto.exe")
+    command, cwd = poster_worker._worker_command()
+    assert command[1:] == ["--poster-worker"]
+    assert "-m" not in command
+
+    monkeypatch.setattr(sys, "executable", r"C:\Python314\python.exe")
+    command, cwd = poster_worker._worker_command()
+    assert command[1:] == ["-m", "scripts.data.poster_worker"]
+    assert cwd and os.path.isdir(cwd)
+
+
+def test_the_pass_leaves_no_worker_behind(monkeypatch, tmp_path):
+    """Abandoned work is what made a run take 82 minutes and exit 120 — nothing may survive."""
+    spawned = []
+    real_spawn = poster_worker._spawn
+
+    def spy():
+        proc = subprocess.Popen(_fake_worker(tmp_path, HANGS_ON_SECOND),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1)
+        spawned.append(proc)
+        return proc
+
+    monkeypatch.setattr(poster_worker, "_spawn", spy)
+    poster_worker.run_jobs([("a", "a.jpg", False), ("b", "b.jpg", False)],
+                           file_timeout=0.4, budget=10)
+    assert spawned
+    for proc in spawned:
+        assert proc.poll() is not None, "a worker was left running"
 
 
 # --------------------------------------------------------------- what the container actually holds
