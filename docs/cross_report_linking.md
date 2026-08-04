@@ -70,6 +70,23 @@ below) — so the `cf-…` anchor is taken from the manifest rather than assumed
 virtualized table, and working on repeat clicks into an already-open tab) is documented in
 [report_ui.md](report_ui.md#cross-report-navigation-nav_js).
 
+### When the target is several rows: `#find=`
+
+Some associations are one-to-many — the same cached content under several paths, one pack stored as
+a series of chunk files, one `CACHE_KEY` matching several `Library/Caches` copies. Those links use
+`#find=<token>[|<token>…]` instead of an anchor: the receiving report filters itself to the tokens
+and expands **every** match, so the examiner sees the whole set rather than whichever row the link
+happened to name. Built with `report_ui.find_fragment`; see
+[report_ui.md](report_ui.md#links-whose-target-is-a-set-of-rows-find). Used by:
+
+| From | To | Tokens | When |
+|---|---|---|---|
+| cache_controller | Cached media | the entry's `CACHE_KEY` | it matches ≥ 2 `Library/Caches` files |
+| Cached media | cache_controller | every linked `CACHE_KEY` | the file matches ≥ 2 cache entries |
+| Memories (detail) | Cached media | the pack's item hash | always — a pack is many chunk files |
+
+A single-target link stays a plain `#anchor`, which highlights the row it lands on.
+
 ## The links, and how each is derived
 
 ### cache_controller → Memory
@@ -96,8 +113,14 @@ sub-page (`pages/<key>.html#mem-<ZSNAPID>`). Both open in the `scauto_memories` 
 ### Memory → cache_controller
 Per recovered media file, the Memory report links to `#ck-<CACHE_KEY>` **only when that key is
 present in `cache_controller.db`** (`all_cache_keys`). The key is the one used to locate the file:
-either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target. (`caching-media`
-`.pack` files are *not* indexed by `cache_controller.db`, so they get no such link.)
+either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target.
+
+### Memory → Cached media (Library/Caches)
+`caching-media` `.pack` files are *not* indexed by `cache_controller.db`, so the report that
+inventories their bytes on disk is the Library/Caches one. Each such file links there with
+`#find=<item hash>` — a pack is stored as a numbered series of `.pack` chunks, i.e. several rows,
+so the link filters that report to the pack and expands all of its chunks
+(`PACK_IN_CACHEMEDIA_BASIS`).
 
 ### cache_controller → the chat report
 The chat report writes `cache_links.json` with **two** indexes over the attachments it rendered.

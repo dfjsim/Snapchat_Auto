@@ -153,12 +153,12 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
     # the reports, so navigating between reports reuses one tab per report instead of piling up new
     # ones. Ctrl/Shift/middle-click still force a new tab/window (browser default).
     reports = [
+        ("Contacts", f"{reports_subdir}/Contacts/Contacts_report.html",
+         "Every contact recovered from the friends artifact, linked to their conversation(s).",
+         "scauto_contacts"),
         ("Conversations", f"{reports_subdir}/Conversations/Conversations_report.html",
          "Every conversation, with a detail page per conversation: messages, senders, timestamps "
          "and cached chat media.", "scauto_convs"),
-        ("Contacts", f"{reports_subdir}/Contacts/Contacts_report.html",
-         "Every contact recovered from the friends artifact, linked to their conversation.",
-         "scauto_contacts"),
         ("Memories", f"{reports_subdir}/Memories/Memories_report.html",
          "Snapchat Memories with all associated media (SCContent + caching-media) and geolocation.",
          "scauto_memories"),

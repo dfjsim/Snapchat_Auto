@@ -6,18 +6,55 @@ One table, one row per contact:
 
 | Column | |
 |---|---|
+| ▸ | expands the row: every conversation this contact is in, and their identifiers |
 | Display name | as recovered, emoji included |
 | Username | with a **device owner** badge on the account the extraction came from |
 | Legacy username | the username this contact used *before* changing it, when the device recorded one |
 | User ID | the permanent UUID, badged again for the device owner |
-| Conversation | a link to that contact's conversation detail page, plus the conversation id |
-| Msgs | how many messages that conversation holds |
-| First / Last message | in the report's timezone |
+| Conversations | the first conversation, `+N` for the rest, plus the conversation id |
+| Msgs | messages across **all** of them |
+| First / Last message | earliest and latest across all of them, in the report's timezone |
 
 It is the shared virtual table (search, per-column sort, paging, row selection —
 [report_ui.md](report_ui.md)), so it stays instant on a device that knows thousands of
 Snapchatters. This is also where the Conversations report's participant chips and sender links
 land, because this row is where a contact's identifiers all appear together.
+
+## A contact is in more than one conversation
+
+The friends artifact records **one** `CONVERSATION_ID` against a contact — their private
+conversation with this device. That is not the only conversation they take part in: every group chat
+they are a member of is another one, and a report that shows the first was hiding the rest.
+
+`contact_conversations` therefore **inverts** the Conversations report's participant lists (which
+travel in `conversation_index` as plain values for this purpose): a contact belongs to every
+conversation whose participant list carries their user id. The expanded row lists them all with
+their conversation ids, message counts and first/last times, and each says which of the two made
+the association:
+
+| Listed because | Meaning |
+|---|---|
+| from the friends list | the `CONVERSATION_ID` the friends artifact records against this contact |
+| participant list carries this user ID | `arroyo.db user_conversation` (or the groups list) carries it |
+
+### Matched on the user id, and nothing else
+
+Only the permanent user id is compared. A display name is set locally by this device's user and two
+accounts can share one; a username can be changed and the old one taken by somebody else. Matching
+on either would put a conversation on a person's row on the strength of a name — a false
+attribution, and the worst kind, because it is indistinguishable from a true one.
+
+The cost is accepted deliberately: a contact whose user id was never recovered is listed **only**
+with the conversation the friends artifact names, even if a participant list mentions their
+username. An incomplete answer is recoverable by an examiner; a wrong one is not.
+
+The **In several** filter selects contacts with more than one. Verified on the two-account iOS 16
+test device, where the device owner is a participant in all three of its conversations and used to
+be shown with one.
+
+The device owner is listed by the same rule as anyone else — membership as the artifacts record it.
+No conversation is attributed to them merely because it is on their device: that would be the tool
+asserting a fact no artifact states.
 
 ## Three or four identifiers, and what each is worth
 

@@ -44,6 +44,31 @@ index and the detail pages load it with `<script src>` / `<link href>`.
   search string (cache key, every `EXTERNAL_KEY`, user ids, hashes, on-disk filenames, linked
   Memory/conversation ids …). Filters, sorting and the "expand all" button all work on the full
   row set, not just what is on screen.
+* **A query is OR-ed on `|`.** `a|b` matches a row containing either; a query with no `|` behaves
+  exactly as a plain substring search always did. This exists for `#find=` links (below) but is
+  usable by hand, and the search box's tooltip says so.
+
+## Links whose target is a set of rows (`#find=`)
+
+One entry in one report is regularly **several** rows in another: the same cached bytes sit under
+more than one path, one pack is stored as a numbered series of chunk files, one Memory owns many
+cached files. An `#anchor` reaches only the first of them and a chip per row makes the cell
+unreadable, so those links carry every target instead:
+
+```
+CacheMedia_report.html#find=<CACHE_KEY>
+CacheController_report.html#find=<CACHE_KEY>|<CACHE_KEY>|…
+```
+
+`report_ui.find_fragment(tokens)` builds the fragment (de-duplicated, percent-encoded, joined with
+`|`); `NAV_JS` routes it to `SCV.findAll`, which clears the filters, puts the tokens in the search
+box, refilters and **expands every match**. What the examiner lands on is the complete set, with the
+query that produced it visible — clearing the box restores the full report. Each token must be
+something the target rows carry in their search text (a `CACHE_KEY`, a snap id, a pack item hash).
+
+`reset` (the config callback `findAll` and `goTo` both use) means *stop hiding anything*, not
+"restore the defaults" — the Library/Caches report hides app assets by default, and a `reset` that
+re-hid them left every link to an app-asset row landing on nothing.
 
 Measured on a synthetic 101 200-row cache_controller index (Chrome, `file://`):
 

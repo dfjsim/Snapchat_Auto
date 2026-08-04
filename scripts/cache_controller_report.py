@@ -46,8 +46,9 @@ from scripts.data import sniff
 from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, _collapse_part_paths, guess_media,
-    _scope_user, _UUID_RE, _SC_SPLIT_RE,
+    poster_within, _scope_user, _UUID_RE, _SC_SPLIT_RE,
 )
+from scripts.data import ffmpeg_log
 
 try:
     import blackboxprotobuf                                    # already a project dependency
@@ -560,6 +561,64 @@ def publish_view(paths, files_dir, name_base, ext, total, max_reconstruct_bytes)
         return None, f"{ext}, {_fmt_bytes(total)} — could not be reconstructed"
 
 
+# Extensions worth a still frame. A play button says "this is a video"; a frame says which video —
+# without one, a page of cached video tells the examiner nothing about any of it.
+POSTER_EXTS = ("mp4", "mov", "m4v", "webm")
+
+POSTER_BASIS = (
+    "This still is DERIVED by this tool from the video next to it (OpenCV, the frame at about one "
+    "second, or the first frame that decodes when the cached video is incomplete). It is not data "
+    "from the device and carries no evidential weight of its own — it is a thumbnail so the index "
+    "can be read at a glance. Open the video itself for the content.")
+
+
+def publish_posters(entries, files_dir, get_view=None):
+    """Extract a poster frame beside every published video: ``files/<name>_poster.jpg``.
+
+    Sets ``entry["poster"]`` (a URL relative to the report) on each entry that gets one and returns
+    how many were made. A poster left by an earlier run into the same folder is reused rather than
+    re-extracted, which is what keeps a re-run into an existing report folder cheap.
+
+    ``complete=False`` is not a guess about these files, it is the only safe setting for them: a
+    cache holds whatever byte ranges the device streamed, so a cached video is routinely truncated.
+    Seeking to one second in a truncated file fails and costs a full re-read of it — measured at
+    minutes on a single multi-megabyte partial video, which stalled the whole report. Reading
+    forward from the start is bounded and works on complete and partial files alike; the frame is a
+    thumbnail, labelled as derived, so which frame it is does not matter evidentially.
+    """
+    made, tried, skipped = 0, 0, 0
+    for entry in entries:
+        view = (get_view(entry) if get_view else entry.get("view")) or ""
+        ext = (entry.get("view_ext") or entry.get("ext") or "").lower()
+        if not view or entry.get("view_is_image") or ext not in POSTER_EXTS:
+            continue
+        name = os.path.basename(view)
+        src = os.path.join(files_dir, name)
+        if not os.path.isfile(src):
+            continue
+        poster = os.path.splitext(name)[0] + "_poster.jpg"
+        dst = os.path.join(files_dir, poster)
+        if os.path.exists(dst):
+            entry["poster"] = "files/" + poster
+            continue
+        tried += 1
+        if poster_within(src, dst, complete=False):
+            entry["poster"] = "files/" + poster
+            made += 1
+        else:
+            skipped += 1
+    if skipped:
+        logger.debug(f"{skipped} cached video(s) produced no poster (audio-only container, "
+                     f"undecodable, or the extraction exceeded its time bound)")
+    if tried:
+        # "moov atom not found" here means the device cached only part of that video — a finding,
+        # so FFmpeg's chatter is summarised into the log rather than dropped on the floor.
+        from scripts.memories_media_report import _FFMPEG_OUTPUT
+        ffmpeg_log.log_summary(_FFMPEG_OUTPUT, "poster-frame extraction from cached video", logger)
+        _FFMPEG_OUTPUT.clear()
+    return made
+
+
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                        max_reconstruct_bytes=1024 * 1024 * 1024):
     """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 and
@@ -930,7 +989,13 @@ TYPE_LABELS = {1: "file", 2: "sharded", 3: "bundle"}
 # Index-table geometry. The virtual table draws fixed-height rows, so the column track list is
 # shared by the header and every row, and cells that overflow are clipped (the full value is always
 # in the row's detail).
-CC_COLS = ("24px 118px 260px 96px minmax(150px,1fr) 66px 82px 132px minmax(180px,300px)")
+# Column order shared with the Library/Caches report (see CM_COLS): toggle, category, what
+# identifies the file, its context, then type / size / the file itself / links. The two reports
+# describe the same kind of thing and used to lay it out differently, which made moving between
+# them a re-orientation every time.
+# Category is wide enough for its badges: the row is a fixed height, so a third line of content was
+# not clipped away but sliced through the middle — which is how a "?" icon came out cut in half.
+CC_COLS = ("24px 152px 260px minmax(150px,1fr) 96px 66px 82px 132px minmax(180px,300px)")
 CC_ROW_H = 46
 
 
@@ -1067,6 +1132,13 @@ def _decrypted_basis(entry):
             "shown above.")
 
 
+MULTI_TARGET_BASIS = (
+    "This entry corresponds to SEVERAL rows in the linked report, so the link opens that report "
+    "filtered to this entry's identifier with every matching row expanded, rather than jumping to "
+    "one of them. What you land on is the complete set of matches — the search box shows the query "
+    "that produced it, and clearing it restores the full report.")
+
+
 def _links_html(entry, rel_prefix, compact=False):
     """Cross-report link chips (Memory / chat) plus the on-disk found/missing chip.
 
@@ -1103,11 +1175,23 @@ def _links_html(entry, rel_prefix, compact=False):
         label = f' {_esc(name)} msg {_esc(smid)}' if name else ""
         chips.append(f'<a class="chip chat" target="{target}" href="{url}">'
                      f'💬 Chat{label}</a>' + why(ch.get("basis")))
-    # a copy of these bytes found under Library/Caches by the cached-media report
-    for cm in (entry.get("cache_media") or [])[:2]:
+    # A copy of these bytes found under Library/Caches by the cached-media report. The same cached
+    # content routinely sits under several paths there, so when there is more than one the chip is
+    # ONE link that opens that report filtered to this CACHE_KEY with every match expanded — the
+    # complete set — instead of a chip per row, or a chip that silently shows only the first.
+    cms = entry.get("cache_media") or []
+    if len(cms) == 1:
         chips.append(f'<a class="chip cm" target="scauto_cachemedia" '
-                     f'href="{rel_prefix}CacheMedia/CacheMedia_report.html#{_esc(cm["anchor"])}">'
-                     f'🗂 Library/Caches</a>' + why(cm.get("basis")))
+                     f'href="{rel_prefix}CacheMedia/CacheMedia_report.html#{_esc(cms[0]["anchor"])}">'
+                     f'🗂 Library/Caches</a>' + why(cms[0].get("basis")))
+    elif cms:
+        chips.append(f'<a class="chip cm" target="scauto_cachemedia" '
+                     f'href="{rel_prefix}CacheMedia/CacheMedia_report.html'
+                     f'{report_ui.find_fragment([entry["cache_key"]])}" '
+                     f'title="open the Library/Caches report filtered to this CACHE_KEY, with all '
+                     f'{len(cms)} matching file(s) expanded">'
+                     f'🗂 Library/Caches ({len(cms)})</a>'
+                     + why(MULTI_TARGET_BASIS + " " + (cms[0].get("basis") or "")))
     if not compact:
         if entry["on_disk"]["found"]:
             chips.append('<span class="chip ok">📁 on disk</span>' + why(_on_disk_basis(entry)))
@@ -1132,6 +1216,13 @@ def _file_cell(entry, rel_prefix):
                     f'title="open the cached {_esc(ext)}">'
                     f'<img src="{_esc(entry["view"])}" loading="lazy">'
                     f'<span class="lbl">{_esc(ext)}</span></a>')
+        if entry.get("poster"):
+            # the still is this tool's own frame, not device data — POSTER_BASIS says so on the row
+            return (f'<a class="filebtn img vid" href="{_esc(entry["view"])}" target="_blank" '
+                    f'title="open the cached {_esc(ext)} (the still is a frame extracted by this '
+                    f'tool, not a cached file)">'
+                    f'<img src="{_esc(entry["poster"])}" loading="lazy">'
+                    f'<span class="lbl">▶ {_esc(ext)}</span></a>')
         return (f'<a class="filebtn play" href="{_esc(entry["view"])}" target="_blank" '
                 f'title="open the cached {_esc(ext)}">▶ <span class="lbl">{_esc(ext)}</span></a>')
     dec = (entry.get("decrypted") or [])
@@ -1336,7 +1427,15 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
                 hview.append(f"<a href='{_esc(e['view'])}' target='_blank'>"
                              f"<img class='cacheview' src='{_esc(e['view'])}' loading='lazy'></a>{note}")
             else:
-                hview.append(f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>▶ view cached file</a>{note}")
+                # the poster is this tool's own frame; it is shown as a way in to the video, and
+                # says so, so it can never be mistaken for a cached file of the device's
+                poster = (f"<a href='{_esc(e['view'])}' target='_blank'>"
+                          f"<img class='cacheview' src='{_esc(e['poster'])}' loading='lazy'></a>"
+                          f"<div class='muted'>poster frame extracted by this tool from the cached "
+                          f"video — a derived image, not a cached file{_info(POSTER_BASIS)}</div>"
+                          if e.get("poster") else "")
+                hview.append(poster + f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>"
+                                      f"▶ view cached file</a>{note}")
         elif e.get("view_note"):                               # recognized media too large to embed
             hview.append(f"<div class='muted'>▶ {_esc(e['view_note'])}</div>")
         parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present</div>"
@@ -1469,15 +1568,20 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
         users = ", ".join(u[:8] + "…" for u in e["users"])
         # cells carry as little markup as possible — per-column styling is in the CSS (.vc.cN),
         # because every byte here is multiplied by the number of cache entries in data/index.js
+        # The badges (and the "?" that explains them) are kept on one line with each other so the
+        # cell is at most two lines tall: a third line does not fit the fixed row height and is cut
+        # through the middle, which is what sliced the "?" icon in half.
+        badges = (_wal_badge(e.get("wal"))
+                  + (f'<span class="walbadge changed">changed</span>{_info(META_PRIOR_BASIS)}'
+                     if e.get("meta_prior") else ""))
         cells = [
             "▸",
             (f'<span class="orphanbadge">{_esc(e["category"])}</span>' if e.get("orphan")
-             else _esc(e["category"])) + _wal_badge(e.get("wal"))
-            + (f'<span class="walbadge changed">changed</span>{_info(META_PRIOR_BASIS)}'
-               if e.get("meta_prior") else ""),
+             else _esc(e["category"]))
+            + (f'<span class="badges">{badges}</span>' if badges else ""),
             _esc(e["cache_key"]),
-            _esc(users),
             _external_key_summary(e["claims"]),
+            _esc(users),
             _esc(type_lbl),
             _fmt_bytes(eff_size),
             _file_cell(e, rel_prefix) + (" <span class='xwarn' title='a copy sits in another "
@@ -1509,8 +1613,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
         rows.append([
             anchor, cells,
             " ".join(s for s in searchable if s).lower(),
-            {"1": e["category"], "2": e["cache_key"], "3": users,
-             "4": _external_key_summary(e["claims"]), "5": type_lbl, "6": eff_size,
+            {"1": e["category"], "2": e["cache_key"],
+             "3": _external_key_summary(e["claims"]), "4": users, "5": type_lbl, "6": eff_size,
              "7": ("2" if e.get("view") else "1" if e["on_disk"]["found"] else "0")},
             chunk_of.get(anchor),
             {"cat": e["category"], "disk": disk,
@@ -1559,8 +1663,13 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  /* per-column styling for the index rows (keeps the row data in data/index.js markup-free) */
  .vcells>.vc.c0{{color:#2d2d71;font-weight:700}} .vr.open .vc.c0{{color:#8a1f5a}}
  .vcells>.vc.c2{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#33367a}}
- .vcells>.vc.c3{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}}
- .vcells>.vc.c4{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;overflow-wrap:anywhere}}
+ .vcells>.vc.c3{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;overflow-wrap:anywhere}}
+ .vcells>.vc.c4{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}}
+ /* The row is a fixed height, so a line that does not fit is cut through the middle rather than
+    dropped — which is how the "?" beside a badge came out sliced. Keeping the badges on one line
+    of their own holds this cell to two lines, and the line box is sized so two of them fit. */
+ .vcells>.vc.c1{{line-height:15px}}
+ .vcells>.vc.c1 .badges{{display:block;white-space:nowrap;margin-top:1px}}
  .filebtn{{display:inline-flex;align-items:center;gap:5px;text-decoration:none;font-weight:700;
    font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:6px;
    padding:2px 7px;max-width:100%}}
@@ -1634,7 +1743,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 {report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
 <div class="toolbar">
- <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, URL, user…" oninput="flt()">
+ <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, URL, user…"
+   title="Separate several terms with | to match any of them — that is what a cross-report link
+with more than one target fills in here." oninput="flt()">
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
@@ -1666,8 +1777,8 @@ counted as encrypted.">Encrypted <select id="enc" onchange="flt()"><option value
  <div class="vc nosort"></div>
  <div class="vc" onclick="SCV.setSort(1)">Category <span class="ar">↕</span></div>
  <div class="vc" onclick="SCV.setSort(2)">CACHE_KEY <span class="ar">↕</span></div>
- <div class="vc" onclick="SCV.setSort(3)">User <span class="ar">↕</span></div>
- <div class="vc" onclick="SCV.setSort(4)">EXTERNAL_KEY <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(3)">EXTERNAL_KEY <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(4)">User <span class="ar">↕</span></div>
  <div class="vc" onclick="SCV.setSort(5)">Type <span class="ar">↕</span></div>
  <div class="vc" onclick="SCV.setSort(6)">Size <span class="ar">↕</span></div>
  <div class="vc" onclick="SCV.setSort(7)">File <span class="ar">↕</span></div>
@@ -1789,6 +1900,10 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
+    posters = publish_posters(all_entries, os.path.join(outdir, "files"))
+    if posters:
+        logger.info(f"  {posters} poster frame(s) extracted from cached video (derived thumbnails, "
+                    f"labelled as such in the report)")
     # for entries whose cached bytes are encrypted, point at the copy the Memories report decrypted
     for e in all_entries:
         e["decrypted"] = memory_media.get(e["cache_key"].lower(), [])

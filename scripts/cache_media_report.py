@@ -55,8 +55,8 @@ from scripts.memories_media_report import (
     guess_media, url_token, _UUID_RE,
 )
 from scripts.cache_controller_report import (
-    find_cache_controllers, publish_view, load_chat_links, load_memory_index, load_memory_pages,
-    load_memory_packs, _fmt_bytes, _esc, _info,
+    find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
+    load_memory_pages, load_memory_packs, POSTER_BASIS, _fmt_bytes, _esc, _info,
 )
 
 try:
@@ -891,11 +891,16 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
     # 0. a caching-media pack the Memories report decrypted. Its name is an opaque hash indexed by
     #    no database, so this manifest is the only thing that can attribute it — and without it
     #    every pack showed here as a padlock with no link, despite having been fully decrypted.
+    #    The decrypted file itself is carried on the link so this report can SHOW it: saying "the
+    #    Memories report decoded this" while displaying a padlock reads as "not recovered", which
+    #    is the opposite of what happened to these bytes.
     for item_key, media in _pack_keys(entry, packs or {}):
         for rec in media[:2]:
             links.append({
                 "kind": "memory", "snap_id": rec["snap_id"],
                 "page": memory_pages.get(rec["snap_id"]),
+                "media_path": rec.get("path", ""), "media_ext": rec.get("ext", ""),
+                "media_role": rec.get("role", ""), "media_bytes": rec.get("bytes", 0),
                 "basis": (f"The Memories report decrypted this caching-media pack ({item_key}) with "
                           f"the AES-256-CBC key of Memory {rec['snap_id']} and recovered "
                           f"{rec.get('ext', '')} media from it. Pack filenames are opaque hashes "
@@ -1132,20 +1137,62 @@ def publish_entries(entries, files_dir):
 
 # --------------------------------------------------------------------------- HTML
 
-CM_COLS = "150px 128px minmax(200px,1fr) 132px 86px 74px 120px minmax(150px,260px)"
+# Same column ORDER as the cache_controller report (see CC_COLS) — toggle, category, what
+# identifies the file, its context, then type / size / the file itself / links. The two reports
+# describe the same kind of thing from two sides, and laying them out differently made every move
+# between them a re-orientation. Widths differ where the content does (a path needs the room a
+# CACHE_KEY does not).
+CM_COLS = "24px 152px minmax(200px,1fr) 132px 74px 86px 74px 150px minmax(150px,260px)"
 CM_ROW_H = 46
 
 
-def _file_cell(entry):
+def _decrypted_elsewhere(entry):
+    """The best file another report decrypted out of these bytes, or None.
+
+    Only the caching-media packs are in this position: the Memories report holds the per-snap key,
+    so the plaintext exists — under that report's ``media/`` folder — even though nothing here can
+    produce it.
+    """
+    best = None
+    for link in entry.get("links") or ():
+        if link.get("kind") == "memory" and link.get("media_path"):
+            if best is None or (link.get("media_bytes") or 0) > (best.get("media_bytes") or 0):
+                best = link
+    return best
+
+
+def _file_cell(entry, rel_prefix="../"):
     if entry.get("view") and entry.get("view_is_image"):
         return (f'<a class="filebtn img" href="{_esc(entry["view"])}" target="_blank">'
                 f'<img src="{_esc(entry["view"])}" loading="lazy">'
                 f'<span class="lbl">{_esc(entry["ext"])}</span></a>')
+    if entry.get("view") and entry.get("poster"):
+        # the still is this tool's own frame, not device data — POSTER_BASIS says so on the row
+        return (f'<a class="filebtn img vid" href="{_esc(entry["view"])}" target="_blank" '
+                f'title="open the {_esc(entry["ext"])} (the still is a frame extracted by this '
+                f'tool, not a cached file)">'
+                f'<img src="{_esc(entry["poster"])}" loading="lazy">'
+                f'<span class="lbl">▶ {_esc(entry["ext"])}</span></a>')
     if entry.get("view"):
         return (f'<a class="filebtn play" href="{_esc(entry["view"])}" target="_blank">'
                 f'▶ <span class="lbl">{_esc(entry["ext"])}</span></a>')
     if entry["kind"] == "empty":
         return '<span class="filenone">0 bytes</span>'
+    # Bytes another report decrypted: show ITS copy. These rows said "decoded in the Memories
+    # report" next to no image at all, which an examiner reads as a failure — while the plaintext
+    # was sitting in the next report the whole time. The copy is clearly marked as that report's.
+    dec = _decrypted_elsewhere(entry)
+    if dec:
+        url = f'{rel_prefix}Memories/{dec["media_path"]}'
+        ext = (dec.get("media_ext") or "").lower()
+        title = (f'decrypted by the Memories report from Memory {dec["snap_id"][:8]}… '
+                 f'({dec.get("media_role") or "media"})')
+        if ext in _IMAGE_EXTS:
+            return (f'<a class="filebtn img dec" href="{_esc(url)}" target="scauto_memories" '
+                    f'title="{_esc(title)}"><img src="{_esc(url)}" loading="lazy">'
+                    f'<span class="lbl">🔓 {_esc(ext)}</span></a>')
+        return (f'<a class="filebtn play dec" href="{_esc(url)}" target="scauto_memories" '
+                f'title="{_esc(title)}">🔓 <span class="lbl">{_esc(ext or "media")}</span></a>')
     if not entry["recovered"]:
         # A padlock here used to mean three different things. Say which one this row is: the
         # caching-media packs are decrypted in full by the Memories report, so telling the examiner
@@ -1159,17 +1206,50 @@ def _file_cell(entry):
     return f'<span class="filenone">{_esc(entry["ext"] or entry["kind"])}</span>'
 
 
+MULTI_TARGET_BASIS = (
+    "This file corresponds to SEVERAL rows in the linked report, so the link opens that report "
+    "filtered to this file's identifiers with every matching row expanded, rather than jumping to "
+    "one of them. What you land on is the complete set of matches — the search box shows the query "
+    "that produced it, and clearing it restores the full report.")
+
+
 def _links_cell(entry, rel_prefix, compact=True):
     chips = []
-    for link in entry["links"][:6 if not compact else 3]:
-        if link["kind"] == "cache":
-            href = f'{rel_prefix}CacheController/CacheController_report.html#ck-{link["key"]}'
-            chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache">cache</a>'
-                         + _info(link["basis"]))
-        elif link["kind"] == "memory":
-            href = f'{rel_prefix}Memories/Memories_report.html#mem-{link["snap_id"]}'
+    # Cache entries first, as one chip: the same cached content is regularly claimed under several
+    # CACHE_KEYs, and a chip each made the cell unreadable while a single anchor hid all but one.
+    cache_keys, cache_basis = [], ""
+    for link in entry["links"]:
+        if link["kind"] == "cache" and link.get("key") not in cache_keys:
+            cache_keys.append(link["key"])
+            cache_basis = cache_basis or link["basis"]
+    if len(cache_keys) == 1:
+        href = f'{rel_prefix}CacheController/CacheController_report.html#ck-{cache_keys[0]}'
+        chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache">cache</a>'
+                     + _info(cache_basis))
+    elif cache_keys:
+        href = (f'{rel_prefix}CacheController/CacheController_report.html'
+                + report_ui.find_fragment(cache_keys))
+        chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache" '
+                     f'title="open the cache_controller report filtered to this file\'s '
+                     f'{len(cache_keys)} cache entries, all expanded">'
+                     f'cache ({len(cache_keys)})</a>'
+                     + _info(MULTI_TARGET_BASIS + " " + cache_basis))
+    seen_mem = set()
+    for link in entry["links"]:
+        if link["kind"] == "memory":
+            sid = link["snap_id"]
+            if sid in seen_mem:
+                continue
+            seen_mem.add(sid)
+            href = f'{rel_prefix}Memories/Memories_report.html#mem-{sid}'
             chips.append(f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories">'
-                         f'Memory</a>' + _info(link["basis"]))
+                         f'Memory {_esc(sid[:8])}… (index)</a>' + _info(link["basis"]))
+            # ...and the Memory's own detail page, as the cache_controller report does: the index
+            # row is a summary, the detail page is where that Memory's media and metadata are.
+            if link.get("page"):
+                chips.append(f'<a class="chip mem" target="scauto_memories" '
+                             f'href="{_esc(rel_prefix)}Memories/{_esc(link["page"])}#mem-'
+                             f'{_esc(sid)}">detail</a>')
         elif link["kind"] == "chat":
             rec = link["rec"]
             href = rel_prefix + (rec.get("href") or "")
@@ -1187,6 +1267,21 @@ def _detail_html(entry, rel_prefix):
                      f'{_info(warn)}</div>')
     if entry.get("cat_note"):
         parts.append(f'<div class="note-inline">{_esc(entry["cat_note"])}</div>')
+    if entry.get("poster"):
+        parts.append(f'<a href="{_esc(entry["view"])}" target="_blank">'
+                     f'<img class="cacheview" src="{_esc(entry["poster"])}" loading="lazy"></a>'
+                     f'<div class="muted">poster frame extracted by this tool from the video — a '
+                     f'derived image, not a cached file{_info(POSTER_BASIS)}</div>')
+    dec = _decrypted_elsewhere(entry)
+    if dec:
+        url = f'{rel_prefix}Memories/{dec["media_path"]}'
+        if (dec.get("media_ext") or "").lower() in _IMAGE_EXTS:
+            parts.append(f'<a href="{_esc(url)}" target="scauto_memories">'
+                         f'<img class="cacheview" src="{_esc(url)}" loading="lazy"></a>')
+        parts.append(f'<div class="note-inline">🔓 These bytes WERE recovered — the Memories report '
+                     f'decrypted them from Memory {_esc(dec["snap_id"])} and holds the plaintext '
+                     f'as <span class="mono">Memories/{_esc(dec["media_path"])}</span>. This report '
+                     f'does not decode them a second time.{_info(dec["basis"])}</div>')
 
     grid = [("Recovered content SHA-256", entry["sha256"]),
             ("Recovered content MD5", entry["md5"]),
@@ -1303,13 +1398,14 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
         anchor = f"cm-{e['sha256'] or e['rel']}"
         loc = e["rel"].split("/")[0] if "/" in e["rel"] else "(root)"
         cells = [
-            _file_cell(e),
+            "▸",
             _esc(e["category"]),
             _esc(e["rel"]),
             _esc(e["copies"][0]["producer"]) or '<span class="muted">none</span>',
+            f'{len(e["copies"])} cop{"y" if len(e["copies"]) == 1 else "ies"}',
             _esc(e["ext"] or e["kind"]),
             _fmt_bytes(e["bytes"]),
-            f'{len(e["copies"])} cop{"y" if len(e["copies"]) == 1 else "ies"}',
+            _file_cell(e, rel_prefix),
             _links_cell(e, rel_prefix),
         ]
         searchable = [e["rel"], e["name"], e["category"], e["ext"], e["kind"], e["sha256"],
@@ -1322,7 +1418,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
                            (link.get("rec") or {}).get("conversation_id", "")]
         rows.append([
             anchor, cells, " ".join(s for s in searchable if s).lower(),
-            {"1": e["category"], "2": e["rel"], "4": e["ext"] or e["kind"], "5": e["bytes"]},
+            {"1": e["category"], "2": e["rel"], "4": len(e["copies"]),
+             "5": e["ext"] or e["kind"], "6": e["bytes"]},
             chunk_of.get(anchor),
             {"cat": e["category"], "loc": loc,
              "rec": "y" if e["recovered"] else "n",
@@ -1351,11 +1448,20 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
  .toolbar input[type=search]{{min-width:280px}} .toolbar label{{color:#555;font-weight:600}}
  .mono{{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}}
  .muted{{color:#999}}
+ .vcells>.vc.c0{{color:#2d2d71;font-weight:700;text-align:center;padding-left:4px;padding-right:4px}}
+ .vr.open .vc.c0{{color:#8a1f5a}}
+ .vcells>.vc.c1{{line-height:15px}}
  .vcells>.vc.c2{{font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}}
+ .vcells>.vc.c4,.vcells>.vc.c6{{text-align:right;color:#555}}
  .filebtn{{display:inline-flex;align-items:center;gap:5px;text-decoration:none;font-weight:700;
    font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:6px;padding:2px 7px}}
  .filebtn img{{width:34px;height:34px;object-fit:cover;border-radius:4px;display:block}}
  .filebtn.img{{padding:2px;gap:4px}} .filenone{{color:#999;font-size:11px}}
+ /* a copy another report decrypted, so it reads as recovered rather than as a failure */
+ .filebtn.dec{{background:#e7f6ea;border-color:#b3ddc0;color:#1f6b39}}
+ .filebtn.dec:hover{{background:#d5efdb}}
+ img.cacheview{{max-width:220px;max-height:300px;border-radius:5px;
+   box-shadow:0 1px 4px rgba(0,0,0,.25);margin-top:6px}}
  .sect{{margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;
    font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}}
  .grid{{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12px;margin-top:4px;max-width:900px}}
@@ -1412,13 +1518,14 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 <div class="pager" id="pager"></div>
 <div class="vhdr" id="vhdr" style="grid-template-columns:30px {CM_COLS}">
  <div class="vc sel"><input type="checkbox" class="selall" onclick="SCV.selectShown(this.checked)"></div>
- <div class="vc nosort">File</div>
+ <div class="vc nosort"></div>
  <div class="vc" onclick="SCV.setSort(1)">Category <span class="ar">↕</span></div>
  <div class="vc" onclick="SCV.setSort(2)">Path under Library/Caches <span class="ar">↕</span></div>
  <div class="vc nosort">Producer</div>
- <div class="vc" onclick="SCV.setSort(4)">Type <span class="ar">↕</span></div>
- <div class="vc" onclick="SCV.setSort(5)">Size <span class="ar">↕</span></div>
- <div class="vc nosort">Copies</div>
+ <div class="vc" onclick="SCV.setSort(4)">Copies <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(5)">Type <span class="ar">↕</span></div>
+ <div class="vc" onclick="SCV.setSort(6)">Size <span class="ar">↕</span></div>
+ <div class="vc nosort">File</div>
  <div class="vc nosort">Links</div>
 </div>
 </div>
@@ -1451,7 +1558,12 @@ SCV.init({{
  reset:function(){{
   document.getElementById('q').value='';document.getElementById('cat').value='';
   document.getElementById('loc').value='';document.getElementById('rec').value='';
-  document.getElementById('link').value='';document.getElementById('assets').checked=false;
+  document.getElementById('link').value='';
+  /* reset means "stop hiding anything", because this runs when a link from another report has to
+     reach a row. App assets are hidden by default, so clearing this box (rather than ticking it)
+     left every link to an app-asset row — an icon or a lens resource the cache_controller report
+     matched — landing on nothing at all. */
+  document.getElementById('assets').checked=true;
   document.getElementById('selonly').checked=false;}}
 }});
 scSelNote();
@@ -1577,6 +1689,10 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                    packs=memory_packs)
 
     publish_entries(entries, os.path.join(outdir, "files"))
+    posters = publish_posters(entries, os.path.join(outdir, "files"))
+    if posters:
+        logger.info(f"Cached media: {posters} poster frame(s) extracted from cached video "
+                    f"(derived thumbnails, labelled as such in the report)")
     entries.sort(key=lambda e: (e["category"], e["rel"]))
     docs = collect_documents(app, ms_fmt, src_root, manifest)
 

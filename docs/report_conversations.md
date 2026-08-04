@@ -23,11 +23,19 @@ Reports/Conversations/
 
 ## The index
 
-One row per conversation: type (private / group / unknown), title, participants, message count,
-attachment count, first and last message, conversation id, and a link to the detail page. Search
-covers the title, every participant, the participant user ids, the sender names and the
-conversation id; the type / with-messages / with-attachments filters, the pager and the row
-selection work over the whole set (`docs/report_ui.md`).
+One row per conversation, in this order: **▸**, type (private / group / unknown), title,
+**conversation id**, participants, message count, attachment count, first and last message, and a
+link to the detail page. The id sits next to the name it belongs to rather than at the far right:
+they are two forms of the same answer to "which conversation is this", and an examiner reads them
+together.
+
+The row can only name two participants before it overflows, so **▸ expands it** to a table of every
+participant with their permanent user id, username and display name, plus both conversation ids
+(client and server). Search covers the title, every participant, their user ids, usernames and
+display names, the sender names and the conversation id — so a user id pasted into the box finds
+the conversations that account is in, including the ones the row cannot name. The type /
+with-messages / with-attachments filters, the pager and the row selection work over the whole set
+(`docs/report_ui.md`).
 
 **Conversations with 0 messages are listed.** A conversation id that the friends or groups list
 names but that `arroyo.db` holds no message for is a finding — the messages may have been deleted
@@ -46,7 +54,7 @@ by the **message table**, which is the same virtual table as the index:
 | Direction | **Sent** when the sender is the logged-in account of the extraction, else Received |
 | Sender | `sender_id`, replaced with the contact's username by the parser where it could, with a **device owner** badge on the account the extraction came from |
 | Type | the content type(s) of the message (see the "?" on that column) |
-| Content | the message text, and a thumbnail / play button per attached file |
+| Content | the message text, and a thumbnail / play button per attached file (see below) |
 | Msg ID | `server_message_id` + `.` + the part index (e.g. `12.0`), with the device's own `client_message_id` under it |
 | Read | the read timestamp, empty when the message was never read |
 
@@ -55,6 +63,17 @@ link to open it full size) plus its name, detected type, size, **MD5 and SHA-256
 published from and the link to its `cache_controller` entry, and every raw row value — including **both** message identifiers, both
 conversation identifiers, and both the stored UTC timestamp and the converted one, so the
 conversion can be checked. The sender links to that contact's record.
+
+### The Content cell: the file always wins the space
+
+The row is a fixed height (that is what makes the table virtualizable), so its content has to fit
+into it. When the message text was long enough to fill the cell it pushed the attachment button
+past the bottom edge, and `overflow:hidden` sliced the button through the middle — the examiner saw
+half a label and no way to tell there was a file.
+
+The cell is a flex column: the file box (`.atts`) does not shrink, the text does. So the text gives
+way and the file is always shown whole, whatever the message length. The text is clamped to two
+lines for a tidy cut, and the whole message is in the expanded row.
 
 ### One row per message, not per parsed row
 The message/cache join emits **one row per cache claim**, so a message that carries two files (a

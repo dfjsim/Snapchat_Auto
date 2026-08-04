@@ -122,7 +122,9 @@ def _own_text(raw, atts, conv_id):
     return text
 
 # Index-table geometry (one fixed row height + one column track list for the header and every row).
-CONV_COLS = ("86px minmax(160px,1.1fr) minmax(170px,1.2fr) 66px 66px 152px 152px 250px 96px")
+# The conversation id sits next to the name it belongs to rather than at the far right: they are two
+# forms of the same answer to "which conversation is this", and an examiner reads them together.
+CONV_COLS = ("24px 86px minmax(160px,1.1fr) 250px minmax(170px,1.2fr) 66px 66px 152px 152px 96px")
 CONV_ROW_H = 46
 # Message-table geometry on a detail page. The content column is the wide one; long text is clipped
 # to the row and shown in full when the row is expanded.
@@ -693,17 +695,31 @@ _REPORT_CSS = """
  .kindbadge.group{color:#8a1f5a} .kindbadge.private{color:#25348a} .kindbadge.unknown{color:#999}
  header .kindbadge,header .kindbadge.group,header .kindbadge.private{color:#fff}
  /* conversation index — scoped, so the column rules do not reach the message table below */
- .convs .vcells>.vc.c1{font-weight:600}
- .convs .vcells>.vc.c2 a{color:#2d2d71;text-decoration:none}
- .convs .vcells>.vc.c2 a:hover{text-decoration:underline}
- .convs .vcells>.vc.c3,.convs .vcells>.vc.c4{text-align:right;font-weight:600;color:#2d2d71}
- .convs .vcells>.vc.c5,.convs .vcells>.vc.c6{font-size:11.5px;color:#555}
- .convs .vcells>.vc.c7{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
+ .convs .vcells>.vc.c0{color:#2d2d71;font-weight:700;text-align:center;padding-left:4px;
+   padding-right:4px}
+ .convs .vr.open .vc.c0{color:#8a1f5a}
+ .convs .vcells>.vc.c2{font-weight:600}
+ .convs .vcells>.vc.c3{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
+ .convs .vcells>.vc.c4 a{color:#2d2d71;text-decoration:none}
+ .convs .vcells>.vc.c4 a:hover{text-decoration:underline}
+ .convs .vcells>.vc.c5,.convs .vcells>.vc.c6{text-align:right;font-weight:600;color:#2d2d71}
+ .convs .vcells>.vc.c7,.convs .vcells>.vc.c8{font-size:11.5px;color:#555}
  /* message table (detail pages) */
  .msgs .vcells>.vc.c0{color:#2d2d71;font-weight:700;text-align:center}
  .msgs .vr.open .vc.c0{color:#8a1f5a}
  .msgs .vcells>.vc.c1,.msgs .vcells>.vc.c7{font-size:11px;color:#555;line-height:1.3}
- .msgs .vcells>.vc.c5{font-size:12.5px;line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap}
+ /* The Content cell holds the message text and its file(s) in a fixed-height row. As a flex column
+    the file box keeps its full height and the text is the only thing that gives way, so a long
+    message can no longer push the media button half out of the row and show a sliced label. The
+    text is clamped to two lines for a tidy cut; the whole message is in the expanded detail. */
+ .msgs .vcells>.vc.c5{font-size:12.5px;line-height:1.35;overflow-wrap:anywhere;white-space:pre-wrap;
+   display:flex;flex-direction:column;align-items:flex-start;gap:3px}
+ .msgs .vcells>.vc.c5 .msgtext{flex:0 1 auto;min-height:0;overflow:hidden;display:-webkit-box;
+   -webkit-box-orient:vertical;-webkit-line-clamp:2}
+ .msgs .vcells>.vc.c5 .atts{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:4px;max-width:100%;
+   overflow:hidden}
+ /* a preview in the row is a marker, not the picture: the expanded row shows it properly */
+ .msgs .vcells>.vc.c5 .filebtn img{max-height:30px;max-width:56px}
  .msgs .vcells>.vc.c6{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
  .msgs .vr.out{background:#f4f7ff} .msgs .vr.out:hover{background:#e8eeff}
  .msgs .vr.out .vc.c2{color:#25348a;font-weight:700}
@@ -731,7 +747,7 @@ _REPORT_CSS = """
  .warn-inline{background:#fff3d6;border-color:#e6c983;color:#8a5a00}
  .walgone{color:#8a3a1c;background:#ffe9e0;border:1px solid #e8bfae;border-radius:8px;
    padding:0 6px;font-size:10.5px;font-weight:600;white-space:nowrap;margin-left:4px}
- .vcells>.vc.c5 .filebtn{margin-right:4px}
+ .msgs .vcells>.vc.c5 .filebtn{margin-right:0}
  .mdet{font-size:12.5px}
  .body{background:#fff;border:1px solid #e2e2ea;border-radius:6px;padding:8px 10px;
    margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere;max-width:900px}
@@ -940,8 +956,13 @@ def _message_rows(conv, chunk_of):
     rows = []
     for msg in conv["messages"]:
         atts = msg["atts"]
-        # every file of the message, side by side — a message is one row however many it carries
-        content = "".join(_attachment_cell(a) for a in atts)
+        # Every file of the message, side by side — a message is one row however many it carries.
+        # The files live in their own box because the cell is a fixed height: text long enough to
+        # fill the row used to push the media button half out of it, showing the examiner a sliced
+        # label. The box does not shrink (see .msgs .vc.c5 in _REPORT_CSS), so the text gives way
+        # instead and the file is always shown whole.
+        files = "".join(_attachment_cell(a) for a in atts)
+        content = f'<span class="atts">{files}</span>' if files else ""
         text = msg["text"]
         if text:
             # the row is one fixed height, so only about this much of a message is ever visible:
@@ -1163,44 +1184,82 @@ def _first_last(conv, which):
 
 # --------------------------------------------------------------------------- index page
 
+def _index_detail(conv):
+    """The expanded index row: every participant, with the permanent user id of each.
+
+    The row itself can only name two participants before it overflows, so a group chat's membership
+    used to be readable only on the conversation's own page. Here it is one click away, and — since
+    the search index carries the same ids — searchable from the index whether or not it is open.
+    """
+    parts = conv["participants"]
+    if parts:
+        rows = "".join(
+            "<tr>"
+            f'<td>{_participant_html(p, "../", chip=False)}</td>'
+            f'<td class="mono">{_esc(p["user_id"]) or "<span class=muted>not recorded</span>"}</td>'
+            f'<td>{_esc(p["username"])}</td>'
+            f'<td>{text_html(p["display"])}</td>'
+            "</tr>" for p in parts)
+        table = ('<table class="sub"><tr><th>Participant</th><th>User ID</th><th>Username</th>'
+                 f'<th>Display name</th></tr>{rows}</table>')
+    else:
+        table = '<span class="muted">No participant is recorded for this conversation.</span>'
+    return (f'<div class="sect">Participants ({len(parts)})'
+            + report_ui.info_icon(conv["participants_src"] + " " + _PARTY_HINT) + "</div>"
+            + table
+            + '<div class="sect">Conversation IDs</div>'
+            + _grid([("Client", f'<span class="mono">{_esc(conv["id"])}</span>', ""),
+                     ("Server", f'<span class="mono">{_esc(conv["server_id"])}</span>'
+                      if conv["server_id"] else '<span class="muted">not recorded</span>', "")]))
+
+
 def generate_index(conversations, outdir, tz_label, run_id, stats):
     """Write ``Conversations_report.html`` + ``data/index.js``; return the report path."""
+    data_dir = os.path.join(outdir, "data")
+    details = [(f'conv-{c["id"]}', _index_detail(c)) for c in conversations]
+    chunk_of = report_ui.write_details(data_dir, details)
+
     rows = []
     for conv in conversations:
         parts = conv["participants"]
-        # the row is one fixed height: name the first two participants and count the rest (the
-        # detail page lists them all, linked to their contact records)
+        # the row is one fixed height: name the first two participants and count the rest — the
+        # expanded row (and the conversation's own page) lists them all with their user ids
         shown = ", ".join(_participant_html(p, "../", chip=False) for p in parts[:2])
         if len(parts) > 2:
-            shown += f' <span class="more">+{len(parts) - 2}</span>'
+            shown += (f' <span class="more" title="{len(parts) - 2} more participant(s) — expand '
+                      f'this row to see them all">+{len(parts) - 2}</span>')
+        anchor = f'conv-{conv["id"]}'
         cells = [
+            "&#9656;",
             _kind_badge(conv["kind"]),
             text_html(conv["title"]),
+            f'<span class="cid">{_esc(conv["id"])}</span>',
             shown,
             str(conv["n_messages"]),
             str(conv["n_attachments"]) if conv["n_attachments"] else "",
             _esc(_first_last(conv, "first")),
             _esc(_first_last(conv, "last")),
-            f'<span class="cid">{_esc(conv["id"])}</span>',
             f'<a class="openbtn" target="scauto_conv_page" title="open this conversation in its '
             f'own tab" href="{_esc(conv["page"])}#conv-{_esc(conv["id"])}">open &#9656;</a>',
         ]
         labels = [p["label"] for p in parts]
         searchable = [conv["id"], conv["server_id"], conv["title"], conv["kind"]] + labels
+        # every participant's permanent id and username, so a user id pasted into the search box
+        # finds the conversations that account is in — including the ones the row cannot name
         searchable += [p["user_id"] for p in parts] + [p["raw"] for p in parts]
+        searchable += [p["username"] for p in parts] + [p["display"] for p in parts]
         searchable += list(conv["senders"])
         rows.append([
-            f'conv-{conv["id"]}', cells,
+            anchor, cells,
             " ".join(s for s in searchable if s).lower(),
-            {"0": conv["kind"], "1": conv["title"].lower(),
-             "2": " ".join(labels).lower(), "3": conv["n_messages"],
-             "4": conv["n_attachments"], "5": conv["first_sort"], "6": conv["last_sort"],
-             "7": conv["id"]},
-            None,
+            {"1": conv["kind"], "2": conv["title"].lower(), "3": conv["id"],
+             "4": " ".join(labels).lower(), "5": conv["n_messages"],
+             "6": conv["n_attachments"], "7": conv["first_sort"], "8": conv["last_sort"]},
+            chunk_of.get(anchor),
             {"kind": conv["kind"], "msg": "y" if conv["n_messages"] else "n",
              "att": "y" if conv["n_attachments"] else "n"},
         ])
-    report_ui.write_rows(os.path.join(outdir, "data"), rows)
+    report_ui.write_rows(data_dir, rows)
 
     # What the report did not list, stated rather than left silent: the merge's duplicate media rows
     # and any row whose conversation id was unusable (see `_drop_unrenderable`).
@@ -1261,14 +1320,15 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         '<div class="vc sel"><input type="checkbox" class="selall"'
         ' title="Select / unselect every conversation matching the current filters"'
         ' onclick="SCV.selectShown(this.checked)"></div>'
-        '<div class="vc" onclick="SCV.setSort(0)">Type <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(1)">Conversation <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(2)">Participants <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(3)">Msgs <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(4)">Att. <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(5)">First message <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(6)">Last message <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(7)">Conversation ID <span class="ar">&#8597;</span></div>'
+        '<div class="vc nosort" title="expand a row for its full participant list"></div>'
+        '<div class="vc" onclick="SCV.setSort(1)">Type <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(2)">Conversation <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(3)">Conversation ID <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(4)">Participants <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(5)">Msgs <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(6)">Att. <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(7)">First message <span class="ar">&#8597;</span></div>'
+        '<div class="vc" onclick="SCV.setSort(8)">Last message <span class="ar">&#8597;</span></div>'
         '<div class="vc nosort">Detail</div>'
         '</div></div>'
         '<div class="vwrap convs" id="vwrap"><div class="vpad" id="vpad"></div>'
@@ -1278,8 +1338,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         '<script src="data/index.js"></script>'
         '<script>'
         'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
-        'empty:"vempty",pager:"pager",pageSize:500,selKind:"conv",sort:3,sortDir:-1,'
-        f'rowHeight:{CONV_ROW_H},cols:"{CONV_COLS}",detailBase:null,'
+        'empty:"vempty",pager:"pager",pageSize:500,selKind:"conv",sort:5,sortDir:-1,'
+        f'rowHeight:{CONV_ROW_H},estDetail:200,cols:"{CONV_COLS}",detailBase:"data/detail-",'
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var k=document.getElementById("kind").value,'
         'g=document.getElementById("msg").value,a=document.getElementById("att").value;'
@@ -1359,11 +1419,21 @@ def write_page_manifest(conversations, outdir):
 
 
 def conversation_index(conversations):
-    """The per-conversation summary the Contacts report needs to link to conversations."""
+    """The per-conversation summary the Contacts report needs to link to conversations.
+
+    ``participants`` travels as plain values rather than markup because the Contacts report
+    **inverts** it: a contact belongs to every conversation whose participant list names them, not
+    only to the one CONVERSATION_ID the friends artifact recorded against them. A contact in three
+    group chats is in three conversations, and a report that shows one of them is hiding two.
+    """
     return {c["id"]: {"page": c["page"], "title": c["title"], "kind": c["kind"],
                       "messages": c["n_messages"], "attachments": c["n_attachments"],
                       "first": _first_last(c, "first"), "last": _first_last(c, "last"),
-                      "first_sort": c["first_sort"], "last_sort": c["last_sort"]}
+                      "first_sort": c["first_sort"], "last_sort": c["last_sort"],
+                      "participants": [{"user_id": p["user_id"], "username": p["username"],
+                                        "display": p["display"], "raw": p["raw"],
+                                        "label": p["label"], "is_owner": p["is_owner"]}
+                                       for p in c["participants"]]}
             for c in conversations}
 
 
