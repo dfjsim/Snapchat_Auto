@@ -29,10 +29,12 @@ Memories / My Eyes Only.
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
-  `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, and `sniff.py` — the shared
-  magic-byte identifier. Identify content with `sniff.classify`, never by name or extension, and
-  only call something "encrypted" when it says so: it requires high entropy **and** AES block
-  alignment, because "we cannot display it" is not the same statement as "it is encrypted").
+  `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
+  thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
+  and `sniff.py`, the shared magic-byte identifier. Identify content with `sniff.classify`, never by
+  name or extension, and only call something "encrypted" when it says so: it requires high entropy
+  **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
+  encrypted").
 - Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd`.
 - Headless runs: `Snapchat_Auto.py --zip <file> [--keychain …] [--workdir …] [--run-name …]`
   runs the whole pipeline with no GUI and no pause, which is how the tool is scripted over

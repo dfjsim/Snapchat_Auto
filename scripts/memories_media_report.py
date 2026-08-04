@@ -37,7 +37,6 @@ import shutil
 import hashlib
 import sqlite3
 import logging
-import threading
 import subprocess
 import contextlib
 from io import BytesIO
@@ -56,6 +55,7 @@ from PIL import Image
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import ffmpeg_log
+from scripts.data import poster_worker
 from scripts.data import sniff
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
@@ -1149,7 +1149,7 @@ def _first_decodable(cap, limit):
     return None
 
 
-def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
+def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=True):
     """Extract a single poster frame from a video into out_path (JPEG). Returns True on success.
 
     The result is a DERIVED artifact (not original device data) — callers must label it as such.
@@ -1158,6 +1158,16 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
     the file, so the opening frames decode even when the sample table points past the bytes on
     disk; for those files we skip the seek (seeking into missing bytes fails, and the failure costs
     a full re-read) and take the first frame that decodes.
+
+    **This call can block forever** — see :mod:`scripts.data.poster_worker`. Roughly one cached
+    video in six holds an OpenCV ``read()`` indefinitely, and nothing in the file predicts it. Call
+    it directly only where a hang is acceptable; :func:`publish_posters` runs it in a killable
+    process instead.
+
+    ``quiet`` redirects fd 2 for the duration to keep FFmpeg's chatter out of the console. That
+    redirect is **process-global and not thread-safe**, so a caller that runs this concurrently — or
+    that walks away from a call still inside it — corrupts stderr for the whole process. The worker
+    passes ``quiet=False`` because its stderr already belongs to the parent.
     """
     for var in ("OPENCV_LOG_LEVEL", "OPENCV_FFMPEG_LOGLEVEL", "OPENCV_VIDEOIO_DEBUG"):
         os.environ.setdefault(var, "OFF" if "LOG_LEVEL" in var else "0")
@@ -1168,7 +1178,7 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True):
         return False
     try:
         frame = None
-        with _quiet_stderr():
+        with (_quiet_stderr() if quiet else contextlib.nullcontext()):
             cap = cv2.VideoCapture(video_path)
             try:
                 if complete:
@@ -1203,12 +1213,6 @@ _FRAMELESS_EXTS = ("m4a", "heic", "avif")
 # stop calling it a video.
 VIDEO_EXTS = ("mp4", "mov", "m4v", "webm")
 
-# A single unreadable video must never be able to stall a report. Measured on a test device: a
-# 1,859-byte cached "video" (ftyp brand M4A) opened fine and then blocked inside a single
-# cv2 read() indefinitely — killed after 70 s, and it would have hung the whole run.
-_POSTER_TIMEOUT_S = 20
-
-
 def has_video_track(path):
     """False when the file's magic bytes say it holds no video frames to extract."""
     try:
@@ -1218,28 +1222,6 @@ def has_video_track(path):
         return True                                        # let the decoder decide
     ext = guess_media(head)
     return ext not in _FRAMELESS_EXTS
-
-
-def poster_within(video_path, out_path, timeout=_POSTER_TIMEOUT_S, **kw):
-    """:func:`generate_poster` with a hard time bound. False if it did not finish in time.
-
-    OpenCV offers no way to interrupt a read that is not returning, so the work runs on a daemon
-    thread the caller stops waiting for. The thread may still be running when this returns — it dies
-    with the process, and the report goes on. Which is the point: a thumbnail is a convenience, and
-    no convenience may cost the examiner their report.
-    """
-    if not has_video_track(video_path):
-        return False
-    result = []
-    worker = threading.Thread(target=lambda: result.append(generate_poster(video_path, out_path,
-                                                                           **kw)),
-                              daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        logger.debug(f"poster extraction exceeded {timeout}s and was abandoned: {video_path}")
-        return False
-    return bool(result and result[0])
 
 
 def _hashes(data):
@@ -1456,15 +1438,18 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
         if vids:
             todo.append((sid, m, vids[0]))
     logger.info(f"Media: extracting poster frames from {len(todo)} video(s) with no cached still")
+    # Run in a killable subprocess, one video at a time. A video that cannot be decoded does not
+    # fail — it blocks the decoder for good — and these are decrypted from a cache, so some of them
+    # are truncated. See scripts/data/poster_worker.py.
+    jobs = [(os.path.join(outdir, vid["out"]), os.path.join(outdir, f"{sid}_poster.jpg"),
+             vid.get("complete") is not False)
+            for sid, m, vid in todo if has_video_track(os.path.join(outdir, vid["out"]))]
+    done_by_src, stderr_chunks = poster_worker.run_jobs(jobs)
     made = 0
-    for done, (sid, m, vid) in enumerate(todo, 1):
-        if done % 500 == 0:
-            logger.info(f"  posters: {done}/{len(todo)}, {made} extracted")
+    for sid, m, vid in todo:
         video_out = os.path.join(outdir, vid["out"])
         poster_name = f"{sid}_poster.jpg"
-        # time-bounded: one undecodable video must not be able to stall the run (see poster_within)
-        if not poster_within(video_out, os.path.join(outdir, poster_name),
-                             complete=vid.get("complete") is not False):
+        if not done_by_src.get(video_out):
             continue
         made += 1
         data = open(os.path.join(outdir, poster_name), "rb").read()
@@ -1480,8 +1465,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                               "poster frame was extracted from the decrypted .mp4. It is NOT "
                               "original device data." + partial)})
         m["media_files"].append(entry)
-    ffmpeg_log.log_summary(_FFMPEG_OUTPUT, "poster-frame extraction from cached video", logger)
-    _FFMPEG_OUTPUT.clear()
+    ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
     logger.info(f"Media: posters done — {made} of {len(todo)} extracted "
                 f"in {time.monotonic() - t0:.0f}s")
 

@@ -383,6 +383,13 @@ def run_cli(args):
 
 def main(args):
     flag = args[0].lstrip("-/").lower() if args else ""
+    # Re-entry as the poster-frame worker. A packaged build has no interpreter to run
+    # "python -m scripts.data.poster_worker" with — sys.executable IS this program — so the report
+    # spawns this executable with this flag instead. It must be handled before anything else:
+    # without it the packaged app would launch a copy of its own GUI per cached video.
+    if flag in ("poster-worker", "posterworker"):
+        from scripts.data import poster_worker
+        sys.exit(poster_worker.main(args[1:]))
     if flag in ("help", "h", "?"):
         print_usage()
         sys.exit(0)

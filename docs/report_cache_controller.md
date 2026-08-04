@@ -48,17 +48,30 @@ expanded row. It is **derived data** — this tool's own frame, not anything fro
 says so wherever it appears (`POSTER_BASIS`). Posters left by an earlier run into the same folder
 are reused.
 
-Two properties of a *cache* make this different from posting a normal video file, and both were
+Two properties of a *cache* make this different from postering a normal video file, and both were
 found on the test corpus:
 
 * **Cached video is routinely truncated** (the cache holds the byte ranges the device streamed), so
   the frame is taken by reading forward from the start rather than by seeking to ~1 s: seeking into
   bytes that are not there fails *and* costs a full re-read of the file.
-* **A single unreadable file must not be able to stall the report.** A 1,859-byte cached "video"
-  whose ftyp brand is `M4A ` — an audio container — opened fine and then blocked inside one OpenCV
-  `read()` indefinitely (killed at 70 s). `poster_within` skips containers with no video track and
-  gives the extraction a hard time bound on a daemon thread, so the worst case is a missing
-  thumbnail. With both, 45 of 47 posters on the iOS 16 device take **1.5 s**.
+* **Roughly one cached video in six cannot be decoded at all, and does not fail — it blocks the
+  decoder for good.** Measured on case extractions: 72 of 630 and 137 of 590. Nothing in the file
+  predicts it (the hanging ones have a valid `moov` atom and are truncated no more than the ones
+  that decode fine), so the work has to be *stoppable*: it runs in a subprocess that is killed if it
+  stops answering — see [scripts/data/poster_worker.py](../scripts/data/poster_worker.py) for the
+  measurements and for why a thread cannot do this job.
+
+Both bounds are wall-clock and are enforced by killing the worker: `FILE_TIMEOUT_S` (2 s) per video
+and `BUDGET_S` (300 s) for the pass. Every frame that comes out at all comes out in under a second —
+the yield is identical at a 1 s bound and at 3 s — so the per-file bound is not a judgement about
+how long decoding takes, it is the line past which a file is not decoding. What the budget did not
+reach is reported, not silently dropped.
+
+| | videos | posters | pass |
+|---|---|---|---|
+| iOS 16 test device | 47 | 43 | 3 s |
+| case extraction A | 630 | 558 | 128 s |
+| case extraction B | 590 | 453 (28 not attempted) | 300 s (budget) |
 
 That file also exposed a mislabel worth stating on its own: an ISO base media file's magic bytes
 (`....ftyp`) say only that it *is* one. Its **major brand** says what is in it, and

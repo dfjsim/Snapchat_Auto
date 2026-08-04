@@ -1701,10 +1701,12 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                    packs=memory_packs)
 
     publish_entries(entries, os.path.join(outdir, "files"))
-    posters = publish_posters(entries, os.path.join(outdir, "files"))
-    if posters:
+    posters, no_poster = publish_posters(entries, os.path.join(outdir, "files"))
+    if posters or no_poster:
         logger.info(f"Cached media: {posters} poster frame(s) extracted from cached video "
-                    f"(derived thumbnails, labelled as such in the report)")
+                    f"(derived thumbnails, labelled as such in the report)"
+                    + (f"; {no_poster} could not be decoded and are listed without one"
+                       if no_poster else ""))
     entries.sort(key=lambda e: (e["category"], e["rel"]))
     docs = collect_documents(app, ms_fmt, src_root, manifest)
 
