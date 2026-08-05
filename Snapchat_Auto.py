@@ -47,26 +47,34 @@ def _pyproject_candidates():
     return out
 
 
+def _pyproject_field(key):
+    """Read `[project].<key>` from whichever pyproject.toml this run mode can see, else None."""
+    try:
+        import tomllib
+    except Exception:
+        return None
+    for path in _pyproject_candidates():
+        try:
+            with open(path, "rb") as f:
+                value = tomllib.load(f).get("project", {}).get(key)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+        if value:
+            return value
+    return None
+
+
 def get_version():
     """Return the project version — from a bundled/source pyproject.toml, else package metadata.
 
     The build bundles pyproject.toml (see build_nuitka.cmd) so the frozen GUI shows the real version;
     Nuitka sets neither sys.frozen nor sys._MEIPASS, so we probe several candidate locations.
     """
-    try:
-        import tomllib
-        for path in _pyproject_candidates():
-            try:
-                with open(path, "rb") as f:
-                    v = tomllib.load(f).get("project", {}).get("version")
-                if v:
-                    return v
-            except FileNotFoundError:
-                continue
-            except Exception:
-                continue
-    except Exception:
-        pass
+    v = _pyproject_field("version")
+    if v:
+        return v
     try:
         from importlib.metadata import version, PackageNotFoundError
         try:
@@ -76,6 +84,37 @@ def get_version():
     except Exception:
         pass
     return "unknown"
+
+
+def get_project_name():
+    """The distribution name. It is the first half of the installer filenames the update check
+    matches (`Snapchat_Auto-<version>-win64.msi`), so it has to come from the same pyproject.toml
+    as the version it is published with."""
+    return _pyproject_field("name") or "Snapchat_Auto"
+
+
+def _updater():
+    """The shared update-check helper, or None when it is not installed.
+
+    It is a project dependency, but requirements.txt — the pip route the README documents — does
+    not carry it, and an update check is a convenience, never a precondition for a run.
+    """
+    try:
+        from dfjsim_shared_tools import auto_update
+    except Exception as error:
+        logger.debug(f"Update checks unavailable: {error}")
+        return None
+    return auto_update
+
+
+def check_installer_dir(directory):
+    """`(ok, message)` describing the folder the GUI's "Check" button was pointed at."""
+    updater = _updater()
+    if updater is None:
+        return False, ("The update helper (dfjsim_shared_tools) is not installed, so no update "
+                       "check can run.")
+    return updater.describe_installer_dir(get_project_name(), directory, get_version())
+
 
 # Remembered GUI selections persist here between runs.
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".snapchat_auto_gui.json")
@@ -403,6 +442,11 @@ def main(args):
 
     logger.info(f"Snapchat Auto v{get_version()}")
     cfg = load_config()
+    # Only for an examiner who pointed the tool at a folder of newer builds (GUI field below).
+    # It runs before anything else because accepting an update launches the installer and ends
+    # this process; a headless run never gets here, and must not — nobody is there to answer.
+    if (updater := _updater()):
+        updater.check_for_update(get_project_name(), cfg.get("installer_dir", ""), get_version())
     show_disclaimer(cfg)
 
     def _browse_start(this_val, other_val, saved_key):
@@ -439,6 +483,14 @@ def main(args):
                  'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
                  'map on its detail page. Nothing is downloaded when this is empty.',
                  font=("", 8), text_color="gray")],
+        [sg.Text('Folder with newer builds, for update checks (optional)')],
+        [sg.In(cfg.get("installer_dir", ""), key="installer_dir"),
+         sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
+         sg.Button('Check', key="installer_check")],
+        [sg.Text('A folder where your organization publishes new builds of this tool (e.g. a '
+                 'shared drive). At each start, a newer installer found there is offered. The '
+                 'folder is only checked at the next start, and only when this is not empty.',
+                 font=("", 8), text_color="gray")],
         [sg.Button('Ok'), sg.Button('Cancel')]]
 
     window = sg.Window(f'Snapchat Auto v{get_version()}', layout)
@@ -471,6 +523,11 @@ def main(args):
             ok, message = offline_maps.test_server(values["tile_server"])
             (sg.popup if ok else sg.popup_error)(message, title="Offline map tile server",
                                                  keep_on_top=True)
+        elif event == "installer_check":
+            # Report a mistyped path or a disconnected share while the examiner is still looking
+            # at the field, instead of silently never offering an update.
+            ok, message = check_installer_dir(values["installer_dir"])
+            (sg.popup if ok else sg.popup_error)(message, title="Update checks", keep_on_top=True)
         elif event == "Ok":
             if not values["zip"] or not os.path.isfile(values["zip"]):
                 sg.popup_error("Please select a valid extraction ZIP file.")
@@ -496,7 +553,10 @@ def main(args):
     cfg.update({"zip": values["zip"], "keychain": values["keychain"], "workdir": values["workdir"],
                 "padding": values.get("padding", PADDING_OPTIONS[0]),
                 "timezone": values.get("timezone", "Local time"),
-                "tile_server": values.get("tile_server", "").strip()})
+                "tile_server": values.get("tile_server", "").strip(),
+                # Never committed and never bundled: this repository is public, so an internal
+                # share path may only live in this examiner's own settings file.
+                "installer_dir": values.get("installer_dir", "").strip()})
     save_config(cfg)
 
     # values[0]/values[1] are the iOS/Android radios. One is always selected (iOS is the default),

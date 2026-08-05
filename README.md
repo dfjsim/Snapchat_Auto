@@ -26,7 +26,8 @@
 > extraction that the examiner is **lawfully authorised to examine**, and nothing else:
 >
 > - it never contacts Snapchat's servers or any other network service — the only optional network
->   call is to a map tile server the examiner configures themselves, off by default;
+>   access is to a map tile server and to a folder of newer builds for update checks, both
+>   configured by the examiner themselves and both off by default;
 > - it does not circumvent account authentication and cannot access data that is not already on
 >   the device;
 > - it decrypts locally stored data using keys recovered **from that same device** (its app
@@ -70,6 +71,14 @@ Everything for the run still lands in one folder under `--workdir`. `--run-name`
 folder's name instead of using a timestamp, so a repeated run overwrites the same place and two
 runs stay directly comparable. Exit code is 0 on success, 1 if the run failed, 2 for a bad
 argument. `--help` lists everything; `--diag-keychain <file>` still checks a keychain on its own.
+
+### Update checks (optional, off by default)
+
+If you keep new builds of this tool in a folder — a shared drive, say — point the GUI's *"Folder
+with newer builds"* field at it and each start will offer a newer build found there. Leave it empty
+(the default) and nothing is checked and no folder is touched; there is no update server and
+nothing is sent anywhere. Headless runs never check. See
+[docs/auto_update.md](docs/auto_update.md) for the filename convention builds have to follow.
 
 ## Memories media report (iOS)
 
