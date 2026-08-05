@@ -15,7 +15,7 @@
         "requests",
         "freesimplegui",
         "nuitka",
-        "my-tools",
+        "dfjsim_shared_tools",
     ]
 
 
@@ -35,14 +35,17 @@
         ]
 
     [project.scripts]
-        build = "my_tools.build_wix_installer:main"
+        build = "dfjsim_shared_tools.build_nuitka_wix_installer:main"
 
 [tool.uv]
     package = true
 
     [tool.uv.sources]
-        nuitka   = { url = "https://github.com/Nuitka/Nuitka/archive/main.zip" }
-        my-tools = { path = "../../MyGitHub/Python/my_modules/my_tools", editable = true }
+        nuitka = { url = "https://github.com/Nuitka/Nuitka/archive/main.zip" }
+        # Pinned to a tag, not a branch: a build has to be reproducible, and this repository is
+        # public so anyone cloning it can resolve the dependency. It replaces a local editable path
+        # that only existed on one machine.
+        dfjsim_shared_tools = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git", tag = "v0.2.0" }
 
 [tool.setuptools.packages.find]
     where   = ["."]
