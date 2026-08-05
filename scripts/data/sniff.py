@@ -7,12 +7,12 @@ nothing about the format. So identification is by **magic bytes only**, never by
 Why this module exists
 ----------------------
 The cache_controller report used to identify files with :func:`guess_media` alone, which knows
-four formats (JPEG/MP4/PNG/WebP), and labelled everything it did not recognise
-"🔒 encrypted". Measured across four test devices, 600 files carried that padlock and only **19**
-were genuinely encrypted: the rest were 480 LZC lens bundles, 27 protobuf blobs, 10 WEBVTT
-subtitle tracks, 9 ZIP archives, 9 JSON/text files, 4 HTML pages, 4 TrueType fonts and 2 binary
-plists. Calling all of that "encrypted" tells an examiner that evidence is locked away when it is
-in fact readable, and buries the handful of files that really are encrypted.
+four formats (JPEG/MP4/PNG/WebP), and labelled everything it did not recognise "🔒 encrypted".
+Across the test corpus **97% of the files that padlock sat on were not encrypted** — they were lens
+bundles, protobuf blobs, subtitle tracks, archives, JSON, HTML and fonts (the breakdown is in
+``docs/report_cache_controller.md``). Calling all of that "encrypted" tells an examiner that
+evidence is locked away when it is in fact readable, and buries the handful of files that really
+are encrypted.
 
 :func:`classify` is therefore deliberately conservative about the word "encrypted": it is used
 only for bytes that look like a block cipher's output — high Shannon entropy *and* a length that

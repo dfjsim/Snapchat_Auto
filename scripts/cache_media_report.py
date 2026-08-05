@@ -109,9 +109,9 @@ _ISOBMFF_EXTS = ("mp4", "mov", "m4v", "m4a", "3gp", "heic", "avif")
 # --------------------------------------------------------------------------- key material
 
 # Documents/ClientEncryptionService.plist is a Snap **TSAF container**, not a plist despite the
-# name — plistlib.loads() raises "Invalid file" on it (verified on the iOS 16 test device, header
-# "TSAF\x03\x00\x04\x00"). The layout is a field-name string followed by its value string, so the
-# key is read by locating the markers and taking the next printable run after each.
+# name — plistlib.loads() raises "Invalid file" on it (header "TSAF\x03\x00\x04\x00"). The layout
+# is a field-name string followed by its value string, so the key is read by locating the markers
+# and taking the next printable run after each.
 _ASCII_RUN_RE = re.compile(rb"[ -~]{4,}")
 
 CLIENT_KEY_BASIS = (
@@ -995,10 +995,10 @@ def _root_uuid_warning(entry):
     if "/" in entry["rel"] or not _UUID_RE.search(entry["name"]):
         return ""
     return ("This filename contains a UUID, but a UUID at the Library/Caches ROOT is a scratch "
-            "identifier minted when the file was written — it is NOT a snap id. Every root UUID on "
-            "the iOS 16 test device was searched across all 2 670 files in the app container, as "
-            "ASCII and as its 16-byte binary form, with zero hits. Files here are attributed by "
-            "content hash instead; never quote this UUID as an identifier for the media.")
+            "identifier minted when the file was written — it is NOT a snap id. This was established "
+            "by searching every root UUID across every file in the app container, as ASCII and as "
+            "its 16-byte binary form, with zero hits. Files here are attributed by content hash "
+            "instead; never quote this UUID as an identifier for the media.")
 
 
 # --------------------------------------------------------------------------- entries

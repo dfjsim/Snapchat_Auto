@@ -779,9 +779,9 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
         views.close()
 
     # One metadata row per physical file — but the two database readings can each hold a *different*
-    # version of it (on the iOS 16 test device, 111 of 6 169 metadata rows were rewritten after the
-    # last checkpoint). The current version always wins; the superseded one is kept alongside so the
-    # detail panel can show what the row said before, which is otherwise unrecoverable.
+    # version of it, which is common rather than theoretical: a row is rewritten every time the file
+    # is re-read or re-fetched. The current version always wins; the superseded one is kept alongside
+    # so the detail panel can show what the row said before, which is otherwise unrecoverable.
     meta_by_key, meta_prior_by_key = {}, {}
     for m, wal in metas:
         key = m.get("CACHE_KEY")

@@ -138,16 +138,16 @@ use the **real DB column names with the description in parentheses**.
 
 ### Bundles: the child files are the content
 For a bundle (`TYPE = 3`) the file named after the `CACHE_KEY` is **only the CHILDREN descriptor**
-(90 bytes on the test device), and the content sits in one file per child, named
+(a few dozen bytes), and the content sits in one file per child, named
 `<CACHE_KEY>_<child name>` (e.g. `4bfc4bba…_z2a132f1f…`). `child_ondisk_paths` resolves those (the
 child's own cache key is also tried, for other layouts), and each child is hashed and typed
 **separately** and published with its own extension. The row's file button shows the bundle's
 largest recognizable child.
 
-This is what makes a chat video viewable: message *12.0* of the test extraction is a bundle whose
-children are the 219 KB `.mp4` and its 40 KB `.webp` overlay — neither of which was reachable when
-only the descriptor was hashed (its "detected type" then read as *not recognized*, which now says
-explicitly that a bundle's parent file is a descriptor).
+This is what makes a chat video viewable: such a video is a bundle whose children are the `.mp4`
+and its `.webp` overlay — neither of which was reachable when only the descriptor was hashed (its
+"detected type" then read as *not recognized*, which now says explicitly that a bundle's parent file
+is a descriptor).
 
 ### Encrypted and bundled files — what the examiner sees
 Every on-disk entry ends up in exactly one of these states, stated plainly in the row and the
@@ -178,9 +178,6 @@ entropy without block alignment is reported as exactly that (typically a partial
 download), and anything unidentified is called "unrecognized", not encrypted. The header states
 how many entries hold encrypted bytes, how many of those the Memories report can open, and how
 many have no key at all; a filter selects each group.
-
-Per test device, after the change: 100 encrypted with **7** unopenable (was 253 padlocked);
-91 / **5**; 112 / **2**; 87 / **0**.
 
 ## Categorisation
 
@@ -229,8 +226,8 @@ and `files/` folders next to the HTML file.
 
 **No.** `cache_controller.db` does not index every physical file in the
 `com.snap.file_manager_*_SCContent_*` folders, and an on-disk copy can live in a **different
-user's** SCContent scope than the account that claims it. Worked example (iOS 16 test device, 2
-accounts):
+user's** SCContent scope than the account that claims it. Worked example, on a device with two
+accounts:
 
 * One Memory's media is claimed **only** under the second account as a `g-media-<snapid>` key
   (context 19), stored range-sharded (`PREFETCH` + byte-range parts).
