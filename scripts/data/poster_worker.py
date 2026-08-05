@@ -31,16 +31,13 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
-# How long one video may take before it is treated as undecodable, and how long the whole pass may
-# take. Both are wall-clock, and both are enforced by killing the worker.
-#
-# Measured over the 630 cached videos of a case extraction: every frame that came out at all came
-# out in under a second — the yield is identical at a 1.0 s bound and at 3.0 s (558 posters either
-# way), while the pass costs 86 s or 167 s. So the bound is not a judgement about how long decoding
-# takes, it is the line past which a file is not decoding at all. 2.0 s keeps ~60x headroom over the
-# observed cost for slower hardware and still finishes that case in about two minutes.
-FILE_TIMEOUT_S = 2.0
-BUDGET_S = 300.0
+# Wall-clock bounds on one video and on the whole pass, both enforced by killing the worker. A frame
+# that comes out at all comes out in well under a second, so the per-file bound is not a judgement
+# about how long decoding takes — it is the line past which a file is not decoding at all, set with
+# headroom for slow hardware. The budget is the backstop for a case where much of the cached video
+# is undecodable; reaching it costs nothing but thumbnails, and what it did not reach is reported.
+FILE_TIMEOUT_S = 3.0
+BUDGET_S = 600.0
 
 
 # --------------------------------------------------------------------------- parent half
