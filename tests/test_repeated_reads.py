@@ -71,6 +71,9 @@ def test_a_changed_keychain_is_read_again(tmp_path, caplog):
     time.sleep(0.01)                      # a distinct mtime, whatever the filesystem's resolution
     _keychain(tmp_path / "keychain.plist", secret=b"\x22" * 32)
 
+    # caplog collects for the whole test, not just the block below, so drop the setup read's
+    # banner: what is under test is how many reads the *second* call makes.
+    caplog.clear()
     with caplog.at_level(logging.INFO):
         second = memkeys.read_keychain_status(path)
 
@@ -85,6 +88,7 @@ def test_clear_keychain_cache_forces_a_fresh_read(tmp_path, caplog):
     memkeys.read_keychain_status(path)
     memkeys.clear_keychain_cache()
 
+    caplog.clear()                        # as above: only the read after the cache was cleared
     with caplog.at_level(logging.INFO):
         memkeys.read_keychain_status(path)
 
