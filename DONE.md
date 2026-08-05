@@ -315,7 +315,6 @@ The four are referred to by the properties that matter (see "Referring to test d
 - [DONE-v1.3.1] Fix ".pack" files not being decoded and associated to Snapchat Memories anymore.
   (Root cause: extract_zip.py never extracted Library/Caches/caching-media. Now resolves
   Snapchat's app/app-group containers from container metadata plists and extracts within them.)
-  (commit 775abb843347a6f6d9c6daf6dcc9b8c97adc4f36)
 
 # cache_controller.db report
 - [DONE-v1.3.3] cache_controller.db lookup now treats the `CACHE_KEY` as the *start* of the on-disk filename:
