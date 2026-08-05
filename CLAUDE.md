@@ -35,7 +35,13 @@ Memories / My Eyes Only.
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
   encrypted").
-- Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd`.
+- Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd` (portable onefile
+  EXE), MSI via `uv run build` (`dfjsim_shared_tools`). `[project].version` carries a
+  `+build.<N>` tag because the optional update check compares it against installer filenames —
+  `dfjsim_shared_tools.auto_update` does the checking, `Snapchat_Auto.py` the wiring, see
+  [auto_update.md](docs/auto_update.md). The folder it checks is
+  configured per examiner in the GUI and stored in `~/.snapchat_auto_gui.json`; it is **never**
+  committed or bundled (see the public-repo rule below).
 - Headless runs: `Snapchat_Auto.py --zip <file> [--keychain …] [--workdir …] [--run-name …]`
   runs the whole pipeline with no GUI and no pause, which is how the tool is scripted over
   several extractions. `run()` is the shared entry point for both the GUI and the CLI.

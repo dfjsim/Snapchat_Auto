@@ -1,6 +1,6 @@
 [project]
     name = "Snapchat_Auto"
-    version = "1.5.0"
+    version = "1.5.0+build.20260805"
     description = "Add your description here"
     readme = "README.md"
     requires-python = ">=3.14,<3.15"
@@ -45,7 +45,7 @@
         # Pinned to a tag, not a branch: a build has to be reproducible, and this repository is
         # public so anyone cloning it can resolve the dependency. It replaces a local editable path
         # that only existed on one machine.
-        dfjsim_shared_tools = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git", tag = "v0.2.0" }
+        dfjsim_shared_tools = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git", tag = "v0.3.0" }
 
 [tool.setuptools.packages.find]
     where   = ["."]
@@ -54,7 +54,18 @@
 [tool.msi]
     upgrade_code = "E873CA5B-EB6F-4A47-9038-118D37FC1950"
 
+[tool.wix-build]
+    # Copied next to the built executable and into the MSI. pyproject.toml is how the installed
+    # app knows its own version — including the "+build.N" tag the update check compares against
+    # (docs/auto_update.md); scripts/ carries the data files Nuitka leaves out of a standalone
+    # build, notably scripts/data/sqlcipher3.exe.
+    copy_files = ["pyproject.toml", "scripts"]
+
 [tool.wix-nuitka]
-    windows_console_mode = "disable"
+    # "force" is Nuitka's default and what build_nuitka.cmd's portable EXE gets, so the installed
+    # app behaves the same: --diag-keychain and headless --zip runs print where someone can read
+    # them, and a GUI run can still pause at the end. "disable" builds a windowed binary with no
+    # console at all, which silently discards all of that.
+    windows_console_mode = "force"
     entry_point          = "Snapchat_Auto.py"
     plugins              = ["tk-inter"]
