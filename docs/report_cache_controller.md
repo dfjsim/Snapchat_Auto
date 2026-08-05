@@ -58,20 +58,13 @@ found on the test corpus:
   decoder for good.** Measured on case extractions: 72 of 630 and 137 of 590. Nothing in the file
   predicts it (the hanging ones have a valid `moov` atom and are truncated no more than the ones
   that decode fine), so the work has to be *stoppable*: it runs in a subprocess that is killed if it
-  stops answering — see [scripts/data/poster_worker.py](../scripts/data/poster_worker.py) for the
-  measurements and for why a thread cannot do this job.
+  stops answering. [scripts/data/poster_worker.py](../scripts/data/poster_worker.py) says why a
+  thread cannot do this job — read it before simplifying it into one.
 
-Both bounds are wall-clock and are enforced by killing the worker: `FILE_TIMEOUT_S` (2 s) per video
-and `BUDGET_S` (300 s) for the pass. Every frame that comes out at all comes out in under a second —
-the yield is identical at a 1 s bound and at 3 s — so the per-file bound is not a judgement about
-how long decoding takes, it is the line past which a file is not decoding. What the budget did not
-reach is reported, not silently dropped.
-
-| | videos | posters | pass |
-|---|---|---|---|
-| iOS 16 test device | 47 | 43 | 3 s |
-| case extraction A | 630 | 558 | 128 s |
-| case extraction B | 590 | 453 (28 not attempted) | 300 s (budget) |
+Both bounds are wall-clock and are enforced by killing the worker: `FILE_TIMEOUT_S` per video and
+`BUDGET_S` for the pass. Raising the per-file bound costs time on files that were never going to
+yield a frame and does not change the yield — on a 630-video case extraction, a 1 s bound and a 3 s
+one both produced 558 posters. What the budget did not reach is reported, not silently dropped.
 
 That file also exposed a mislabel worth stating on its own: an ISO base media file's magic bytes
 (`....ftyp`) say only that it *is* one. Its **major brand** says what is in it, and
