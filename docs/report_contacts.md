@@ -48,9 +48,7 @@ The cost is accepted deliberately: a contact whose user id was never recovered i
 with the conversation the friends artifact names, even if a participant list mentions their
 username. An incomplete answer is recoverable by an examiner; a wrong one is not.
 
-The **In several** filter selects contacts with more than one. Verified on the two-account iOS 16
-test device, where the device owner is a participant in all three of its conversations and used to
-be shown with one.
+The **In several** filter selects contacts with more than one.
 
 The device owner is listed by the same rule as anyone else — membership as the artifacts record it.
 No conversation is attributed to them merely because it is on their device: that would be the tool

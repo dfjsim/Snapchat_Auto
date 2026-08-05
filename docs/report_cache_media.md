@@ -22,8 +22,8 @@ this report resolve to an SCContent path.
 
 Keyed by the **SHA-256 of the recovered payload** (of the raw bytes when nothing was recovered),
 with every on-disk copy listed inside the row. The same video is written at the `Caches` root *and*
-in `Caches/tmp` under two different UUIDs; on the iOS 16 test device that is 14 files and **7 videos**,
-and reporting 14 would overstate what is on the device.
+in `Caches/tmp` under two different UUIDs, so counting files rather than distinct content routinely
+doubles the apparent number of videos on the device.
 
 Anchor: `cm-<sha256>`.
 
@@ -62,9 +62,8 @@ to 32 and 16 bytes. **No keychain is required**, so this works on filesystem-onl
 The key and IV are never written to the report, the logs or any manifest — only the fact that they
 were recovered.
 
-Verified on the iOS 16 device: the three `sccache.gallery-stories-snap.data` entries decrypt to
-PNG 2.23 MB, PNG 2.92 MB and **MP4 2.19 MB**, matching the sizes in
-[snapchat_ios_cache_media.md](snapchat_ios_cache_media.md).
+The decrypted sizes match the findings in
+[snapchat_ios_cache_media.md](snapchat_ios_cache_media.md), which is where the format work lives.
 
 ## Categories
 
@@ -92,16 +91,13 @@ Three counts are now reported separately, and the File column says which one a r
 | app assets (LZC bundles, fonts, CoreML) | `<type> app asset` | *app assets not decoded* |
 | genuinely unrecoverable | `🔒 not recovered` | **not recovered** |
 
-After the change, per test device: 120 not recovered (97 elsewhere, 80 assets excluded); 13; 7; 4.
-
 ### Bytes another report decrypted are *shown*, not described
 
 Saying "↗ decoded in the Memories report" next to no image still reads as a failure — and it was
 next to the one group of rows whose plaintext certainly exists, since the Memories report holds the
 per-snap key. Those rows now display **that report's copy** (`_decrypted_elsewhere`, from the
 `media_by_pack.json` record's `path`), in the green "decrypted" style, linking into the Memories
-report; the expanded row states which Memory the key came from and where the plaintext file is. On
-the iOS 16 test device that is 97 rows that used to look unrecovered.
+report; the expanded row states which Memory the key came from and where the plaintext file is.
 
 The same rows carry **two** Memory chips — the index row and the Memory's own detail page — as the
 cache_controller report has always done.
@@ -161,11 +157,10 @@ Snapchat CDN media that no Snapchat database indexes. `parse_blockfile_entries` 
 its response body**, via the stream address in the record.
 
 The key offset moved between Chromium versions — 96 in the classic layout, **100** in the Cronet
-build on the AFU test device — so both are tried and the one whose bytes parse as a URL of the
-declared length wins. `key_len` (offset 32) and `data_addr[4]` (offset 56) are unchanged between
-them. Verified on that device: **108 entries parsed, 42 with a body file, and every resolved
-address named an `f_*` file that exists**, with the record's size field matching the file's real
-size (e.g. `cf-st.sc-cdn.net/d/8w65tBqGmff9UuJUTn9E2` → `f_000001`, 50 833 bytes).
+build — so both are tried and the one whose bytes parse as a URL of the declared length wins.
+`key_len` (offset 32) and `data_addr[4]` (offset 56) are unchanged between them. The join is only
+reported where it holds: every resolved address must name an `f_*` file that exists, with the
+record's size field matching that file's real size.
 
 URLs the raw block-file scan finds but no `EntryStore` accounts for are still listed, marked
 **"not joined"** — a link that was not established is never implied.
@@ -180,13 +175,15 @@ URLs the raw block-file scan finds but no `EntryStore` accounts for are still li
   (`long_key`) falls back to the scan and is reported as not joined.
 * `caching-media` packs are not decrypted here; the Memories report owns them.
 
-## Verified on
+## Validated against
 
-All four Snapchat-bearing extractions in the test corpus (see `docs/snapchat_ios_cache_media.md`):
+All four Snapchat-bearing extractions in the test corpus (see `docs/snapchat_ios_cache_media.md`),
+which between them exercise the conditions this report has to get right:
 
-| Device | Files → distinct | What it proved |
-|---|---|---|
-| iOS 16 GK FFS | 716 → 534 | root+`tmp` dedup (14 files → **7 videos**, matching the findings table); `gallery-stories-snap` → PNG 2.23 MB / PNG 2.92 MB / **MP4 2.19 MB**; fonts as App asset; 53 links each way with cache_controller |
-| iOS 26 UFED FFS | 258 → 246 | `gallery-stories-snap` → PNG **1.79 MB / 2.52 MB** (matching the findings table); both `SCPersistentMedia` files linked to their message |
-| UFED AFU | 338 → 276 | **bare-UUID root media** with no producer prefix; 5 root MP4s sharing one MD5 correctly collapsed to **one row with 6 copies**; cronet blockfile join |
-| iOS 26 GK FFS | 102 → 96 | `Cache.db` with a 105 KB `-wal` reports **"present, 0 entries"** rather than failing or being omitted |
+* root + `tmp` deduplication, and several root MP4s sharing one MD5 collapsing to one row with
+  several copies;
+* `gallery-stories-snap` decryption on both storage schemas, against the sizes in the findings doc;
+* **bare-UUID root media** with no producer prefix, and the cronet blockfile join;
+* `SCPersistentMedia` files linked back to the message they belong to;
+* a `Cache.db` with a `-wal`, reported as "present, 0 entries" rather than failing or being omitted;
+* links resolving both ways with the cache_controller report.

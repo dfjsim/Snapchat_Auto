@@ -181,9 +181,9 @@ the same `cacheControllerKey`:
      `CACHE_FILE_CLAIM` rows.
 
   This is verifiable byte for byte, and worth doing when validating on a new extraction: the
-  attachment's SHA-256 must equal the linked entry's bytes, or one of its bundle children's. On the
-  iOS 16 test device all 19 attachments match — e.g. one message's video equals a named child of
-  the bundle the cache entry resolves to.
+  attachment's SHA-256 must equal the linked entry's bytes, or one of its bundle children's — for a
+  video, typically a named child of the bundle the cache entry resolves to. Every attachment matched
+  on the corpus this was built against.
 
 ### cache_controller → the decrypted copy of an encrypted cache file
 Memory media is cached **encrypted**, so its bytes cannot be displayed from the cache entry itself.
