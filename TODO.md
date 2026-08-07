@@ -49,6 +49,7 @@ corpus these are the correct answers, not defects.
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
 - We need to be able to filter/search by URL.
+- Fix MEO decryption that fails in some cases.
 
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.
@@ -127,3 +128,8 @@ corpus these are the correct answers, not defects.
     value is always in the row detail / detail page). Confirm that reads well on other datasets,
     e.g. accounts with many cache tokens per Memory.
 
+# Big parts to fix...
+- Integrate Snapchat_Download support with guardrails (reminding the user to have proper legal authorization).
+- Implement feature to recreate a partial report from the selected elements only.
+  - Ask the user if we include all the elements related to the ones selected.
+- Fix messages decoding from arroyo.db... we are currently missing many that are displayed by at least one other tool.

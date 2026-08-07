@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import datetime
+import textwrap
 from html import escape as _esc
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;0"
@@ -420,6 +421,19 @@ def run_cli(args):
     return 0
 
 
+def _hint(text, width=88):
+    """One of the small explanatory lines under a settings field.
+
+    The text is wrapped here rather than by the widget because FreeSimpleGUI only wraps a Text
+    element whose size spans several rows, and then at a pixel width it derives from the font — so
+    the row count has to be guessed right or the text is silently clipped. Wrapping the string
+    keeps every hint inside the width the rest of the layout already needs, instead of stretching
+    the window to fit one long line. The colour is near-white: grey text was all but invisible on
+    this theme's mid-blue background, and the smaller font is what marks a hint as secondary.
+    """
+    return sg.Text(textwrap.fill(text, width), font=("", 9), text_color="#eef3fa")
+
+
 def main(args):
     flag = args[0].lstrip("-/").lower() if args else ""
     # Re-entry as the poster-frame worker. A packaged build has no interpreter to run
@@ -474,23 +488,21 @@ def main(args):
         [sg.Text('Timestamp timezone (iOS)'),
          sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
          sg.Text('(or type an IANA name / ±HH:MM)')],
-        [sg.Text('Daylight saving time is applied automatically for named zones (e.g. America/Toronto).',
-                 font=("", 8), text_color="gray")],
+        [_hint('Daylight saving time is applied automatically for named zones '
+               '(e.g. America/Toronto).')],
         [sg.Text('Offline map tile server (optional)')],
         [sg.In(cfg.get("tile_server", ""), key="tile_server"),
          sg.Button('Test', key="tile_test")],
-        [sg.Text('Your own XYZ tile server, e.g. http://localhost:8080 or '
-                 'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
-                 'map on its detail page. Nothing is downloaded when this is empty.',
-                 font=("", 8), text_color="gray")],
+        [_hint('Your own XYZ tile server, e.g. http://localhost:8080 or '
+               'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
+               'map on its detail page. Nothing is downloaded when this is empty.')],
         [sg.Text('Folder with newer builds, for update checks (optional)')],
         [sg.In(cfg.get("installer_dir", ""), key="installer_dir"),
          sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
          sg.Button('Check', key="installer_check")],
-        [sg.Text('A folder where your organization publishes new builds of this tool (e.g. a '
-                 'shared drive). At each start, a newer installer found there is offered. The '
-                 'folder is only checked at the next start, and only when this is not empty.',
-                 font=("", 8), text_color="gray")],
+        [_hint('A folder where your organization publishes new builds of this tool (e.g. a '
+               'shared drive). At each start, a newer installer found there is offered. The '
+               'folder is only checked at the next start, and only when this is not empty.')],
         [sg.Button('Ok'), sg.Button('Cancel')]]
 
     window = sg.Window(f'Snapchat Auto v{get_version()}', layout)
