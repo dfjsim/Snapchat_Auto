@@ -92,9 +92,10 @@ A single-target link stays a plain `#anchor`, which highlights the row it lands 
 ### cache_controller → Memory
 Tried in priority order; the first that matches wins, and the icon records which one:
 
-1. **Snap-scoped claim (primary).** A `CACHE_FILE_CLAIM.EXTERNAL_KEY` of the form
-   `snap-media-<UUID>`, `snap-overlay-<UUID>`, `snap-rendered-lowres-<UUID>` or `g-media-<UUID>`
-   whose UUID equals a `ZGALLERYSNAP.ZSNAPID`.
+1. **Snap-scoped claim (primary).** A `CACHE_FILE_CLAIM.EXTERNAL_KEY` of a Memory-scoped shape
+   whose UUID equals a `ZGALLERYSNAP.ZSNAPID`. The shapes are the single list
+   `SNAP_CLAIM_PREFIXES` / `SNAP_CLAIM_SUFFIXES` in `memories_media_report`, read by
+   `classify_snap_claim` — see [the claim shapes](#which-external_key-shapes-name-a-memory) below.
 2. **CDN URL token (fallback).** The file's `CACHE_KEY` equals `SHA-256(token)[:16 bytes]` where
    `token` is the last path segment of the Memory's `ZMEDIADOWNLOADURL` / `ZOVERLAYDOWNLOADURL` /
    `ZTHUMBNAILDOWNLOADURL`. This catches downloaded media whose claim is only a URL, with no
@@ -102,9 +103,34 @@ Tried in priority order; the first that matches wins, and the icon records which
 3. **ZMEDIAID (fallback).** A UUID inside an `EXTERNAL_KEY` matches the Memory's `ZMEDIAID`
    (used only when it is *not* also a `ZSNAPID`).
 
-> On both test extractions the primary method already resolves every linkable entry — the two
-> fallbacks add nothing there. They exist for app versions / cloud-only memories where a physical
-> file carries a URL claim but no snap-scoped claim. See the measurement in `DONE.md`.
+### Which `EXTERNAL_KEY` shapes name a Memory
+
+One list, read by **both** reports, because they link in opposite directions and a shape only one
+of them recognises is a cached file tied to a Memory whose own page does not list it:
+
+| Shape | Role |
+|---|---|
+| `snap-media-<UUID>`, `snap-asset-raw-media-<UUID>`, `g-media-<UUID>` | full |
+| `snap-overlay-<UUID>` | overlay |
+| `snap-rendered-lowres-<UUID>` | rendered |
+| `snap-thumbnail-<UUID>` | thumbnail |
+| `<UUID>_memories_backup_transcoded` | transcoded |
+
+Two rules earn their place here:
+
+* **Match the shape exactly, never by substring.** Testing "does the text before the UUID contain
+  *media*" swept in `https://…/previewmedia/<UUID>` — not a Memory claim at all — and those UUIDs
+  then reached the deleted-Memory carver as candidate snap ids, where on one extraction they were
+  the larger part of everything it tested.
+* **The UUID is not always at the end.** `<UUID>_memories_backup_transcoded` puts it first, so a
+  prefix test sees an empty string and drops the claim. These are `MEDIA_CONTEXT_TYPE` 19 (full
+  media) and decrypt with the Memory's own key to a complete MP4 — on the corpus they are the only
+  copy of some minute-long videos, recovered by nothing else in the report. Verified on two devices.
+
+After these, every `EXTERNAL_KEY` in the corpus that carries a Memory's `ZSNAPID` or `ZMEDIAID` is
+matched. To re-check that on a new extraction, group the claims by shape (UUID replaced by a
+placeholder) and ask, per shape, whether its UUIDs are snap ids, `ZMEDIAID`s or neither — a shape
+that is neither and *should* be is the only kind of gap this design can still have.
 
 A memory-linked cache entry shows **two** links: the index row
 (`Memories_report.html#mem-<ZSNAPID>`) **and**, when `memory_pages.json` is present, the detail
@@ -114,6 +140,17 @@ sub-page (`pages/<key>.html#mem-<ZSNAPID>`). Both open in the `scauto_memories` 
 Per recovered media file, the Memory report links to `#ck-<CACHE_KEY>` **only when that key is
 present in `cache_controller.db`** (`all_cache_keys`). The key is the one used to locate the file:
 either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target.
+
+Claims are looked up by the Memory's `ZSNAPID` **and** by the media-object ids its row references
+(`m["media_refs"]` — `ZMEDIAID`, `ZDUPLICATEDFROMSNAPID`), which is the mirror of fallback 3 above:
+a claim can name the media object rather than the snap, and a Memory moved into My Eyes Only is
+exactly that case. Both are used, not one instead of the other — a Memory has several cached files
+and only some of the claims name it by `ZSNAPID`. Every hit is still confirmed by the file
+decrypting, so the id match selects candidates rather than asserting the association.
+
+Note that this list also feeds `carve_deleted_memories`: a claimed UUID with **no** `ZGALLERYSNAP`
+row is a candidate deleted Memory. Indexing a shape that is not a Memory claim therefore does not
+merely add a bad link — it sends the carver hunting through files that were never Memories.
 
 ### Memory → Cached media (Library/Caches)
 `caching-media` `.pack` files are *not* indexed by `cache_controller.db`, so the report that

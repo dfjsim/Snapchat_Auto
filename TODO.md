@@ -49,7 +49,14 @@ corpus these are the correct answers, not defects.
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
 - We need to be able to filter/search by URL.
-- Fix MEO decryption that fails in some cases.
+- ~~Fix MEO decryption that fails in some cases.~~ **Fixed in v1.5.2** — four separate causes, see
+  DONE.md ("Snapchat Memories report"). Still open in this area:
+  - A My Eyes Only Memory captured *directly* into MEO (not moved into it) still needs the
+    keychain's `persistedkey`, and there is no way around that — it is the correct outcome, not a
+    defect. Worth re-confirming on a device that has both kinds.
+  - `caching-media` `.pack` files are linked to a Memory **by** decrypting them, so a Memory with
+    no usable key can never be matched to one, however its media is stored. Only a keyed path
+    exists there.
 
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.
@@ -128,8 +135,18 @@ corpus these are the correct answers, not defects.
     value is always in the row detail / detail page). Confirm that reads well on other datasets,
     e.g. accounts with many cache tokens per Memory.
 
-# Big parts to fix...
+# Planned features
 - Integrate Snapchat_Download support with guardrails (reminding the user to have proper legal authorization).
 - Implement feature to recreate a partial report from the selected elements only.
-  - Ask the user if we include all the elements related to the ones selected.
-- Fix messages decoding from arroyo.db... we are currently missing many that are displayed by at least one other tool.
+  - Ask the user if we also include all the elements related to the ones selected
+    (for example, the cache_controller and/or Libracy/Caches entries associated to a selected Memory).
+- ~~Fix messages decoding from arroyo.db... we are currently missing many that are displayed by at
+  least one other tool.~~ **Fixed in v1.5.2** — see DONE.md ("Snapchat conversations / contacts
+  reports"). Still open in this area:
+  - The other event kinds under `4.4.8` — fields `2`, `5`, `6`, `8` and `22`, of which `2` is by far
+    the most common — are identified as events but not named. They are labelled `System message`
+    with no description.
+    Naming them needs ground truth: compare a conversation containing them against another tool.
+  - `proto_to_msg` still concatenates every string in the protobuf, and `message_content` still
+    depends on that for the cache join. Worth reading the media id from its own field too, so the
+    concatenation can go.

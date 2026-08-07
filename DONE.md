@@ -95,6 +95,30 @@
   to open. `cache_controller_report.load_chat_links` prefers it, falls back to the legacy v2/v1
   manifests, and stamps those with the document they belong to. Chat chips now open the message's
   conversation page in the `scauto_convs` tab.
+- [DONE-v1.5.2] **Messages missing from `arroyo.db` decoding — the reports now carry every row
+  `conversation_message` holds.** `mergeCacheChats` dropped every message row that no
+  `CACHE_FILE_CLAIM` joined onto, i.e. every message whose media is no longer cached; on an account
+  whose older media has aged out that was a large share of the conversation. Those rows are kept and
+  labelled "Media (no cached file)". Three defects from the same pass:
+  - `getChats` selected `where client_conversation_id IS NOT NULL`, silently skipping a message
+    identified only by `server_conversation_id`. It now accepts either, and
+    `reportExcludedMessages` logs a warning naming any row still left out, so the gap cannot be
+    silent again.
+  - A media message's **protobuf media id was shown as if it were the message text**. `getChats`
+    now reads the text from the field that holds it (`4.4.2.1` for a text message, `4.4.7.11.1` for
+    a media caption) instead of concatenating every string in the protobuf. This **recovered media
+    captions** that were buried inside `<key>=<iv>==<uuid>…` and unreadable, and closed the
+    remaining gaps in text-message coverage — the last of those needed reading the wire format
+    directly, because a body whose bytes are also valid protobuf is mis-decoded as a submessage by
+    a schema-less decoder.
+  - A message whose protobuf holds no string was reported as `ERROR - Something went wrong`. Those
+    are app events (the `4.4.8` branch), now labelled **System message**, and `4.4.8.7` is described
+    as a save — corroborated against `conversation_message.is_saved` before the word "saved" is
+    used, rather than asserted from the field alone.
+  - Documented in `docs/report_communications.md` / `docs/report_conversations.md`; tests in
+    `tests/test_message_text.py` and `tests/test_parse_snapchat_ios.py`. Still open (kept in
+    TODO.md): naming the other `4.4.8` event kinds, which needs ground truth, and dropping
+    `proto_to_msg`'s string concatenation once the media id is read from its own field.
 
 # Corpus test-run fixes (v1.5.0)
 
@@ -291,6 +315,56 @@ The four are referred to by the properties that matter (see "Referring to test d
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
 # Snapchat Memories report
+- [DONE-v1.5.2] **"Fix MEO decryption that fails in some cases" — four separate causes, found by
+  working back from a My Eyes Only Memory reported as undecryptable that another tool decrypted.**
+  - **The locked-MEO notice named the account by its `userHash` alone**, an identifier that appears
+    nowhere else the examiner looks (`ZSAVERUSERID`, the keychain items, the index's user filter and
+    the `user …` line on the same page all use the userId). A correct statement about the
+    signed-in account therefore read as a statement about some third one. It now names the userId
+    with the hash beside it (`_account_label`), in the report **and** in the run log, and
+    `_meo_locked_html` distinguishes the three reasons instead of always asserting the last: the
+    keychain holds no `persistedkey` **at all**, it holds one but for **another** account (named),
+    or it holds **this** account's and the unwrap still failed. `meo_owners=None` (a persistedkey
+    whose payload named no userId) keeps the neutral wording — "we cannot tell" must never reach
+    the examiner as "there is none".
+  - **A Memory *moved* into My Eyes Only is not re-encrypted.** The app writes a new snap row whose
+    own key is wrapped, still pointing at the original media object (`ZMEDIAID` /
+    `ZDUPLICATEDFROMSNAPID`) whose `snap_key_iv` row survives with `encrypted=0` — an ordinary
+    unwrapped key — even though its `ZGALLERYSNAP` row is gone. Those rows were dropped for having
+    no matching snap, so media that decrypts with **no keychain at all** was reported as "key
+    wrapped, cannot be unwrapped". `adopt_media_object_keys` now adopts such a key (only an
+    unwrapped 32/16 pair, only from an id the row actually references), records it in
+    `m["key_source"]`, and the report labels it as the media object's key rather than the snap's.
+    Counted as `meo_from_media_object`, separately from `meo_unwrapped`, so the keychain is never
+    credited for a key it did not supply. Not a general MEO bypass — media captured straight into
+    My Eyes Only still needs `persistedkey`. Written up in
+    `docs/snapchat_ios_memories_decryption.md`, which also **corrects** the earlier claim that
+    seeing MEO media implies `persistedkey` was read.
+  - **A Memory with no key was skipped by the media phase entirely**, so one could show no media
+    and no 🗄 cache link while the cache_controller report reconstructed and played the very same
+    shards. Locating a cache file needs no key — only reading an *encrypted* one does, and not
+    every cache is encrypted. Keyless Memories now go through the same addressing;
+    `decrypt_sccontent` identifies plaintext from the magic bytes before it looks at a key, so
+    exactly the caches stored in the clear are recovered. `_sccontent_head` types the file from its
+    first 16 bytes so this costs no full read, and a shard set with no offset-0 shard reads as
+    *unknown*, never as *not media*. The `how` text says the bytes were stored in the clear instead
+    of claiming a decryption that never happened.
+  - **`cache_controller.db` claims were matched by substring**, which failed both ways:
+    `<snapid>_memories_backup_transcoded` puts the UUID *first*, so the tested prefix was empty and
+    the claim was dropped — while being `MEDIA_CONTEXT_TYPE` 19 full media that decrypts with the
+    Memory's own key to a complete MP4, on the corpus the only copy of some minute-long videos —
+    and `https://…/previewmedia/<UUID>` matched because "media" is a substring, which also sent
+    `carve_deleted_memories` hunting through files that were never Memories. There is now one
+    canonical shape list (`SNAP_CLAIM_PREFIXES` / `classify_snap_claim`) read by **both** cache
+    reports, matched exactly, and the Memory→cache lookup uses the Memory's `ZSNAPID` **and** its
+    `media_refs`, mirroring the cache report's `ZMEDIAID` fallback. After this, every `EXTERNAL_KEY`
+    in the corpus carrying a Memory's `ZSNAPID` or `ZMEDIAID` is matched; the audit method for
+    re-checking that on a new extraction is in `docs/cross_report_linking.md`.
+  - Tests: `tests/test_memories_meo_account.py`, `tests/test_memories_plaintext_cache.py`,
+    `tests/test_cache_claim_shapes.py` (all synthetic — no extraction data).
+- [DONE-v1.5.2] A cached video that yields **no poster frame** now says why (it did not decode,
+  typically because only part of it was cached; or it has no video track) instead of sitting next
+  to postered videos showing a bare "▶ view cached file" link that reads as a defect in the report.
 - [DONE-v1.4.0] Split the Memories report into a **lightweight index** (`Memories_report.html`) plus
   one **detail sub-page per group** (`pages/<key>.html`), so it stays usable with many Memories.
   The index is a sortable/filterable table (global search, with/without-thumbnail filter, user

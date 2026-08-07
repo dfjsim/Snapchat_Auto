@@ -66,6 +66,13 @@ Both bounds are wall-clock and are enforced by killing the worker: `FILE_TIMEOUT
 yield a frame and does not change the yield — on a 630-video case extraction, a 1 s bound and a 3 s
 one both produced 558 posters. What the budget did not reach is reported, not silently dropped.
 
+A video that ends up with no frame therefore sits next to videos that have one, showing only its
+`▶ view cached file` link — which reads as a defect in the report rather than as the finding it is.
+Each such entry now carries a `poster_note` saying which of the two happened (the file did not
+decode, typically because only part of it was cached; or it has no video track at all), rendered
+under the link in the expanded row. The index row is unaffected: with no poster it falls back to
+the plain `▶ <ext>` play button, which still opens the bytes that are there.
+
 That file also exposed a mislabel worth stating on its own: an ISO base media file's magic bytes
 (`....ftyp`) say only that it *is* one. Its **major brand** says what is in it, and
 `sniff.guess_media` now reads it — so `M4A `/`M4B ` is `m4a`, `qt  ` is `mov`, `heic`/`avif` are

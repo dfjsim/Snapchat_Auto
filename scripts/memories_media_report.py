@@ -528,6 +528,56 @@ def _fmt_other(v):
     return v
 
 
+MEDIA_OBJECT_KEY_BASIS = (
+    "Moving a Memory into My Eyes Only does not re-encrypt the media that is already cached on the "
+    "device. The app writes a NEW ZGALLERYSNAP row for the moved Memory whose own key "
+    "(ZENCRYPTION / snap_key_iv with encrypted=1) is wrapped in the account's MEO master key, but "
+    "that row still points at the ORIGINAL media object through ZMEDIAID and "
+    "ZDUPLICATEDFROMSNAPID, and the bytes in the cache are still the original snap's ciphertext. "
+    "The original's own ZGALLERYSNAP row is gone once it has been moved — but its snap_key_iv row "
+    "survives in gallery.encrypteddb with encrypted=0, i.e. an ordinary unwrapped AES-256 key/IV. "
+    "So the cached media of such a Memory decrypts with no keychain persistedkey at all. The key "
+    "shown here is that row's, reached from this Memory's own ZMEDIAID / ZDUPLICATEDFROMSNAPID; it "
+    "is confirmed by the media below decrypting to a recognised format, never by proximity. What "
+    "the missing MEO master key still withholds is the new row's own key — anything encrypted "
+    "under it, and any media added to My Eyes Only directly, stays locked.")
+
+
+def adopt_media_object_keys(memories, orphan_keys, persisted):
+    """Give a keyless Memory the key of the media object it points at. Returns how many were given.
+
+    ``orphan_keys`` are ``snap_key_iv`` rows whose snap has no ZGALLERYSNAP row — normally the
+    original of a Memory that has since been moved into My Eyes Only. Its key still decrypts the
+    cached bytes; see MEDIA_OBJECT_KEY_BASIS for why, and docs/snapchat_ios_memories_decryption.md.
+
+    Only an unwrapped 32/16 pair is adopted. A wrapped one is unwrapped first when the keychain
+    supplied this account's persistedkey, and skipped otherwise — a 48/32 pair is not a key.
+    """
+    adopted = 0
+    for sid, m in memories.items():
+        if m["key"] and m["iv"]:
+            continue
+        for ref in m.get("media_refs") or []:
+            row = orphan_keys.get(ref)
+            if not row:
+                continue
+            key, iv, enc, mark = row
+            if enc == 1:
+                if not persisted:
+                    continue
+                try:
+                    key, iv = unwrap_meo_key(persisted, key, iv)
+                except Exception as error:
+                    logger.debug(f"MEO unwrap of media-object key {ref} failed: {error}")
+                    continue
+            if len(key or b"") != 32 or len(iv or b"") != 16:
+                continue
+            m["key"], m["iv"], m["key_wal"], m["key_source"] = key, iv, mark, ref
+            adopted += 1
+            break
+    return adopted
+
+
 def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     """
     Return (memories, stats) for one profile.
@@ -635,6 +685,14 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # key and the keychain had no persistedkey to unwrap it with — i.e. the media exists
             # but cannot be decrypted, which is a different statement from "no media".
             "key_wrapped": False,
+            # set when the key came from the media object this row points at rather than from a
+            # snap_key_iv row of its own — see adopt_media_object_keys
+            "key_source": None,
+            # the media OBJECT this row points at, which is not always this snap: moving a Memory
+            # into My Eyes Only writes a *new* snap row that still references the original media.
+            # Used to find that media's surviving key AND its cache_controller claims.
+            "media_refs": [v for v in (r.get("ZMEDIAID"), r.get("ZDUPLICATEDFROMSNAPID"))
+                           if v and v != snap],
             "latitude": None, "longitude": None, "address": None,
             "media_files": [],
             # which of the two scdb readings this row came from; MAIN_ONLY means the -wal has
@@ -676,6 +734,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
              "wal_changed": sum(1 for m in memories.values() if m.get("prior_rows"))}
 
     # gallery.encrypteddb: keys (old schema) + geolocation + address (both schemas)
+    orphan_keys = {}      # snap_id -> (key, iv, encrypted, wal mark) for snaps with no scdb row
     gdir = os.path.join(workdir, profile["userHash"])
     gconn = decrypt_gallery_db(profile["gallery"], egocipher, gdir)
     # the same database without its -wal: keys and locations the log has since deleted
@@ -688,6 +747,10 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             for (sid, key, iv, enc), mark in gallery_rows(gconn, gconn_nowal, "snap_key_iv",
                                                           "snap_id,key,iv,encrypted"):
                 if sid not in memories:
+                    # A key for a snap with no ZGALLERYSNAP row — kept, not dropped. This is how
+                    # the media of a Memory moved into My Eyes Only stays recoverable: the row that
+                    # owned the media is gone, its key row is not. See adopt_media_object_keys.
+                    orphan_keys.setdefault(sid, (key, iv, enc, mark))
                     continue
                 m = memories[sid]
                 if enc == 1:                              # My Eyes Only - unwrap
@@ -721,6 +784,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     if gconn_nowal is not None:
         gconn_nowal.close()
 
+    stats["adopted_keys"] = adopt_media_object_keys(memories, orphan_keys, persisted)
+
     # Counted from the final state, not from how many unwrap calls ran: on the new schema a MEO
     # memory's wrapped key appears in BOTH ZGALLERYSNAP.ZENCRYPTION and gallery.encrypteddb's
     # snap_key_iv, so counting operations reported two unwraps for one memory.
@@ -728,7 +793,12 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
         m["key_wrapped"] = bool(m["is_meo"] and not (m["key"] and m["iv"]))
     stats["meo"] = sum(1 for m in memories.values() if m["is_meo"])
     stats["meo_locked"] = sum(1 for m in memories.values() if m["key_wrapped"])
-    stats["meo_unwrapped"] = stats["meo"] - stats["meo_locked"]
+    # A MEO memory that ended up with a key did not necessarily have one *unwrapped*: a Memory
+    # moved into My Eyes Only is keyed from the media object it references, with no persistedkey
+    # involved. Counting those as unwraps credited the keychain for a key it never supplied.
+    stats["meo_from_media_object"] = sum(1 for m in memories.values()
+                                         if m["is_meo"] and m["key"] and m["key_source"])
+    stats["meo_unwrapped"] = stats["meo"] - stats["meo_locked"] - stats["meo_from_media_object"]
     return memories, stats
 
 
@@ -899,7 +969,8 @@ def _carved_memory(snap_id, profile, hit, timefmt):
         "has_location": False,
         "times": {}, "entry_times": {}, "snap_other": {}, "entry_other": {},
         "urls": {}, "ids": {},
-        "key": key, "iv": iv, "is_meo": is_meo, "key_wrapped": False,
+        "key": key, "iv": iv, "is_meo": is_meo, "key_wrapped": False, "key_source": None,
+        "media_refs": [],                                  # no row survives to reference one
         "latitude": None, "longitude": None, "address": None,
         "media_files": [],
         "wal": sqlite_open.CARVED,
@@ -1003,6 +1074,22 @@ def _resolve_sccontent(cache_key, full, parts):
     return None, [], [], None
 
 
+def _sccontent_head(cache_key, full, parts, n=16):
+    """First ``n`` bytes a cache key resolves to, without reading the rest of it.
+
+    Only the shard that starts at offset 0 can answer "what is this file", so a cache whose first
+    shard was never stored returns b"" — unknown, not "not media". Used to decide whether a keyless
+    Memory's cache is plaintext before paying for the whole file.
+    """
+    fulls = full.get(cache_key, [])
+    if fulls:
+        return _read_head(fulls[:1], n)
+    ordered = sorted(parts.get(cache_key.lower(), []))
+    if ordered and ordered[0][0] == 0:
+        return _read_head([p for _, p in ordered], n)
+    return b""
+
+
 _UUID_RE = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 
 # The account UUID in a com.snap.file_manager_*_SCContent_<userId> folder name — i.e. which
@@ -1016,13 +1103,57 @@ def _scope_user(path):
     return mo.group(1) if mo else None
 
 
+# Every EXTERNAL_KEY shape whose UUID is a Memory's, and the role that shape gives the file.
+# The canonical list, shared with the cache_controller report so the two cannot drift: one report
+# linking a cached file to a Memory that the other does not is a contradiction on the examiner's
+# screen. Matched exactly, never by substring — "media" appears in
+# "https://…/previewmedia/<UUID>", which is not a Memory claim at all and used to be indexed as one.
+SNAP_CLAIM_PREFIXES = (
+    ("snap-media-", "Memory media", "full"),
+    ("snap-asset-raw-media-", "Memory media", "full"),
+    ("g-media-", "Memory media", "full"),
+    ("snap-overlay-", "Memory overlay", "overlay"),
+    ("snap-rendered-lowres-", "Memory thumbnail", "rendered"),
+    ("snap-thumbnail-", "Memory thumbnail", "thumbnail"),
+)
+
+# …and the one shape that puts the UUID FIRST: "<UUID>_memories_backup_transcoded". Nothing before
+# the UUID means a prefix test sees an empty string, which is why these were dropped — while being
+# MEDIA_CONTEXT_TYPE 19 (full media) that decrypts with the Memory's own key to a complete MP4.
+# Verified on two devices, including minute-long videos recovered by nothing else in the report.
+SNAP_CLAIM_SUFFIXES = (
+    ("_memories_backup_transcoded", "Memory media", "transcoded"),
+)
+
+
+def classify_snap_claim(ek):
+    """(snap UUID, category, role) for a Memory-scoped EXTERNAL_KEY, else 3×None."""
+    if not ek:
+        return None, None, None
+    low = ek.lower()
+    for prefix, category, role in SNAP_CLAIM_PREFIXES:
+        if low.startswith(prefix):
+            mo = _UUID_RE.match(ek[len(prefix):]) or _UUID_RE.search(ek)
+            return (mo.group(0), category, role) if mo else (None, None, None)
+    for suffix, category, role in SNAP_CLAIM_SUFFIXES:
+        if low.endswith(suffix):
+            mo = _UUID_RE.match(ek)
+            return (mo.group(0), category, role) if mo else (None, None, None)
+    return None, None, None
+
+
 def index_cache_controller(app):
     """
     Map memory snap UUID (lower) -> [(cache_key, role)] using cache_controller.db.
 
     This is how locally-captured media with **no CDN URL** is addressed: the
     CACHE_FILE_CLAIM.EXTERNAL_KEY looks like ``snap-media-<UUID>`` / ``snap-overlay-<UUID>`` /
-    ``snap-rendered-lowres-<UUID>`` and points to the SCContent file named CACHE_KEY.
+    ``snap-rendered-lowres-<UUID>`` / ``<UUID>_memories_backup_transcoded`` and points to the
+    SCContent file named CACHE_KEY. See SNAP_CLAIM_PREFIXES for every shape.
+
+    The UUID is usually the Memory's ZSNAPID, but it can be its ZMEDIAID instead, so callers must
+    look up the media-object ids too — ``collect_media`` does, and the cache_controller report has
+    the mirror-image fallback.
     """
     out = {}
     for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
@@ -1033,15 +1164,9 @@ def index_cache_controller(app):
         for ek, ck in rows:
             if not ek or not ck:
                 continue
-            mo = _UUID_RE.search(ek)
-            if not mo:
-                continue
-            prefix = ek[:mo.start()].lower()
-            if not any(t in prefix for t in ("media", "overlay", "lowres", "rendered")):
-                continue
-            role = ("overlay" if "overlay" in prefix else
-                    "rendered" if ("lowres" in prefix or "rendered" in prefix) else "full")
-            out.setdefault(mo.group(0).lower(), []).append((ck, role))
+            uuid, _category, role = classify_snap_claim(ek)
+            if uuid:
+                out.setdefault(uuid.lower(), []).append((ck, role))
     return out
 
 
@@ -1303,17 +1428,27 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     cc_keys = all_cache_keys(app)              # for two-way links to the cache_controller report
     userids = map_userids(app)                 # userHash -> userId, to spot cross-scope on-disk copies
     keyed = [(sid, m) for sid, m in memories.items() if m["key"] and m["iv"]]
+    # Locating a cache file needs no key — only reading an *encrypted* one does. A Memory with no
+    # usable key (My Eyes Only without the persistedkey) can still have its media on disk in the
+    # clear, and cache_controller.db names that file just the same; skipping those Memories is why
+    # one could show "no cached media" while the cache_controller report played the very same bytes.
+    # They go through the same path below, where decrypt_sccontent identifies plaintext before it
+    # ever looks at a key, so exactly the plaintext caches are recovered and nothing else.
+    unkeyed = [(sid, m) for sid, m in memories.items() if not (m["key"] and m["iv"])]
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
-    logger.info(f"Media: {len(keyed)} memories with a usable key, "
-                f"{len(scfull)} whole + {len(scparts)} split SCContent cache file(s)")
+    logger.info(f"Media: {len(keyed)} memories with a usable key"
+                + (f" ({len(unkeyed)} without one, scanned for plaintext caches)" if unkeyed else "")
+                + f", {len(scfull)} whole + {len(scparts)} split SCContent cache file(s)")
     t0 = time.monotonic()
 
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
-    for done, (sid, m) in enumerate(keyed, 1):
+    addressed = keyed + unkeyed
+    for done, (sid, m) in enumerate(addressed, 1):
         if done % 2000 == 0:
-            logger.info(f"  SCContent: {done}/{len(keyed)} memories")
+            logger.info(f"  SCContent: {done}/{len(addressed)} memories")
+        has_key = bool(m["key"] and m["iv"])
         targets = []                                       # (role, cache_key, addressing basis)
         url_fields = {"full": "ZMEDIADOWNLOADURL", "overlay": "ZOVERLAYDOWNLOADURL",
                       "thumbnail": "ZTHUMBNAILDOWNLOADURL"}
@@ -1322,26 +1457,50 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
             tok = url_token(url)
             if tok:
                 basis = (f"Located by CDN URL: CACHE_KEY = SHA-256 of the token in "
-                         f"{url_fields[role]} (first 16 bytes). Decrypted with the snap's "
-                         f"AES-256-CBC key/IV.")
+                         f"{url_fields[role]} (first 16 bytes).")
                 targets.append((role, hashlib.sha256(tok.encode()).hexdigest()[:32], basis))
         for ck, role in ccindex.get(sid.lower(), []):
             basis = (f"Located via cache_controller.db: a CACHE_FILE_CLAIM EXTERNAL_KEY "
-                     f"(snap-{role}-/g-media-<snapid>) names this Memory and points at CACHE_KEY "
-                     f"{ck}. Decrypted with the snap's AES-256-CBC key/IV.")
+                     f"(snap-*-<snapid> / g-media-<snapid> / <snapid>_memories_backup_transcoded) "
+                     f"names this Memory and points at CACHE_KEY {ck}.")
             targets.append((role, ck, basis))
+        # A claim can carry the media OBJECT's id instead of the snap's — the same reference that
+        # keys a Memory moved into My Eyes Only. Looked up as well, not instead: a Memory has
+        # several cached files and only some of the claims name it by ZSNAPID. The cache_controller
+        # report resolves the same case in the other direction, so the two now agree.
+        for ref in m.get("media_refs") or []:
+            for ck, role in ccindex.get(str(ref).lower(), []):
+                basis = (f"Located via cache_controller.db: no claim names this Memory's ZSNAPID, "
+                         f"but a CACHE_FILE_CLAIM EXTERNAL_KEY carries {ref} — the media object "
+                         f"this Memory references (ZMEDIAID / ZDUPLICATEDFROMSNAPID) — and points "
+                         f"at CACHE_KEY {ck}.")
+                targets.append((role, ck, basis))
 
         seen = set()
         for role, cache_key, addr_basis in targets:
             if cache_key in seen:
                 continue
             seen.add(cache_key)
+            if not has_key and not guess_media(_sccontent_head(cache_key, scfull, scparts)):
+                # Nothing but an already-plaintext cache can be read without a key, and the first
+                # bytes settle that. Decided before _resolve_sccontent so a keyless Memory never
+                # costs a full read (and concatenation of every shard) of a file we cannot use.
+                continue
             cipher, fulls, pparts, coverage = _resolve_sccontent(cache_key, scfull, scparts)
             if cipher is None:
                 continue
             padded, stripped, ext, tail_ok = decrypt_sccontent(cipher, m["key"], m["iv"])
             if padded is None:
                 continue
+            # Said after the fact, not before: tail_ok is None only when the file was stored in the
+            # clear, and claiming a decryption that did not happen would imply we held a key — the
+            # opposite of the finding on a Memory whose own key is still wrapped.
+            addr_basis += " " + (
+                "The cached bytes are stored in the clear: no key was needed, and none was used."
+                if tail_ok is None else
+                "Decrypted with the snap's AES-256-CBC key/IV." if not m.get("key_source") else
+                f"Decrypted with the AES-256-CBC key/IV of the media object this Memory "
+                f"references ({m['key_source']}), which is not a key of its own.")
             complete, why_incomplete = _sccontent_completeness(coverage, tail_ok)
             has_pad = padded != stripped
             if padding == "keep":
@@ -1377,8 +1536,11 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                           "scope_by_path": scope_by_path, "cross_scope": cross_scope})
             m["media_files"].append(entry)
 
-    n_sc = sum(len(m["media_files"]) for _, m in keyed)
-    logger.info(f"Media: SCContent done — {n_sc} file(s) in {time.monotonic() - t0:.0f}s")
+    n_sc = sum(len(m["media_files"]) for _, m in addressed)
+    n_clear = sum(len(m["media_files"]) for _, m in unkeyed)
+    logger.info(f"Media: SCContent done — {n_sc} file(s) in {time.monotonic() - t0:.0f}s"
+                + (f"; {n_clear} of them recovered for Memories with no usable key, from caches "
+                   "stored in the clear" if n_clear else ""))
 
     # --- caching-media (link by decrypt-and-match; unique names by item hash) ---
     t0 = time.monotonic()
@@ -1880,7 +2042,79 @@ def _dedup_media(members):
     return files
 
 
-def _enc_html(members):
+def _account_label(user_hash, userids=None):
+    """How every panel names an account: its userId when the SCContent folders give one, the
+    userHash otherwise. The two identify the same account — userHash is sha256(userId) — but only
+    the userId appears anywhere else the examiner looks (scdb's ZSAVERUSERID, the keychain items,
+    the index's user filter), so a message that quotes only the hash reads as a *different*
+    account."""
+    return (userids or {}).get(user_hash) or ("userHash " + (user_hash or "")[:12] + "…")
+
+
+def _meo_locked_html(owner_hash, userids=None, meo_owners=None, recovered=False):
+    """The 'My Eyes Only, key still wrapped' notice for one account.
+
+    ``meo_owners`` is the list of userIds the supplied keychain holds a
+    ``com.snapchat.keyservice.persistedkey`` for (``None`` when that could not be determined), so
+    the notice can say which of three things actually happened instead of always asserting the
+    third: the keychain has no persistedkey at all, it has one but for another account, or it has
+    this account's and the unwrap still failed.
+    """
+    uid = (userids or {}).get(owner_hash)
+    who = html.escape(uid) if uid else html.escape(_account_label(owner_hash, userids))
+    if uid:
+        who += f" (userHash {html.escape((owner_hash or '')[:12])}…)"
+    item = "<code>com.snapchat.keyservice.persistedkey</code>"
+    if meo_owners is None:
+        why = f"no {item} item for that account is in the supplied keychain"
+    elif not meo_owners:
+        why = (f"the supplied keychain holds no {item} item <b>at all</b> — not for this account "
+               "and not for any other")
+    elif uid and uid in meo_owners:
+        # The keychain did carry this account's master key: the unwrap itself failed, which is a
+        # different finding from a missing key and must not be reported as one.
+        why = (f"the {item} item for that account <b>is</b> in the supplied keychain but did not "
+               "unwrap this key")
+    else:
+        others = ", ".join(html.escape(u) for u in meo_owners)
+        why = (f"the supplied keychain's only {item} item(s) belong to account(s) {others}, not to "
+               "that account")
+    # What the missing key does and does not cost, said against what this page actually shows: the
+    # cache stores whatever the CDN sent, sometimes in the clear, and "the key is locked" must not
+    # be read as "the media is unreadable" when the file is right there below.
+    media = ("The cached media below was recovered even so — those bytes are stored in the clear, "
+             "so reading them needed no key." if recovered else
+             "The media may still be present on disk.")
+    return ("<div class='v muted'>My Eyes Only — this memory's key is stored <b>wrapped</b> in the "
+            f"MEO master key of account {who}, and {why}, so it cannot be unwrapped. This applies "
+            "on both storage schemas: a MEO key is wrapped in "
+            "<code>ZGALLERYSNAP.ZENCRYPTION</code> just as it is in "
+            f"<code>gallery.encrypteddb</code>. {media}"
+            + _info(MEO_WRAPPED_BASIS) + "</div>")
+
+
+def _key_source_html(members):
+    """Where a key came from, when it is not the Memory's own snap_key_iv row.
+
+    Silent for an ordinary key: only a key borrowed from the media object this Memory references
+    needs saying, and it must say it — the examiner is otherwise left to assume a key that plainly
+    is not this snap's belongs to this snap."""
+    borrowed = [m for m in members if m.get("key_source")]
+    if not borrowed:
+        return ""
+    refs = ", ".join(html.escape(str(r)) for r in
+                     dict.fromkeys(m["key_source"] for m in borrowed))
+    meo = " This Memory is in My Eyes Only; its own key stays wrapped." \
+        if any(m["is_meo"] for m in borrowed) else ""
+    return ("<div class='k'>Key source</div><div class='v'>Not this snap's own "
+            "<code>snap_key_iv</code> row — this is the key of the media object it references "
+            f"(<code>ZMEDIAID</code> / <code>ZDUPLICATEDFROMSNAPID</code> {refs}), whose row "
+            "survives in <code>gallery.encrypteddb</code> although its <code>ZGALLERYSNAP</code> "
+            f"row does not.{meo} Confirmed by the media below decrypting."
+            + _info(MEDIA_OBJECT_KEY_BASIS) + "</div>")
+
+
+def _enc_html(members, userids=None, meo_owners=None):
     """Encryption block. Normally one shared key/IV per ZMEDIAID group, but guard the rare case
     where grouped memories carry different keys by listing them per memory."""
     keyed = [m for m in members if m["key"] and m["iv"]]
@@ -1888,7 +2122,8 @@ def _enc_html(members):
     if len(distinct) == 1:
         m = keyed[0]
         return (f"<div class='k'>Key (AES-256)</div><div class='v hex'>{m['key'].hex()}</div>"
-                f"<div class='k'>IV</div><div class='v hex'>{m['iv'].hex()}</div>")
+                f"<div class='k'>IV</div><div class='v hex'>{m['iv'].hex()}</div>"
+                + _key_source_html(members))
     if distinct:                                           # more than one key across the group
         rows = []
         for m in members:
@@ -1897,16 +2132,11 @@ def _enc_html(members):
                             f"<div class='v hex'>{m['key'].hex()}</div>"
                             f"<div class='k'>{html.escape(m['snap_id'][:8])}… IV</div>"
                             f"<div class='v hex'>{m['iv'].hex()}</div>")
-        return "".join(rows)
+        return "".join(rows) + _key_source_html(members)
     if any(m.get("key_wrapped") for m in members):
-        owner = next((m["user_hash"][:12] for m in members if m.get("key_wrapped")), "")
-        return ("<div class='v muted'>My Eyes Only — this memory's key is stored <b>wrapped</b> in "
-                "the account's MEO master key and no <code>com.snapchat.keyservice.persistedkey</code> "
-                f"item for account {html.escape(owner)}… is in the supplied keychain, so it cannot "
-                "be unwrapped. This applies on both storage schemas: a MEO key is wrapped in "
-                "<code>ZGALLERYSNAP.ZENCRYPTION</code> just as it is in "
-                "<code>gallery.encrypteddb</code>. The media may still be present on disk."
-                + _info(MEO_WRAPPED_BASIS) + "</div>")
+        owner = next((m["user_hash"] for m in members if m.get("key_wrapped")), "")
+        return _meo_locked_html(owner, userids, meo_owners,
+                                recovered=any(m.get("media_files") for m in members))
     if any(m["is_meo"] for m in members):
         return "<div class='v muted'>My Eyes Only — key not available</div>"
     return "<div class='v muted'>key not available</div>"
@@ -2100,11 +2330,13 @@ PACK_IN_CACHEMEDIA_BASIS = (
 # --------------------------------------------------------------------------- detail sub-page
 
 def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
-                         src_root, manifest, userids, media_prefix="../", cc_prefix="../../"):
+                         src_root, manifest, userids, media_prefix="../", cc_prefix="../../",
+                         meo_owners=None):
     """Return the detail body HTML for one group (thumbnail + all blocks), for a sub-page.
 
     ``media_prefix`` prefixes links to ``media/`` and ``cc_prefix`` prefixes links to the sibling
     CacheController report, since sub-pages live one level deeper (``Memories/pages/``).
+    ``meo_owners`` is passed straight to `_meo_locked_html` — see there.
     """
     files = _dedup_media(members)
     still = _best_still(files)
@@ -2161,13 +2393,13 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                  if loc_shared else
                  f"<div class='sect'>Location (gallery.encrypteddb)</div>{varies}")
     enc_block = (f"<div class='sect'>Encryption (per-snap AES key)</div>"
-                 f"<div class='grid'>{_enc_html(members)}</div>")
+                 f"<div class='grid'>{_enc_html(members, userids, meo_owners)}</div>")
     shared_html = (f"<div class='shared2'><div class='c'>{left}</div>"
                    f"<div class='c'>{loc_block}{enc_block}</div></div>")
 
     mem_blocks = []
     for idx, m in enumerate(members):
-        uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:12] + "…")
+        uid = _account_label(m["user_hash"], userids)
         parts = [f"<div id='mem-{html.escape(m['snap_id'])}'>"
                  f"<span class='snaplab'>Snap ID</span> "
                  f"<span class='snapid'>{html.escape(m['snap_id'])}</span></div>"
@@ -2264,11 +2496,11 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
 
 
 def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                   src_root, manifest, userids, tz_label, run_id="default"):
+                   src_root, manifest, userids, tz_label, run_id="default", meo_owners=None):
     """Write ``pages/<key>.html`` for one group and return its path relative to the Memories dir."""
     lead = members[0]
     body = _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
-                                src_root, manifest, userids)
+                                src_root, manifest, userids, meo_owners=meo_owners)
     back = (f'<a class="back" href="../Memories_report.html#mem-{html.escape(lead["snap_id"])}">'
             '← Back to Memories index</a>')
     # The selection controls: the same store as the index (both load ../selection.js), saved back
@@ -2455,7 +2687,8 @@ def _wal_summary_html(memories):
 
 
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
-                    src_root=None, manifest=None, run_id="default", keychain_note=""):
+                    src_root=None, manifest=None, run_id="default", keychain_note="",
+                    meo_owners=None):
     """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
 
     Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
@@ -2476,7 +2709,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     pages_dir = os.path.join(outdir, "pages")
     for key, members in groups:
         render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                       src_root, manifest, userids, tz_label, run_id)
+                       src_root, manifest, userids, tz_label, run_id, meo_owners)
 
     # manifest for the cache_controller report's direct-to-detail links
     page_manifest = {m["snap_id"]: f"pages/{key}.html" for key, members in groups for m in members}
@@ -2775,8 +3008,15 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     # given its own. userHash is sha256(userId), which is what find_profiles keys profiles by.
     persisted_by_hash = {hashlib.sha256(u.encode()).hexdigest(): v
                          for u, v in (kc.get("persistedkeys") or {}).items()}
+    # Which accounts this keychain actually carries a My Eyes Only master key for, so the report can
+    # say whether one is missing for THIS account or missing outright. None — not [] — when a
+    # persistedkey is present but its payload named no userId: "we cannot tell which account" must
+    # not reach the examiner as "there is none".
+    meo_owners = (sorted(kc.get("persistedkeys") or {})
+                  if (kc.get("persistedkeys") or not persisted) else None)
 
     profiles = find_profiles(app)
+    userids = map_userids(app)                 # userHash -> userId, how the report names an account
     logger.info(f"Found {len(profiles)} Snapchat profile(s) in {app}; timestamps in {tz_label}")
 
     # Built once here and reused: carve_deleted_memories has to resolve cache keys to on-disk bytes
@@ -2792,18 +3032,26 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
                                                                and len(persisted_by_hash) <= 1
                                                                else "")
         mems, stats = load_memories(p, egocipher, p_persisted, workdir, timefmt)
-        logger.info(f"  profile {p['userHash'][:12]}: {len(mems)} memories "
+        # Name the account by its userId, not only by the userHash: the hash appears nowhere else
+        # the examiner looks, so a log line that quotes it alone reads as some third account.
+        who = f"{_account_label(p['userHash'], userids)} (userHash {p['userHash'][:12]}…)"
+        logger.info(f"  profile {who}: {len(mems)} memories "
                     f"(schema={stats['schema']}, gallery_keys={stats['gallery_keys']}, "
                     f"locations={stats['locations']})")
+        if stats.get("adopted_keys"):
+            logger.info(f"    {stats['adopted_keys']} Memory/Memories keyed from the media object "
+                        "they reference (ZMEDIAID / ZDUPLICATEDFROMSNAPID): the referenced snap's "
+                        "snap_key_iv row survives although its ZGALLERYSNAP row does not — this is "
+                        "how a Memory moved into My Eyes Only decrypts without a persistedkey")
         if stats.get("meo"):
             logger.info(f"    My Eyes Only: {stats['meo']} memory/memories, "
                         f"{stats['meo_unwrapped']} key(s) unwrapped with the keychain "
-                        f"persistedkey, {stats['meo_locked']} still locked")
+                        f"persistedkey, {stats['meo_from_media_object']} keyed from the media "
+                        f"object referenced, {stats['meo_locked']} still locked")
             if stats["meo_locked"]:
-                logger.warning(f"    My Eyes Only: no persistedkey for account "
-                               f"{p['userHash'][:12]} in this keychain — {stats['meo_locked']} "
-                               "MEO memory/memories cannot be decrypted (their media is on disk "
-                               "but the key stays wrapped)")
+                logger.warning(f"    My Eyes Only: no persistedkey for account {who} in this "
+                               f"keychain — {stats['meo_locked']} MEO memory/memories cannot be "
+                               "decrypted (their media is on disk but the key stays wrapped)")
         if stats.get("wal_deleted") or stats.get("wal_changed"):
             logger.info(f"    scdb-27 -wal: {stats['wal_deleted']} memory row(s) exist only "
                         f"without the -wal (deleted since the last checkpoint), "
@@ -2815,7 +3063,7 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
                                         p_persisted, timefmt)
         if carved:
             logger.warning(f"    RECOVERED {len(carved)} deleted Memory/Memories for profile "
-                           f"{p['userHash'][:12]}: no scdb row survives, but a key carved from a "
+                           f"{who}: no scdb row survives, but a key carved from a "
                            f"superseded -wal frame decrypts their cached media "
                            f"({', '.join(s[:8] + '…' for s in sorted(carved))})")
             all_memories.update(carved)
@@ -2833,9 +3081,9 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     run = report_ui.run_id(reports_root)
     report_ui.write_selection_stub(reports_root, run)       # shared by every report of the run
     report, linked, located = generate_report(all_memories, outdir, keychain_available,
-                                              userids=map_userids(app), tz_label=tz_label,
+                                              userids=userids, tz_label=tz_label,
                                               src_root=src_root, manifest=manifest, run_id=run,
-                                              keychain_note=kc["detail"])
+                                              keychain_note=kc["detail"], meo_owners=meo_owners)
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 
