@@ -172,17 +172,27 @@ whose claim has no renderable file is one of those duplicates and is dropped, ex
 report drops it. Every other row is kept even when its file is missing: a message whose media was
 not recovered is a finding, not noise.
 
+**Messages with no cache claim at all.** These reach the report as `Media (no cached file)` (or
+`No cached file (content_type <n>)` for a type the parser cannot name) — see
+[report_communications.md](report_communications.md#messages-whose-media-is-no-longer-cached) for
+how the label is derived and why it does not say "expired". The parser used to drop these rows,
+which is what made the reports list fewer messages than `arroyo.db` holds. The row detail shows
+arroyo's own numeric value as `content_type (arroyo, raw)` beside the label.
+
 ### Text sent with media
 The parser replaces a message's content with its attachment, which used to destroy any text the
-message also carried. `mergeCacheChats` now keeps a copy of the parsed content first
-(`Message Text`), so a caption sent with a photo appears next to it in the row and in the expanded
-detail.
+message also carried. `getChats` now reads the text out of **the field that holds it** and keeps it
+in `Message Text`, so a caption sent with a photo appears next to it in the row and in the expanded
+detail. See
+[report_communications.md](report_communications.md#reading-the-text-a-person-actually-typed) for
+the field paths and why the whole-protobuf scan they replace could not be relied on.
 
-Most media rows carry a *technical* value there rather than anything the user typed — the parser
-lifts whatever string it finds in the protobuf, which for media is the media id or the cache claim's
-`EXTERNAL_KEY` — so `_own_text` drops values that are a cache key, an `EXTERNAL_KEY`, a bare UUID or
-the attachment's own file name. Nothing is hidden: the expanded row always lists the raw value as
-`message_content (parsed)`.
+`_own_text` is now only a screen for a value that arrived through the old concatenating path — a
+cache key, an `EXTERNAL_KEY`, a bare UUID, a media id, or the attachment's own file name. It
+deliberately does **not** decide by content type: a media message can carry a caption the sender
+typed, so "only show text for `content_type` 1" would drop real evidence. Nothing is hidden either
+way: the expanded row always lists the raw value as `message_content (parsed)`, with the raw
+`content_type` beside it.
 
 A message whose protobuf `getChats` could not parse is marked **⚠ not parsed** instead of showing
 the parser's error string as if it were the message; the expanded row explains it and gives the ids

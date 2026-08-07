@@ -82,6 +82,8 @@ COL_SCONV = "Server Conversation ID"                           # optional
 COL_SENDER = "Sender ID"
 COL_CONTENT = "Message Content"
 COL_TYPE = "Content Type"
+COL_RAWTYPE = "Content Type (arroyo)"                          # optional: the numeric value the
+                                                               # label above was derived from
 COL_CREATED = "Creation Timestamp UTC+0"
 COL_READ = "Read Timestamp UTC+0"
 COL_SMID = "Server Message ID"
@@ -96,18 +98,27 @@ _PARSE_ERROR = "ERROR - Something went wrong when parsing this message"
 # An EXTERNAL_KEY-shaped value: "<type>:<conversation uuid>:<message>:<part>".
 _EXTKEY_RE = re.compile(r"^[^:]*:[0-9a-fA-F-]{36}:\d+")
 
+# C0 control characters. A value that came through the concatenating fallback carries the protobuf
+# field byte that followed the string (a media id arrives as "<mediaId>\x04"). Real chat text keeps
+# its newlines and tabs; nothing else in this range belongs in a message.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-def _own_text(raw, atts, conv_id):
+
+def _own_text(raw, atts, conv_id, raw_type=""):
     """The message's **own** text, or "" when the parsed value is not text at all.
 
-    When a message has a cached attachment the parser replaces its content with that attachment, so
-    the only surviving copy of what the message said is the parsed value kept alongside it — but for
-    most media rows that value is a technical token rather than anything the user typed (the parser
-    lifts whatever string it finds in the protobuf, which for media is the media id or the cache
-    claim's EXTERNAL_KEY). Those are recognised and dropped here rather than shown as if they were
-    the message; the raw value is still listed in the row's detail, so nothing is hidden.
+    The parser reads a message's text out of the protobuf field that holds it
+    (``ParseSnapchat_iOS.messageText``), so what arrives here is normally either the message or
+    nothing. The tests below are the screen for a value that came through the older path instead,
+    which concatenated every string in the protobuf and so produced a media id or a cache claim's
+    EXTERNAL_KEY where the text should be. The raw value is always listed in the row's detail, so
+    nothing is hidden either way.
+
+    ``raw_type`` — arroyo's own ``content_type`` — is deliberately **not** used to decide this. A
+    media message can carry a caption the sender typed, so gating on "is this a text message" would
+    drop real evidence.
     """
-    text = cell(raw)
+    text = _CONTROL_RE.sub("", cell(raw))
     if not text or text.startswith(_PARSE_ERROR):
         return ""
     low = text.strip()
@@ -119,6 +130,8 @@ def _own_text(raw, atts, conv_id):
         return ""                                              # a cache claim's EXTERNAL_KEY
     if _UUID_RE.match(low):                                    # a bare media / message id
         return ""
+    if re.fullmatch(r"[A-Za-z0-9_-]{20,24}(\.\d+)?", low):     # a bare media id, with or without
+        return ""                                              # the ".1020" content-type suffix
     return text
 
 # Index-table geometry (one fixed row height + one column track list for the header and every row).
@@ -371,6 +384,7 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         # the parsed message content: kept by the parser before the attachment overwrote it, and
         # equal to the content itself for a row that has no attachment
         raw_text = cell(row.get(COL_TEXT)) if COL_TEXT in columns else ("" if att else content)
+        raw_type = _id_str(row.get(COL_RAWTYPE)) if cell(row.get(COL_RAWTYPE)) else ""
         by_conv.setdefault(conv_id, []).append({
             "smid": cell(row.get(COL_SMID)),
             "cmid": _id_str(row.get(COL_CMID)),
@@ -378,7 +392,8 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "sender_bold": sender != sender_plain,
             "direction": "Sent" if outgoing else ("Received" if sender_plain else ""),
             "types": [ctype] if ctype else [],
-            "text": _own_text(raw_text, [att] if att else [], conv_id),
+            "raw_types": [raw_type] if raw_type else [],
+            "text": _own_text(raw_text, [att] if att else [], conv_id, raw_type),
             "raw_text": raw_text,
             "parse_error": bool(raw_text.startswith(_PARSE_ERROR)),
             "atts": [att] if att else [],
@@ -440,6 +455,9 @@ def _merge_rows(rows):
         for ctype in row["types"]:
             if ctype not in first["types"]:
                 first["types"].append(ctype)
+        for raw in row["raw_types"]:
+            if raw not in first["raw_types"]:
+                first["raw_types"].append(raw)
         # a row that carried the text keeps it (the row a claim was joined onto has the file
         # instead), and a row that actually has a timestamp beats a cache-only row's "Unknown"
         if not first["text"] and row["text"]:
@@ -810,7 +828,15 @@ _TYPE_HINT = ("\"Text\" is arroyo.db conversation_message.content_type = 1. The 
               "the message (\"1:\" = temporarily stored media, \"thumbnail~1:\" = thumbnail, "
               "\"cm-chat-media-video-1\" = media the user saved in the chat), or from content_type "
               "3 (video of unknown source) / 5 (sticker). \"local_message_reference\" means the "
-              "attachment was resolved through the row's local_message_references plist.")
+              "attachment was resolved through the row's local_message_references plist. "
+              "\"Media (no cached file)\" is a message arroyo.db records as carrying media for "
+              "which no cache file survives on this device — the message itself (sender, times, "
+              "both ids) is unaffected; only its content was not recovered. It does NOT mean the "
+              "media expired: it may equally have been evicted from the cache or never carried by "
+              "the extraction. The raw arroyo content_type is in the row detail below. \"System message\" is "
+    "content_type 9: an event the app recorded in the conversation rather than anything a user "
+    "typed or sent — its protobuf carries no text at all, and the description shown as its content "
+    "is written by the parser from the decoded structure.")
 
 _PARSE_FAIL_HINT = (
     "getChats could not read this message's conversation_message.message_content protobuf, so the "
@@ -819,11 +845,13 @@ _PARSE_FAIL_HINT = (
     "directly in arroyo.db with the conversation and message ids shown below.")
 
 _TEXT_HINT = (
-    "The message text as the parser read it. When a message has a cached attachment the parser "
-    "replaces the message content with that attachment, so the text shown here is the copy taken "
-    "before that happened. Values that are not text at all — a cache key, a cache claim's "
-    "EXTERNAL_KEY, a bare media id — are not shown as a message; the raw parsed value is always in "
-    "the expanded row under \"message_content (parsed)\".")
+    "What the sender typed, read out of the field of conversation_message.message_content that "
+    "holds it — the message body for a text message, and the caption for a media message that "
+    "carries one. It is read from that field rather than from the whole protobuf on purpose: a "
+    "message's protobuf also contains its encryption key, its media id and any lens or sticker "
+    "name, and those are not the message. A media message with no caption therefore shows no text "
+    "at all. Nothing is hidden: the full parsed value is always in the expanded row under "
+    "\"message_content (parsed)\", with the content_type it came from beside it.")
 
 _CONTENT_HINT = "The message text and every cached file the message carries. " + _TEXT_HINT
 
@@ -939,6 +967,7 @@ def _message_detail(msg, conv, prefix="../", contact_links=None):
         ("client_message_id", _esc(msg["cmid"]), "mono"),
         ("sender_id", sender, ""),
         ("content_type", _esc(" + ".join(msg["types"])), ""),
+        ("content_type (arroyo, raw)", _esc(" + ".join(msg.get("raw_types") or [])), "mono"),
         ("message_content (parsed)", text_html(msg["raw_text"]) if msg["raw_text"]
          else '<span class="muted">empty</span>', ""),
         ("creation_timestamp (UTC, as stored)", _esc(msg["created_utc"]), "mono"),

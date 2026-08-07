@@ -72,13 +72,18 @@ Findings are worth writing down; the device they came from is not. **Never commi
   truncated id is still a unique handle for a real account;
 - **usernames**, display names, or content hashes (MD5/SHA-256) of a device owner's media;
 - **extraction dates**, case or exhibit numbers, serial numbers;
-- **filesystem paths** from an analyst machine or evidence store (`D:\…`, `C:\Temp\…`).
+- **filesystem paths** from an analyst machine or evidence store (`D:\…`, `C:\Temp\…`);
+- **per-device tallies** of what a test extraction contains — "106 of 353 messages", "22 captions",
+  "3 conversations". A census of the test devices is more than a reader needs, and it accumulates
+  across write-ups into a profile of the corpus.
 
 Refer to a device by the properties that make it technically interesting — OS and app version,
 storage schema, keychain class, number of accounts — e.g. "the two-account iOS 26 device", "the
-backup-class-keychain device". Counts, sizes, byte offsets, timings and format details are fine and
-are the point of the write-up. Placeholders such as `<snapId>`, `<userHash>`, `<CACHE_KEY>` belong
-in path and format examples.
+backup-class-keychain device". Byte offsets, field paths, structure sizes and format details are
+fine and are the point of the write-up: they describe the *format*, not the device. Say what was
+verified and how ("verified on two devices", "every text message carries this field") without
+quoting the count. Placeholders such as `<snapId>`, `<userHash>`, `<CACHE_KEY>` belong in path and
+format examples.
 
 The corpus itself, and the script that runs it, live outside the repo for the same reason.
 
