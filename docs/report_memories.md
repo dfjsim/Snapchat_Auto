@@ -28,16 +28,19 @@ requires `egocipher`.
 
 ## How each media file is located and linked
 
-For every Memory that has an AES key/IV, `collect_media` gathers candidate cache files three ways.
-Each recovered file records a `how` string (shown by its “?” icon):
+`collect_media` gathers candidate cache files three ways. Each recovered file records a `how`
+string (shown by its “?” icon):
 
 1. **SCContent by CDN URL** — `CACHE_KEY = SHA-256(token)[:16 bytes]`, where `token` is the last
    path segment of `ZMEDIADOWNLOADURL` / `ZOVERLAYDOWNLOADURL` / `ZTHUMBNAILDOWNLOADURL`. Decrypt
    with the snap's AES-256-CBC key/IV.
-2. **SCContent by `cache_controller.db`** — a `CACHE_FILE_CLAIM.EXTERNAL_KEY`
-   (`snap-media-/overlay/-rendered-lowres-<snapid>`, `g-media-<snapid>`) names the Memory and
+2. **SCContent by `cache_controller.db`** — a `CACHE_FILE_CLAIM.EXTERNAL_KEY` names the Memory and
    points at `CACHE_KEY`. Essential for **locally-captured media** (e.g. device-recorded videos)
-   whose `ZGALLERYSNAP` URL fields are empty. See `index_cache_controller`.
+   whose `ZGALLERYSNAP` URL fields are empty. `classify_snap_claim` decides which shapes count —
+   including `<snapid>_memories_backup_transcoded`, which puts the UUID *first* — and the lookup
+   uses the Memory's `ZSNAPID` **and** its `media_refs` (`ZMEDIAID` / `ZDUPLICATEDFROMSNAPID`),
+   since a claim can name the media object instead of the snap. Both reports read that one list;
+   see [cross_report_linking.md](cross_report_linking.md#which-external_key-shapes-name-a-memory).
 3. **caching-media `.pack` by decrypt-and-match** — pack names are opaque, so each folder is tried
    against every Memory's key/IV; the key that yields valid media magic bytes (after the 8-byte
    header) identifies the Memory. **Not** referenced by `cache_controller.db`.
@@ -46,6 +49,25 @@ In cases 1–2 a file may be a single `<CACHE_KEY>` or split into `<CACHE_KEY>_<
 that are concatenated in offset order before decryption (`_resolve_sccontent`); the `how` text
 notes the reconstruction. If a video has no cached still, a **poster frame** is derived from the
 decrypted `.mp4` and clearly labelled as a derived artifact.
+
+### A Memory with no key is still searched (cases 1–2)
+
+Locating a cache file needs no key — only *reading an encrypted one* does, and not every cache is
+encrypted. So Memories with no usable key (My Eyes Only whose `persistedkey` is missing) go through
+the same addressing, and `decrypt_sccontent` identifies plaintext from the magic bytes before it
+ever looks at a key: exactly the caches stored in the clear are recovered, and nothing else. Such a
+file's `how` says *"the cached bytes are stored in the clear: no key was needed, and none was
+used"* rather than claiming a decryption that did not happen, and the locked-MEO notice in the
+Encryption block stops saying the media "may still be present on disk" once it is.
+
+Gating this on `m["key"]` — as it was — meant a Memory could show **no media and no 🗄 cache link**
+while the cache_controller report reconstructed and played the very same bytes from the very same
+shards. To keep the keyless scan cheap, `_sccontent_head` types the file from its first 16 bytes,
+so a keyless Memory never costs a full read and concatenation of a file that cannot be used; a
+shard set with no offset-0 shard reads as *unknown* (skipped), never as *not media*.
+
+Case 3 has no keyless equivalent: a `.pack` is linked to its Memory **by** decrypting it, so
+without a key there is nothing to match on.
 
 Case 3 identifies the owning key with a **32-byte probe** (`pack_matches`) rather than decrypting
 the whole item once per candidate key. Every acceptance test in `decrypt_pack` reads within the
@@ -120,6 +142,31 @@ index's Kind column (`m["is_meo"]`, set from `IS_ENCRYPTED` / the MEO key path �
 [snapchat_ios_memories_decryption.md](snapchat_ios_memories_decryption.md)), matches a search for
 "meo" / "my eyes only", and can be isolated with the **My Eyes Only** filter (any / only / exclude).
 The detail page keeps its existing "My Eyes Only" label next to the kind.
+
+A MEO Memory is **not** automatically undecryptable. One that was *moved* into My Eyes Only points
+at the media object it came from (`ZMEDIAID` / `ZDUPLICATEDFROMSNAPID`), whose `snap_key_iv` row
+survives with `encrypted=0` although its `ZGALLERYSNAP` row does not — so its cached media decrypts
+with no `persistedkey` at all. `adopt_media_object_keys` gives such a Memory that key (only an
+unwrapped 32/16 pair, only from an id the row actually references), records it in
+`m["key_source"]`, and the Encryption block labels it as the media object's key rather than the
+snap's — as does each media file's "?" basis. The mechanism, and its limits, are in
+[snapchat_ios_memories_decryption.md](snapchat_ios_memories_decryption.md#a-memory-moved-into-my-eyes-only-keeps-its-original-key).
+`stats["meo_from_media_object"]` counts these separately from `meo_unwrapped`, so the keychain is
+never credited for a key it did not supply.
+
+When such a Memory's key is still **wrapped** (`m["key_wrapped"]` — no usable key was produced), the
+detail page's Encryption block says so, and `_meo_locked_html` distinguishes the three reasons
+rather than always asserting the last: the supplied keychain holds **no**
+`com.snapchat.keyservice.persistedkey` item at all, it holds one but for **another** account, or it
+holds **this** account's and the unwrap still failed. `meo_owners` (the userIds the keychain carries
+a persistedkey for, `None` when the item's payload named no userId) is threaded from `main` for
+this; "we cannot tell which account" must never reach the examiner as "there is none".
+
+The account is named by its **userId**, with the `userHash` beside it (`_account_label`). Naming it
+by the hash alone — as the notice once did — reads as a *different* account: the hash is
+`sha256(userId)` and appears nowhere else the examiner looks (`ZSAVERUSERID`, the keychain items,
+the index's user filter and the `user …` line under each Snap ID all use the userId), so a correct
+statement about the signed-in account looked like a statement about some third one.
 
 ### Selecting memories for the case
 Each index row and each memory block on a detail sub-page carries the **same checkbox** — both

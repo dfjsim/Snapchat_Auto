@@ -267,10 +267,14 @@ extraction (Device A) may include the filesystem but **not** those keys.
 |---|---|---|
 | Decrypt regular-memory media (`.pack` + SCContent) | **No keychain needed** | **`egocipher` required** |
 | Geolocation (`snap_location_table`) | **`egocipher` required** | **`egocipher` required** |
-| My Eyes Only memories | **`persistedkey` required** | `egocipher` + `persistedkey` required |
+| My Eyes Only memories | **`persistedkey` required** ¹ | `egocipher` + `persistedkey` required ¹ |
 
 So on the new schema the keychain is required for exactly two things: **geolocation** and
 **My Eyes Only**. Regular-memory imagery needs nothing.
+
+¹ With one exception, and it is not a rare one: a Memory *moved* into My Eyes Only still decrypts
+with the original snap's key, no `persistedkey` involved — see
+[A Memory moved into My Eyes Only keeps its original key](#a-memory-moved-into-my-eyes-only-keeps-its-original-key).
 
 ### My Eyes Only (MEO)
 
@@ -306,9 +310,53 @@ and reportable, outcome.
 > lengths on every MEO row in the corpus are unambiguous. Treat MEO as keychain-dependent on both
 > schemas.
 
-Because of this, on the new schema **seeing MEO media in the report does imply `persistedkey` was
-read**, while regular-memory media implies nothing about the keychain. Geolocation remains the
-reliable tell for `egocipher`.
+> **Correction (2026-08-07).** This section used to end with "seeing MEO media in the report does
+> imply `persistedkey` was read". That does not hold either — see the next subsection. What the
+> wrapped key withholds is the *new row's own key*, not necessarily the bytes on disk.
+
+### A Memory **moved** into My Eyes Only keeps its original key
+
+Moving an existing Memory into My Eyes Only does **not** re-encrypt the media already cached on the
+device. What the app writes is a *new* `ZGALLERYSNAP` row for the moved Memory, whose own key
+(`ZENCRYPTION` / `snap_key_iv` with `encrypted=1`) is wrapped in the MEO master key — but that row
+still points at the **original media object**:
+
+| Field on the MEO row | Value |
+|---|---|
+| `ZMEDIAID` | the original snap's id |
+| `ZDUPLICATEDFROMSNAPID` | the original snap's id |
+| `ZENTRYID` (entry) | the original snap's id |
+| `ZSNAPSHASH` (entry) | the MEO snap's own id |
+
+The original's `ZGALLERYSNAP` row is gone once it has been moved. **Its `snap_key_iv` row is not**:
+it survives in `gallery.encrypteddb` with `encrypted=0` — an ordinary unwrapped 32/16 AES-256
+key/IV — and the cached ciphertext is still that snap's. So the media of such a Memory decrypts
+with **no keychain `persistedkey` at all**:
+
+```python
+# the MEO row's own key is 48/32 and stays wrapped; the media object's key is 32/16 and is not
+ref  = meo_row["ZMEDIAID"] or meo_row["ZDUPLICATEDFROMSNAPID"]
+key, iv, encrypted = gallery["snap_key_iv"][ref]     # encrypted == 0
+```
+
+Two consequences for a reader of these reports:
+
+* A tool that only ever looks up `snap_key_iv[<this snap id>]` reports the Memory as "key wrapped,
+  media on disk but undecryptable" while another tool decrypts it — the difference is which snap id
+  was looked up, not which keys either tool had. Keep rows whose `snap_id` matches **no**
+  `ZGALLERYSNAP` row; they are exactly the ones this needs.
+* The link is `ZMEDIAID` / `ZDUPLICATEDFROMSNAPID` — a recorded reference, not proximity — and the
+  result is still confirmed by the media decrypting to a recognised format. A key that merely sits
+  in the same database proves nothing.
+
+This is **not** a general MEO bypass. It recovers only media that was already cached under the
+original snap's key; a Memory captured straight into My Eyes Only, and anything else encrypted
+under the account's MEO master key, stays locked without `persistedkey`. Verified on an old-schema
+device (decrypts to a complete JPEG whose dimensions match the row's `ZWIDTH`×`ZHEIGHT`); a
+new-schema MEO memory in the corpus references no such surviving row and stays locked, as it should.
+
+Implemented by `adopt_media_object_keys` in `scripts/memories_media_report.py`, which labels every
+key it recovers this way in the report rather than presenting it as the snap's own.
 
 ---
 

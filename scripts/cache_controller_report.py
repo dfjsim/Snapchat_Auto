@@ -46,7 +46,7 @@ from scripts.data import sniff
 from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, _collapse_part_paths, guess_media,
-    has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE,
+    has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -88,30 +88,22 @@ MCT_LABELS = {
     2: "Chat media", 3: "Chat media", 19: "Full media", 26: "Rendered low-res",
 }
 
-# Snap-scoped EXTERNAL_KEY prefixes -> (category, role). The trailing value is a snap UUID that
-# joins to ZGALLERYSNAP.ZSNAPID (the Memory), which is how these link back to the Memories report.
-_SNAP_PREFIXES = [
-    ("snap-media-", "Memory media", "media"),
-    ("snap-overlay-", "Memory overlay", "overlay"),
-    ("snap-rendered-lowres-", "Memory thumbnail", "rendered"),
-    ("snap-thumbnail-", "Memory thumbnail", "thumbnail"),
-    ("g-media-", "Memory media", "media"),
-]
-
 
 def classify_external_key(ek, mct):
     """Return (category, snap_uuid_or_None) for one EXTERNAL_KEY.
 
-    snap_uuid is set only for Memory-scoped keys (``snap-*-<UUID>``), so the caller can link the
-    entry to a Memory. Everything else is bucketed for filtering/sorting in the report.
+    snap_uuid is set only for Memory-scoped keys, so the caller can link the entry to a Memory.
+    Which shapes those are is decided by ``classify_snap_claim`` in the Memories report — the one
+    list both reports read, so a file this report ties to a Memory is a file that report also
+    finds, and neither can quietly recognise a shape the other drops. Everything else is bucketed
+    for filtering/sorting in the report.
     """
     if not ek:
         return ("Unknown", None)
     low = ek.lower()
-    for prefix, category, _role in _SNAP_PREFIXES:
-        if low.startswith(prefix):
-            mo = _UUID_RE.search(ek)
-            return (category, mo.group(0) if mo else None)
+    snap_uuid, category, _role = classify_snap_claim(ek)
+    if snap_uuid:
+        return (category, snap_uuid)
     if "lens.data" in low or "/lens/" in low or low.startswith("lens"):
         return ("Lens", None)
     if "previewmedia" in low or "preview_thumbnail" in low:
@@ -614,6 +606,8 @@ def publish_posters(entries, files_dir, get_view=None,
             entry["poster"] = "files/" + poster
             continue
         if not has_video_track(src):                           # audio or a still: no frame exists
+            entry["poster_note"] = ("no poster frame: this file carries no video track that a "
+                                    "decoder can read")
             continue
         jobs.append((src, dst, entry, "files/" + poster))
     if not jobs:
@@ -631,6 +625,13 @@ def publish_posters(entries, files_dir, get_view=None,
         if done.get(src):
             entry["poster"] = rel
             made += 1
+        else:
+            # Say why the thumbnail is absent. A video listed with a bare link, next to videos with
+            # a frame, otherwise reads as a defect in the report rather than as what it is: this
+            # file did not decode, which for a cache usually means only part of it was stored.
+            entry["poster_note"] = ("no poster frame could be extracted — this cached video did "
+                                    "not decode, which usually means the device stored only part "
+                                    "of it (the link still opens the bytes that are there)")
     return made, len(jobs) - made
 
 
@@ -1454,8 +1455,10 @@ def _detail_html(entry, rel_prefix, src_root, manifest):
                           f"<div class='muted'>poster frame extracted by this tool from the cached "
                           f"video — a derived image, not a cached file{_info(POSTER_BASIS)}</div>"
                           if e.get("poster") else "")
+                why = (f"<div class='muted'>{_esc(e['poster_note'])}</div>"
+                       if e.get("poster_note") and not e.get("poster") else "")
                 hview.append(poster + f"<a class='cclink' href='{_esc(e['view'])}' target='_blank'>"
-                                      f"▶ view cached file</a>{note}")
+                                      f"▶ view cached file</a>{note}" + why)
         elif e.get("view_note"):                               # recognized media too large to embed
             hview.append(f"<div class='muted'>▶ {_esc(e['view_note'])}</div>")
         parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present</div>"
