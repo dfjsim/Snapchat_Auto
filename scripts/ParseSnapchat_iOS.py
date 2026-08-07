@@ -246,21 +246,39 @@ def path_to_image_html(filename):
     global outputDir_name
     dots_regex = re.compile(r"^\.+$")
 
+    # A message that carries no attachment holds "" here — an app event getChats decoded but could
+    # not describe (see describeEventMessages) — and "." / ".." resolve the same way. Joined onto
+    # the folder below they all name the cacheFiles *directory*, which of course exists, so the
+    # identification step would open a directory and Windows answers PermissionError. There is no
+    # attachment to render in any of these cases, so the value is returned untouched: calling an
+    # event message a "missing attachment" states something about it that is not true.
+    if isinstance(filename, str) and (not filename.strip() or dots_regex.match(filename)):
+        return filename
+
     try:
         path = Path(outputDir + "/cacheFiles/" + filename)
     except TypeError:
-        return
+        # Not a string at all (a NaN left by a merge). There is no attachment to name, and the
+        # cleanup loop below calls .startswith() on whatever comes back, so it must be a string.
+        return ""
 
     try:
-        path = path.replace("\\", "/")
-    except Exception:
-        pass
-
-    try:
-        if os.path.exists(path):
+        # isfile, not exists: only a regular file can be identified, and anything else reaching
+        # filetype.guess below is the PermissionError above wearing a different name.
+        if os.path.isfile(path):
             try:
                 basename = ntpath.basename(path)
                 kind = filetype.guess(path)
+                if kind is None:
+                    # filetype recognises nothing in it — a still-encrypted cache entry, a
+                    # zero-byte file, a plist. `kind.extension` below then raised AttributeError
+                    # into the catch-all at the end of this function, which returned None: the
+                    # report showed nothing at all for a message whose file is sitting in
+                    # cacheFiles, and logged nothing to say so. The filename stands instead, which
+                    # is what the "Unknown extension" branch below already does for a file whose
+                    # type IS recognised but is not renderable.
+                    logger.debug(f"Could not identify {basename}; left as its filename")
+                    return filename
                 if kind.extension not in ("mp4", "png", "jpg", "webp"):
                     return filename + " - Unknown extension: " + kind.extension
                 # link to a name that ends in the real extension (see namedWithExtension)
@@ -285,15 +303,18 @@ def path_to_image_html(filename):
                     cc_link = ''
                 return ('<span id="cf-' + basename + '">' + result + '</span>' + cc_link)
             except PermissionError as Error:
-                if dots_regex.match(filename):
-                    return filename
-                else:
-                    logger.error(Error)
-                    return filename + " missing attachment"
+                # A real file the process cannot read (locked by another handle, AV, ACLs). The
+                # blank/dots cases that used to land here are screened out above.
+                logger.error(Error)
+                return filename + " missing attachment"
         else:
             return filename
-    except:
-        return
+    except Exception as Error:
+        # Never silently: a row that lost its filename here is a message the report stops
+        # accounting for, with nothing in the log to show it happened. Returning the filename also
+        # keeps this a string, which "Cleaning up messages" requires (it calls .startswith on it).
+        logger.debug(f"Could not render attachment {filename}: {Error}")
+        return filename
 
 
 def sccontent_folders(app, user_id=""):
@@ -1191,6 +1212,189 @@ def mergeCache(df_cache, df_content):
         # KeyError on the missing EXTERNAL_KEY/CACHE_KEY columns.
         return empty_cache_frame()
 
+# Where the text a person actually typed lives inside conversation_message.message_content:
+#
+#   4.4.2.1     — the body of a text message (content_type 1)
+#   4.4.7.11.1  — the caption typed on a media message (content_type 2)
+#
+# proto_to_msg does not read these fields: it concatenates every string it finds anywhere in the
+# protobuf. That is what lets the cache join recognise a media id, so message_content keeps it — but
+# it also glues the encryption key, IV, lens name, sticker name and the caption into one value, so a
+# caption reached the report buried inside "<key>=<iv>==<uuid><caption><mediaId>" and was unreadable
+# as a message. Reading the field itself is what separates the message from its plumbing.
+#
+# Verified against the test extractions: every text message carries 4.4.2.1, media captions appear
+# at 4.4.7.11.1, and no text is produced that the concatenated value did not already contain. Text
+# found anywhere else in these protobufs is not the message — lens and sticker names, colour codes,
+# advertisement copy, and the overlay text drawn onto a snap.
+MESSAGE_TEXT_PATHS = ((4, 4, 2, 1), (4, 4, 7, 11, 1))
+
+
+def _readVarint(data, pos):
+    """``(value, next position)``, or ``(None, pos)`` if the varint runs off the end."""
+    value = shift = 0
+    while pos < len(data):
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+        if shift > 63:
+            break
+    return None, pos
+
+
+def protoField(blob, path):
+    """The bytes of the length-delimited field at ``path``, read straight off the wire.
+
+    Deliberately **not** blackboxprotobuf: without a schema it has to guess whether a length-
+    delimited field is a nested message or a string, and it guesses wrong on exactly the values that
+    matter here. An ordinary sentence whose UTF-8 bytes are themselves valid protobuf comes back
+    decoded as a submessage — its letters reinterpreted as field numbers — and the text is
+    unreachable. Reading the wire format directly has no such ambiguity: a field number and a length
+    are unambiguous, and only the caller decides what the bytes mean.
+
+    Where a field number repeats at one level the last one wins, which is what protobuf specifies
+    for a singular field.
+    """
+    if blob is None or isinstance(blob, str):
+        return None
+    data = bytes(blob)
+    for field_no in path:
+        target, pos = None, 0
+        while pos < len(data):
+            key, pos = _readVarint(data, pos)
+            if key is None:
+                return None
+            field, wire = key >> 3, key & 7
+            if wire == 0:                                      # varint
+                _value, pos = _readVarint(data, pos)
+                if _value is None:
+                    return None
+            elif wire == 1:                                    # 64-bit
+                pos += 8
+            elif wire == 2:                                    # length-delimited
+                length, pos = _readVarint(data, pos)
+                if length is None or pos + length > len(data):
+                    return None
+                if field == field_no:
+                    target = data[pos:pos + length]
+                pos += length
+            elif wire == 5:                                    # 32-bit
+                pos += 4
+            else:                                              # groups: not used here
+                return None
+        if target is None:
+            return None
+        data = target
+    return data
+
+
+def messageText(blob):
+    """The text a person typed in this message, read from its own field. "" when there is none.
+
+    Encoded the way getChats encodes message text — cp1252 with the rest as XML character
+    references — because the legacy report is written as cp1252 and both reports render the
+    entities.
+    """
+    for path in MESSAGE_TEXT_PATHS:
+        raw = protoField(blob, path)
+        if raw is None:
+            continue
+        try:
+            text = bytes(raw).decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if text:
+            return text.encode("cp1252", "xmlcharrefreplace").decode("cp1252")
+    return ""
+
+
+# Where a "media saved in chat" event keeps its payload inside conversation_message.message_content:
+# 4->4->8->7 = { 1: { 1: <16-byte user id of whoever saved it> }, 2: <server_message_id saved> }.
+# Established on few examples and corroborated against the database itself — the row its field 2
+# names carries is_saved = 1 — which is why savedMediaEventText refuses to call it a save unless
+# that flag agrees.
+SAVED_MEDIA_EVENT_PATH = ("4", "4", "8", "7")
+
+
+def savedMediaEventText(blob, conversation, saved_flags):
+    """Readable text for a content_type 9 event message, or "" if this is not one we can read.
+
+    These rows carry no string anywhere in their protobuf — they are something the app recorded in
+    the conversation, not something a user typed — so the text parser finds nothing and the row used
+    to be reported as a failed parse. It is not a failure: the body decodes cleanly and says which
+    message the event is about.
+
+    The "saved" wording is only used when the message the event points at independently says it was
+    saved (``conversation_message.is_saved``). Without that agreement the event is reported as a
+    reference to that message and nothing more, because one decoded field is a lead, not a finding.
+    """
+    if blob is None or isinstance(blob, str):
+        return ""
+    try:
+        body, _typedef = blackboxprotobuf.decode_message(blob)
+    except Exception:
+        return ""
+    for key in SAVED_MEDIA_EVENT_PATH:
+        body = body.get(key) if isinstance(body, dict) else None
+        if body is None:
+            return ""
+    target = body.get("2")
+    if not isinstance(target, int):
+        return ""
+    if saved_flags.get((conversation, target)) == 1:
+        return f"Saved the media of message {target} in this chat"
+    return f"Event message referring to message {target}"
+
+
+def describeEventMessages(df, blobs, indices):
+    """Fill in the content of rows whose protobuf decoded but held no text. Returns how many."""
+    saved_flags = {}
+    if "is_saved" in df.columns:
+        for _index, row in df.iterrows():
+            saved_flags[(row["client_conversation_id"], row["server_message_id"])] = row["is_saved"]
+    named = 0
+    for index in indices:
+        text = savedMediaEventText(blobs.get(index), df.loc[index, "client_conversation_id"],
+                                   saved_flags)
+        if text:
+            df.loc[index, "message_content"] = text
+            if "message_text" in df.columns:
+                # the description IS this row's content: it is what the reports display for it
+                df.loc[index, "message_text"] = text
+            named += 1
+    logger.info(f"{len(indices)} message(s) carry no text of their own (app events rather than "
+                f"anything a user typed); {named} of them could be described")
+    return named
+
+
+def reportExcludedMessages(database, conv_filter):
+    """Log any ``conversation_message`` row ``conv_filter`` leaves out of the report.
+
+    The reports group messages by conversation, so a row that names no conversation cannot be
+    placed in one. That is a defensible reason to leave it out; leaving it out *quietly* is not —
+    the examiner would have no way to tell the report apart from one where the database simply had
+    nothing more. No extraction in the test corpus has such a row, so this is a guard rather than a
+    fix for observed loss.
+    """
+    try:
+        excluded, _info = sqlite_open.read_sql(
+            database,
+            "select client_conversation_id, server_message_id, creation_timestamp "
+            f"from conversation_message where NOT ({conv_filter})")
+    except Exception as error:                                 # never let a diagnostic break a run
+        logger.debug(f"Could not count excluded conversation_message rows: {error}")
+        return 0
+    if len(excluded):
+        logger.warning(f"arroyo.db: {len(excluded)} conversation_message row(s) name no "
+                       f"conversation and are NOT in the chat reports — they cannot be attributed "
+                       f"to a conversation. Query them directly with: select * from "
+                       f"conversation_message where NOT ({conv_filter})")
+    return len(excluded)
+
+
 def getChats(database):
     logger.info("")
     logger.info("Getting chats from " + ntpath.basename(database))
@@ -1201,9 +1405,23 @@ def getChats(database):
     # column names differ between app versions, so the optional ones are selected only when present.
     columns = sqlite_open.table_columns(database, "conversation_message")
     optional = ""
-    for candidate in ("client_message_id", "local_message_id", "server_conversation_id"):
+    # is_saved is not reported as a column of its own; it is what corroborates a "media saved in
+    # chat" event before savedMediaEventText will describe one as a save.
+    for candidate in ("client_message_id", "local_message_id", "server_conversation_id",
+                      "is_saved"):
         if candidate in columns:
             optional += f"    {candidate} as {candidate},\n"
+
+    # Every row has to be attributed to a conversation, and client_conversation_id is the only key
+    # the reports group on. App versions that also record the server's id (none in the test corpus
+    # has the column) let a row with just that one through as well, so it is reported against the
+    # server conversation instead of being lost. Whatever the filter still excludes is counted and
+    # logged below — a silent gap between the database and the report is the failure mode this
+    # parser already had in mergeCacheChats.
+    conv_filter = "client_conversation_id IS NOT NULL"
+    if "server_conversation_id" in columns:
+        conv_filter = ("(client_conversation_id IS NOT NULL "
+                       "OR server_conversation_id IS NOT NULL)")
 
     messagesQuery = f"""select
     client_conversation_id as client_conversation_id,
@@ -1216,11 +1434,22 @@ def getChats(database):
         end as 'Read Timestamp',
     content_type as content_type,
     sender_id as sender_id
-    from conversation_message where client_conversation_id IS NOT NULL
+    from conversation_message where {conv_filter}
     order by client_conversation_id, creation_timestamp
     """
 
     df, _wal_info = sqlite_open.read_sql(database, messagesQuery)
+    reportExcludedMessages(database, conv_filter)
+
+    # The loop below replaces each protobuf with the text read out of it, so keep the blobs: the
+    # rows that hold no text are described from their structure afterwards.
+    blobs = df["message_content"].to_dict()
+    event_rows = []
+
+    # What the sender actually typed, read from the field that holds it. Kept separate from
+    # message_content, which stays as proto_to_msg leaves it because the cache join matches media
+    # ids and EXTERNAL_KEYs against it (mergeCacheChats).
+    df["message_text"] = [messageText(blobs[index]) for index in df.index]
 
     for index, row in df.iterrows():
         message = (row["message_content"])
@@ -1228,6 +1457,13 @@ def getChats(database):
         if messages == "":
             df.loc[
                 index, "message_content"] = """ERROR - Something went wrong when parsing this message. <br> Manually verify the message with Client Conversation ID and Server Message ID in arroyo.db"""
+            continue
+        if len(messages) == 0:
+            # The protobuf decoded, it simply carries no string — an event the app recorded in the
+            # conversation (a save, for one) rather than anything a user typed. Reporting that as a
+            # failed parse states something untrue about the message, so it is described instead.
+            event_rows.append(index)
+            df.loc[index, "message_content"] = ""
             continue
         meddelande = ""
         try:
@@ -1249,8 +1485,47 @@ def getChats(database):
             df.loc[
                 index, "message_content"] = """ERROR - Something went wrong when parsing this message. <br> Manually verify the message with Client Conversation ID and Server Message ID in arroyo.db"""
 
+    if event_rows:
+        describeEventMessages(df, blobs, event_rows)
+
     logger.info("")
     return df
+
+
+# arroyo.db conversation_message.content_type values observed to carry media: their message_content
+# protobuf holds the 32-byte key / 16-byte IV pair a media message needs, and every one of them that
+# a cache claim did resolve became a media row. Values 1 (text), 3 (video) and 5 (sticker) are named
+# by mergeCacheChats itself and never reach uncachedLabel.
+MEDIA_CONTENT_TYPES = (0, 2)
+
+# content_type values that are not media at all, so "no cached file" would be the wrong thing to say
+# about them. Each keeps its content in the protobuf's 4.4.8 branch and carries no text anywhere —
+# they are events the app recorded in the conversation, not something a user sent. Which event is
+# named by the field inside 4.4.8 (7 = media saved in chat, see savedMediaEventText; 2, 5, 6, 8 and
+# 22 also occur and are not yet identified, so those rows are labelled but not described).
+# Corroborated for content_type 9, which another tool also renders as a system message.
+CONTENT_TYPE_NAMES = {6: "System message", 9: "System message",
+                      12: "System message", 13: "System message"}
+
+
+def uncachedLabel(content_type):
+    """Content Type for a message that no surviving cache file backs.
+
+    Says only what is known: the message is there, and its file is not. It deliberately does **not**
+    say the media "expired" — the claim may have been evicted, never cached on this device, or
+    simply not carried by the extraction, and those are different statements. A content_type that is
+    not media is named rather than described as a missing file, and one this parser has never seen
+    is reported by its number rather than guessed at.
+    """
+    try:
+        value = int(content_type)
+    except (TypeError, ValueError):
+        return "No cached file"
+    if value in CONTENT_TYPE_NAMES:
+        return CONTENT_TYPE_NAMES[value]
+    if value in MEDIA_CONTENT_TYPES:
+        return "Media (no cached file)"
+    return f"Unrecognised (content_type {value})"
 
 
 def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
@@ -1259,12 +1534,18 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     # strings ('local_message_reference', 'Unknown .1020', ...). pandas 3.x refuses to
     # store a string in an int column, so widen it to object up front.
     if 'content_type' in chats_df.columns:
+        # The loops below overwrite content_type with a display label, so keep arroyo's own numeric
+        # value first: it is what the label was derived from, and the only way an examiner can tell
+        # two rows carrying the same label apart.
+        chats_df['arroyo_content_type'] = chats_df['content_type']
         chats_df['content_type'] = chats_df['content_type'].astype(object)
     # Keep what getChats parsed out of message_content before the three loops below overwrite it
-    # with the attachment's cache key. Without this copy, any text a message carried alongside its
-    # media is destroyed and no report can show it. (For most media rows this holds a technical
-    # token rather than user text — the Conversations report decides what is worth displaying.)
-    if 'message_content' in chats_df.columns:
+    # with the attachment's cache key. Without this, any text a message carried alongside its media
+    # is destroyed and no report can show it. getChats normally supplies message_text by reading the
+    # field that actually holds the text (messageText); the copy below is the fallback for a frame
+    # that reached here without it, and holds a technical token rather than user text for a media
+    # row — which is why the Conversations report still screens it.
+    if 'message_content' in chats_df.columns and 'message_text' not in chats_df.columns:
         chats_df['message_text'] = chats_df['message_content']
     for index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
         for index_chat, row_chat in chats_df.iterrows():
@@ -1435,7 +1716,14 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
                     elif row["content_type"] == 5:
                         merge_df.loc[index, 'content_type'] = "Sticker"
                     elif type(row["TYPE"]) != str:
-                        merge_df = merge_df.drop(index=index)
+                        # No cache claim joined onto this message: either cache_controller.db never
+                        # named a file for it, or mergeCache discarded the claim because the file is
+                        # no longer on the device. This used to DROP the row, which is why the
+                        # reports listed fewer messages than arroyo.db holds — a message whose media
+                        # is gone is still a message, and its sender, timestamps and both ids come
+                        # from arroyo.db and are unaffected. Label it instead; the numeric
+                        # content_type is preserved in its own column so nothing is lost.
+                        merge_df.loc[index, 'content_type'] = uncachedLabel(row["content_type"])
                     else:
                         merge_df.loc[index, 'content_type'] = row["TYPE"]
                     
@@ -1454,6 +1742,8 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     renames = {'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
                'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID',
                'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text',
+               # arroyo's own numeric content_type, kept beside the label derived from it
+               'arroyo_content_type': 'Content Type (arroyo)',
                # which reading of arroyo.db the row came from (scripts/data/sqlite_open.py)
                '_wal': 'WAL View'}
     # the device-side message id, under whichever name this app version uses (only one is renamed,
@@ -1744,8 +2034,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # The device-side ids are only present when this app version's conversation_message has them
     # (see getChats), so the column list is filtered rather than fixed.
     wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Message Content",
-              "Message Text", "Content Type", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
-              "Server Message ID", "Client Message ID", "WAL View"]
+              "Message Text", "Content Type", "Content Type (arroyo)", "Creation Timestamp UTC+0",
+              "Read Timestamp UTC+0", "Server Message ID", "Client Message ID", "WAL View"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
      
     logger.info("Cleaning up cache files not linked to messages")
