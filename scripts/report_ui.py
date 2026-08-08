@@ -597,9 +597,13 @@ def sources_script(report_dir):
 
     This is what puts the source fingerprints into the examiner's saved selection file, so a partial
     run can check them against the extraction it is handed — even when the original report folder is
-    no longer at hand. The whole table travels (roughly a dozen entries): a digest alone could say
-    *that* something differs but not *which* artifact, and the paths are what let the tool offer the
-    same ZIP and keychain back.
+    no longer at hand. Per artifact rather than a digest alone: a digest can say *that* something
+    differs but not *which* artifact, and the paths are what let the tool offer the same ZIP and
+    keychain back.
+
+    Only the identity part travels — see :func:`source_fingerprint.compact`. Embedding the whole
+    manifest put the run's own timestamp in every page, which made two runs of the same build on the
+    same evidence produce different reports.
 
     Read from ``sources.json`` rather than passed in, because every report already receives its
     report directory and threading one more argument through five generators would only be a second
@@ -607,10 +611,7 @@ def sources_script(report_dir):
     """
     key = os.path.abspath(report_dir or ".")
     if key not in _SOURCES_CACHE:
-        sources = source_fingerprint.read_sources(report_dir)
-        if sources:
-            # the prose belongs on the page, not in every selection file the examiner saves
-            sources = {k: v for k, v in sources.items() if k != "note"}
+        sources = source_fingerprint.compact(source_fingerprint.read_sources(report_dir))
         _SOURCES_CACHE[key] = (f"window.SCAUTO_SOURCES={json.dumps(sources, separators=(',', ':'))};"
                                if sources else "")
     return _SOURCES_CACHE[key]

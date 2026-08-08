@@ -44,8 +44,20 @@ logger = logging.getLogger(__name__)
 SOURCES_FILE = "sources.json"
 SOURCES_SCHEMA = 1
 
-#: Sidecars a SQLite database is read together with.
-SIDECARS = ("-wal", "-shm")
+#: Sidecars a SQLite database is fingerprinted with.
+#:
+#: The ``-wal`` and not the ``-shm``, deliberately. The log holds committed pages that have not been
+#: checkpointed, which is where the recovered deleted and superseded rows come from — evidence. The
+#: ``-shm`` is only the shared-memory *index* over that log: it holds no data of its own, is rebuilt
+#: from the log, and ``sqlite_open`` goes out of its way never to create one beside the original.
+#:
+#: Measured, and the reason this is not merely tidiness: two runs of the same build on the same
+#: extraction leave the ``-shm`` of the Memories databases with a **new mtime**, because something on
+#: that path still opens the original in place. Fingerprinting it would therefore have the tool fail
+#: its own verification over a file it modified itself — the precise false alarm that would teach an
+#: examiner to wave a sidecar difference through, when a differing ``-wal`` is the one thing here that
+#: must never be waved through.
+SIDECARS = ("-wal",)
 
 #: The roles a caller may report, in the order they are shown. The caller passes the paths it already
 #: resolved rather than this module re-globbing for them — one place decides where an artifact lives,
@@ -174,6 +186,44 @@ def digest(sources):
         for suffix, side in sorted((record.get("sidecars") or {}).items()):
             parts.append(f"{role}{suffix}:{side.get('sha256', '-')}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def compact(sources):
+    """The part of a manifest worth carrying inside every report page.
+
+    Two reasons this is a projection rather than the whole thing:
+
+    * **Reproducibility.** The full manifest carries ``collected`` — when the run happened — so
+      embedding it made every page of every report differ between two runs of the same build on the
+      same evidence. A report is a work product; two runs must produce the same one.
+    * **Size.** The full manifest is several KB, and it would be repeated in every conversation page
+      and every Memory sub-page — megabytes of identical JSON on a device with a few hundred Memories.
+
+    What survives is identity: per artifact whether it was present, where it was, and its hashes;
+    plus the tool version and the digest. That is exactly what :func:`verify` compares and what the
+    tool needs in order to offer the same paths back.
+    """
+    if not sources:
+        return None
+    out = {"tool_version": sources.get("tool_version"), "digest": sources.get("digest"),
+           "artifacts": {}}
+    for role, record in (sources.get("artifacts") or {}).items():
+        small = {"present": bool(record.get("present")), "path": record.get("path", "")}
+        for field in ("md5", "sha256"):
+            if record.get(field):
+                small[field] = record[field]
+        sidecars = {suffix: {"sha256": side.get("sha256", "")}
+                    for suffix, side in (record.get("sidecars") or {}).items()}
+        if sidecars:
+            small["sidecars"] = sidecars
+        out["artifacts"][role] = small
+    z = sources.get("zip") or {}
+    if z.get("path"):
+        out["zip"] = {"path": z.get("path"), "name": z.get("name", ""),
+                      "bytes": z.get("bytes", 0), "hashed": bool(z.get("hashed"))}
+        if z.get("sha256"):
+            out["zip"]["sha256"] = z["sha256"]
+    return out
 
 
 def write_sources(report_dir, sources):
