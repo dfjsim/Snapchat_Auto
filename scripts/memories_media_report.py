@@ -1842,6 +1842,57 @@ def _info(text):
             f"<span class='tip'>{html.escape(text)}</span></span>")
 
 
+_MEDIA_STATE_HINT = (
+    "What was recovered for this Memory, and how much of it — one state per Memory, counted in "
+    "each option so you can see what a filter will return before choosing it.\n\n"
+    "• «partially cached (incomplete)» — at least one recovered file stops short of the real "
+    "media. The bytes are genuine; the file is a fragment of what the device once had.\n\n"
+    "• «verified complete» — every recovered file was checked and nothing says bytes are "
+    "missing.\n\n"
+    "• «completeness not verified» — the file was stored as plaintext, so there is no padding to "
+    "check and no shard layout to measure. It may well be whole; this tool did not establish it, "
+    "and will not say it did.\n\n"
+    "• «no media recovered» — nothing was decrypted or found for this Memory at all. Its metadata "
+    "row is still evidence that the Memory existed.\n\n"
+    "This replaces a two-way «incomplete / complete» filter whose «complete» silently included the "
+    "last two.")
+
+
+def _media_state(files, n_part):
+    """Which of four states this memory's recovered media is in, for the index filter.
+
+    The filter used to be two-valued — "incomplete only" / "complete only" — over a flag that was
+    simply ``any file incomplete``. That collapsed three different things into "complete":
+
+    * a memory with **no recovered media at all** (nothing was decrypted for it), which is not a
+      statement about completeness and was the bulk of what "complete only" returned;
+    * a file whose completeness is **unknown** — ``complete is None``, a plaintext file with no
+      padding to check and no shard layout to measure (see :func:`_sccontent_completeness`).
+      Calling that "complete" is a claim this tool did not verify;
+    * media actually verified as whole.
+
+    So the states are kept apart, and the filter offers all four with their counts.
+    """
+    if not files:
+        return "none"
+    if n_part:
+        return "partial"
+    if any(f.get("complete") is None for f in files):
+        return "unverified"
+    return "whole"
+
+
+_MEDIA_STATES = (("partial", "partially cached (incomplete)"),
+                 ("whole", "verified complete"),
+                 ("unverified", "completeness not verified"),
+                 ("none", "no media recovered"))
+
+
+def _media_filter_options(counts):
+    """The Recovered-media options, each carrying how many Memories are in that state."""
+    return report_ui.counted_options(_MEDIA_STATES, counts)
+
+
 def _partial_badge(f):
     """Badge + explanation for a media file the cache holds only part of."""
     if f.get("complete") is False:
@@ -2735,8 +2786,13 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             n_part = sum(1 for f in own if f.get("complete") is False)
             page_href = f"pages/{key}.html#mem-{html.escape(m['snap_id'])}"
             if still:
-                thumb = (f'<a href="{page_href}"><img src="{html.escape(still["path"])}" '
-                         f'loading="lazy"></a>')
+                # Same destination as the "open ▸" button, so the same named tab: a bare link here
+                # navigated the index away in place, which costs the examiner the scroll position,
+                # the filters, the expanded rows and — with a "leave site?" prompt — any ticks not
+                # yet saved to selection.js. See docs/report_ui.md on why the tabs are named.
+                thumb = (f'<a href="{page_href}" target="scauto_memory_page" '
+                         f'title="open this memory in its own tab">'
+                         f'<img src="{html.escape(still["path"])}" loading="lazy"></a>')
             else:
                 thumb = '<span class="nothumb">—</span>'
             prim = _primary_media(m)
@@ -2818,11 +2874,24 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "2": str(uid), "3": f"{zmedia}|{zsnap}", "6": m["created_sort"]},
                 None,
                 {"user": str(uid), "img": "y" if has_img else "n",
-                 "meo": "y" if is_meo else "n", "part": "y" if n_part else "n",
+                 "meo": "y" if is_meo else "n", "part": _media_state(own, n_part),
                  "wal": ("carved" if carved else
                          "gone" if gone else ("changed" if changed else ""))},
             ])
     report_ui.write_rows(os.path.join(outdir, "data"), rows)
+
+    # Every state filter on this bar states its count and greys out when it is empty. The Media one
+    # is why (see _MEDIA_STATE_HINT), but Thumbnail and My Eyes Only had the same problem: on a
+    # device with no MEO album, "only MEO" is a control that can do nothing, and looked broken.
+    counts = {}
+    for row in rows:
+        for key, value in row[5].items():
+            counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
+    part_opts = _media_filter_options(counts.get("part", {}))
+    img_opts = report_ui.counted_options((("y", "with a thumbnail"), ("n", "no thumbnail")),
+                                         counts.get("img", {}))
+    meo_opts = report_ui.counted_options((("y", "only My Eyes Only"), ("n", "exclude My Eyes Only")),
+                                         counts.get("meo", {}))
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -2895,23 +2964,24 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, user…" oninput="flt()">'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
-           f'<label>Thumbnail <select id="img" onchange="flt()"><option value="">any</option>'
-           f'<option value="y">with</option><option value="n">without</option></select></label>'
+           f'<label title="Whether the index row can show a still for this Memory. A video with no '
+           f'cached still gets one only if a poster frame could be extracted from it, so «no '
+           f'thumbnail» is normally «nothing was recovered» — but not always.">'
+           f'Thumbnail <select id="img" onchange="flt()"><option value="">any</option>'
+           f'{img_opts}</select></label>'
            f'<label title="My Eyes Only — Snapchat&#39;s private, separately-encrypted album">'
            f'My Eyes Only <select id="meo" onchange="flt()"><option value="">any</option>'
-           f'<option value="y">only MEO</option><option value="n">exclude MEO</option>'
-           f'</select></label>'
-           f'<label title="Memories whose recovered media the device only cached part of — the '
-           f'file is genuine but stops short of the real media">'
-           f'Media <select id="part" onchange="flt()"><option value="">any</option>'
-           f'<option value="y">incomplete only</option><option value="n">complete only</option>'
-           f'</select></label>'
+           f'{meo_opts}</select></label>'
+           f'<label>Recovered media{report_ui.info_icon(_MEDIA_STATE_HINT)} '
+           f'<select id="part" onchange="flt()"><option value="">any</option>'
+           f'{part_opts}</select></label>'
            f'<label title="Memories recovered by reading scdb-27 without its write-ahead log — '
            f'rows the app itself no longer lists, or that it rewrote after the last checkpoint">'
            f'-wal <select id="wal" onchange="flt()"><option value="">any</option>'
            f'<option value="gone">deleted since the checkpoint</option>'
            f'<option value="changed">rewritten since the checkpoint</option>'
            f'<option value="carved">deleted outright (key carved)</option></select></label>'
+           f'{report_ui.clear_filters_button("memory")}'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
            f'<div class="pager" id="pager"></div>'

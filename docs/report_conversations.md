@@ -42,6 +42,48 @@ names but that `arroyo.db` holds no message for is a finding — the messages ma
 or simply not captured — so it appears with a 0 rather than being dropped, and the index says how
 many such rows there are.
 
+That used to stop at the friends/groups lists, which missed the case where **only `arroyo.db`
+knows the conversation**: a `conversation` / `feed_entry` row with no message, no friend and no
+group behind it was dropped from the report altogether — the one situation in which "not listed"
+and "no messages" are indistinguishable to the reader. Those rows are now listed too. This is not a
+corner case: every corpus device has such conversations, and they dominate on the iOS 26 schema,
+which has dropped `user_conversation` entirely and leaves `feed_entry` as the only record that the
+conversation exists.
+
+### First / Last **activity**, not first / last message
+
+The columns are labelled *activity* because two different records feed them, and conflating the two
+would be a claim about message content that the second record does not make.
+
+| the conversation has | the columns show | marked |
+|---|---|---|
+| messages | first and last `conversation_message.creation_timestamp` | — |
+| no message | `feed_entry.display_timestamp` … `feed_entry.last_updated_timestamp`, falling back to `conversation.creation_timestamp` | a muted **feed** tag on the cell, with the reason on hover |
+
+`feed_entry` is the conversation's row in the app's own chat list, so its dates are what the app
+displays against that conversation — which is where a commercial tool's date range for an empty
+conversation comes from. They say the conversation was *active*; they do not say a message existed
+at that moment, and they are not evidence of content. The expanded row's **Dates** section names
+the field each value came from.
+
+**`conversation.creation_timestamp` is not the start of the conversation.** It is when *this
+device* created its local row. Verified on the corpus: on a device restored from a backup it is the
+restore, and the conversation's own messages can pre-date it by years. It is shown in the expanded
+row (always, including when messages supply the range, because the two disagreeing is itself a
+finding) and never used as the displayed range while any message time exists.
+
+### The `-wal` filter
+
+A message that survives only in the reading of `arroyo.db` **without** its write-ahead log was
+deleted by the app after the last checkpoint: recovered prior state, not part of the live
+conversation. It has always been badged on the row, but neither table could filter for it. Both can
+now — the index by *conversations holding at least one*, the message table by the message itself.
+
+The control is **emitted only when the database actually has such a row**. A filter whose only
+possible outcome is an empty table is not a choice, it is a trap; the same rule disables the empty
+options in the Memories media filter. No device in the test corpus has a WAL-deleted chat message,
+so `tests/test_report_filters.py` is what holds this behaviour in place.
+
 ## A conversation's detail page
 
 A metadata block (conversation id, type, how the conversation was named, participants and their

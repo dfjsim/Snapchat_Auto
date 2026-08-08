@@ -99,9 +99,32 @@ block-aligned prefix is decrypted and kept rather than the file being discarded.
 In the report, an incomplete file gets a red **⚠ incomplete — partially cached** badge in its
 *Source cache* cell whose “?” states exactly what is missing (byte offsets, counts), its row is
 tinted, and the detail page carries a banner above the media table. The index shows a **PART**
-chip on the affected Memory, counts them in the header, and offers a **Media: incomplete only /
-complete only** filter. Files stored as plaintext are marked *completeness not verified* — there is
-no padding to check and no shard layout to measure, so claiming either way would be a guess.
+chip on the affected Memory and counts them in the header. Files stored as plaintext are marked
+*completeness not verified* — there is no padding to check and no shard layout to measure, so
+claiming either way would be a guess.
+
+### The index filter says which of four states, and how many are in it
+
+The index filter used to be **Media: incomplete only / complete only** over a flag that was simply
+*any file incomplete*. Two things were wrong with it, and both were invisible from the report:
+
+* **"complete only" was not a claim the tool could make.** It swallowed the *completeness not
+  verified* files described above — the very distinction the file-level badge is careful about —
+  and it also swallowed Memories with **no recovered media at all**, which is not a statement about
+  completeness in either direction. Every corpus device had Memories filed under "complete" that
+  nothing had checked.
+* **"incomplete only" returned nothing on a device with no incomplete media**, which is
+  indistinguishable from a filter that does not work.
+
+So the control is **Recovered media**, one state per Memory (`_media_state`), each option carrying
+its count and disabled when it is empty (`_media_filter_options`):
+
+| option | means |
+|---|---|
+| partially cached (incomplete) | at least one recovered file stops short of the real media |
+| verified complete | every recovered file was checked and nothing says bytes are missing |
+| completeness not verified | plaintext storage — no padding to check, no shard layout to measure |
+| no media recovered | nothing was decrypted or found; the metadata row is still evidence the Memory existed |
 
 Poster frames are still extracted from partial video: what the cache holds starts at the beginning
 of the file, so the opening frames decode. For those files `generate_poster` skips the seek (a seek

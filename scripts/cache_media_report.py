@@ -1149,7 +1149,9 @@ def publish_entries(entries, files_dir):
 # describe the same kind of thing from two sides, and laying them out differently made every move
 # between them a re-orientation. Widths differ where the content does (a path needs the room a
 # CACHE_KEY does not).
-CM_COLS = "24px 152px minmax(200px,1fr) 132px 74px 86px 74px 150px minmax(150px,260px)"
+# The Links column is sized so the common set — cache + Memory + detail — fits on the one line the
+# row height allows; what it takes comes out of the Path column's 1fr.
+CM_COLS = "24px 152px minmax(200px,1fr) 132px 74px 86px 74px 150px minmax(170px,300px)"
 CM_ROW_H = 46
 
 
@@ -1226,6 +1228,18 @@ MULTI_TARGET_BASIS = (
 
 
 def _links_cell(entry, rel_prefix, compact=True):
+    """Cross-report link chips (cache / Memory / chat).
+
+    ``compact`` is the index-row form, and until it was actually implemented the index rendered the
+    *detail* form: every chip plus its "?" explanation. The virtual table gives every collapsed row
+    the same height (``CM_ROW_H``), so the moment that cell wrapped onto a second line the chips on
+    it were cut through the middle — a row of half-buttons. The index therefore gets the chips
+    alone, on a single line that clips at the cell edge; the expanded row underneath repeats every
+    one of them *with* the explanation, and wraps as much as it needs to.
+    """
+    def why(text):
+        return "" if compact else _info(text)
+
     chips = []
     # Cache entries first, as one chip: the same cached content is regularly claimed under several
     # CACHE_KEYs, and a chip each made the cell unreadable while a single anchor hid all but one.
@@ -1237,7 +1251,7 @@ def _links_cell(entry, rel_prefix, compact=True):
     if len(cache_keys) == 1:
         href = f'{rel_prefix}CacheController/CacheController_report.html#ck-{cache_keys[0]}'
         chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache">cache</a>'
-                     + _info(cache_basis))
+                     + why(cache_basis))
     elif cache_keys:
         href = (f'{rel_prefix}CacheController/CacheController_report.html'
                 + report_ui.find_fragment(cache_keys))
@@ -1245,7 +1259,7 @@ def _links_cell(entry, rel_prefix, compact=True):
                      f'title="open the cache_controller report filtered to this file\'s '
                      f'{len(cache_keys)} cache entries, all expanded">'
                      f'cache ({len(cache_keys)})</a>'
-                     + _info(MULTI_TARGET_BASIS + " " + cache_basis))
+                     + why(MULTI_TARGET_BASIS + " " + cache_basis))
     seen_mem = set()
     for link in entry["links"]:
         if link["kind"] == "memory":
@@ -1254,12 +1268,14 @@ def _links_cell(entry, rel_prefix, compact=True):
                 continue
             seen_mem.add(sid)
             href = f'{rel_prefix}Memories/Memories_report.html#mem-{sid}'
-            chips.append(f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories">'
-                         f'Memory {_esc(sid[:8])}… (index)</a>' + _info(link["basis"]))
+            chips.append(f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories" '
+                         f'title="open this Memory\'s row in the Memories index">'
+                         f'Memory {_esc(sid[:8])}…</a>' + why(link["basis"]))
             # ...and the Memory's own detail page, as the cache_controller report does: the index
             # row is a summary, the detail page is where that Memory's media and metadata are.
             if link.get("page"):
                 chips.append(f'<a class="chip mem" target="scauto_memories" '
+                             f'title="open this Memory\'s own detail page" '
                              f'href="{_esc(rel_prefix)}Memories/{_esc(link["page"])}#mem-'
                              f'{_esc(sid)}">detail</a>')
         elif link["kind"] == "chat":
@@ -1489,6 +1505,13 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
  table.sub td.hex{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7a1f5a}}
  .paths{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;margin-top:4px;overflow-wrap:anywhere}}
  .devname{{color:#8a5a00;font-size:10.5px;margin-top:2px;overflow-wrap:anywhere}}
+ /* The index row's Links cell. One line, never wrapped: a collapsed virtual row is exactly
+    CM_ROW_H tall, so a second line of chips is not shown short — it is sliced in half. Anything
+    past the cell edge is clipped instead, and the expanded row repeats the complete set. No
+    mask/filter/transform here: those would become the containing block for the "?" popover, which
+    is position:fixed precisely so that it escapes this cell's overflow:hidden. */
+ .chiprow{{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;margin-top:2px}}
+ .chiprow>*{{flex:0 0 auto}} .chiprow .chip{{margin:0}}
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
    font-size:11px;text-decoration:none;font-weight:600}}
  .chip.cc{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}
@@ -1528,6 +1551,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
    <option value="y">linked</option><option value="n">not linked</option></select></label>
  <label title="App fonts, lens models and shader caches are hidden unless this is ticked">
    <input type="checkbox" id="assets" onchange="flt()"> show app assets</label>
+ {report_ui.clear_filters_button("file")}
  <span id="count" style="color:#555"></span>
 </div>
 <div class="toolbar">{report_ui.selection_toolbar('file')}</div>
@@ -1705,12 +1729,14 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                    packs=memory_packs)
 
     publish_entries(entries, os.path.join(outdir, "files"))
-    posters, no_poster = publish_posters(entries, os.path.join(outdir, "files"))
-    if posters or no_poster:
+    posters, no_poster, not_tried = publish_posters(entries, os.path.join(outdir, "files"))
+    if posters or no_poster or not_tried:
         logger.info(f"Cached media: {posters} poster frame(s) extracted from cached video "
                     f"(derived thumbnails, labelled as such in the report)"
                     + (f"; {no_poster} could not be decoded and are listed without one"
-                       if no_poster else ""))
+                       if no_poster else "")
+                    + (f"; {not_tried} never attempted — listed without one, and not reported as "
+                       f"undecodable" if not_tried else ""))
     entries.sort(key=lambda e: (e["category"], e["rel"]))
     docs = collect_documents(app, ms_fmt, src_root, manifest)
 

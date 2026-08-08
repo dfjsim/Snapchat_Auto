@@ -682,6 +682,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'onchange="flt()"><option value="">any</option>'
            f'<option value="y">several conversations</option>'
            f'<option value="n">one or none</option></select></label>'
+           f'{report_ui.clear_filters_button("contact")}'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("contact")}</div>'
            f'<div class="pager" id="pager"></div>'
