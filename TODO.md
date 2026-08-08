@@ -150,3 +150,8 @@ corpus these are the correct answers, not defects.
   - `proto_to_msg` still concatenates every string in the protobuf, and `message_content` still
     depends on that for the cache join. Worth reading the media id from its own field too, so the
     concatenation can go.
+
+- When we ask the user to decide if he wants to include related artifacts in the subset report, we should
+  also have an "advanced settings" section where the user can decide to exclude some details and fields
+  in the final report (for example, some of the fields in the `ZGALLERYSNAP values` section of the
+  Memory details page). The user should also be able to save his settings as a default config for future reports.
