@@ -1267,8 +1267,12 @@ def _links_cell(entry, rel_prefix, compact=True):
             href = rel_prefix + (rec.get("href") or "")
             chips.append(f'<a class="chip chat" href="{_esc(href)}" target="scauto_convs">'
                          f'message {_esc(rec.get("server_message_id") or "")}</a>'
-                         + _info(link["basis"]))
-    return "".join(chips) or '<span class="muted">—</span>'
+                         + why(link["basis"]))
+    if not chips:
+        return '<span class="muted">—</span>'
+    if not compact:
+        return "".join(chips)
+    return '<div class="chiprow">' + "".join(chips) + "</div>"
 
 
 def _detail_html(entry, rel_prefix):

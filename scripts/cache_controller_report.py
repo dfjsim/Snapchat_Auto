@@ -575,8 +575,8 @@ def publish_posters(entries, files_dir, get_view=None,
     """Extract a poster frame beside every published video: ``files/<name>_poster.jpg``.
 
     Sets ``entry["poster"]`` (a URL relative to the report) on each entry that gets one and returns
-    ``(made, skipped)``. A poster left by an earlier run into the same folder is reused rather than
-    re-extracted, which keeps a re-run into an existing report folder cheap.
+    ``(made, undecodable, not_attempted)``. A poster left by an earlier run into the same folder is
+    reused rather than re-extracted, which keeps a re-run into an existing report folder cheap.
 
     The work runs in a **killable subprocess**, one video at a time, because a cached video that
     cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of them
@@ -611,7 +611,7 @@ def publish_posters(entries, files_dir, get_view=None,
             continue
         jobs.append((src, dst, entry, "files/" + poster))
     if not jobs:
-        return 0, 0
+        return 0, 0, 0
 
     # complete=False: a cache holds whatever byte ranges the device streamed, so seeking into a
     # cached video regularly lands past the bytes that are there.
@@ -620,19 +620,27 @@ def publish_posters(entries, files_dir, get_view=None,
     # "moov atom not found" here means the device cached only part of that video — a finding, so
     # FFmpeg's chatter is summarised into the log rather than dropped on the floor.
     ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
-    made = 0
+    made, undecodable = 0, 0
     for src, _dst, entry, rel in jobs:
         if done.get(src):
             entry["poster"] = rel
             made += 1
-        else:
+        elif src in done:
             # Say why the thumbnail is absent. A video listed with a bare link, next to videos with
             # a frame, otherwise reads as a defect in the report rather than as what it is: this
             # file did not decode, which for a cache usually means only part of it was stored.
+            undecodable += 1
             entry["poster_note"] = ("no poster frame could be extracted — this cached video did "
                                     "not decode, which usually means the device stored only part "
                                     "of it (the link still opens the bytes that are there)")
-    return made, len(jobs) - made
+        else:
+            # Never attempted: the worker could not be started, or the pass ran out of budget. The
+            # sentence above would be a finding about the evidence that nothing established, so the
+            # absence is attributed where it belongs — to this tool, on this run.
+            entry["poster_note"] = ("no poster frame: thumbnail extraction did not run for this "
+                                    "file on this run (see the run log) — that is a limit of this "
+                                    "tool here, not a statement about whether the video decodes")
+    return made, undecodable, len(jobs) - made - undecodable
 
 
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
@@ -1923,12 +1931,14 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
-    posters, no_poster = publish_posters(all_entries, os.path.join(outdir, "files"))
-    if posters or no_poster:
+    posters, no_poster, not_tried = publish_posters(all_entries, os.path.join(outdir, "files"))
+    if posters or no_poster or not_tried:
         logger.info(f"  {posters} poster frame(s) extracted from cached video (derived thumbnails, "
                     f"labelled as such in the report)"
                     + (f"; {no_poster} cached video(s) could not be decoded and are listed without "
-                       f"one" if no_poster else ""))
+                       f"one" if no_poster else "")
+                    + (f"; {not_tried} never attempted — listed without one, and not reported as "
+                       f"undecodable" if not_tried else ""))
     # for entries whose cached bytes are encrypted, point at the copy the Memories report decrypted
     for e in all_entries:
         e["decrypted"] = memory_media.get(e["cache_key"].lower(), [])

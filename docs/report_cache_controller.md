@@ -68,10 +68,33 @@ one both produced 558 posters. What the budget did not reach is reported, not si
 
 A video that ends up with no frame therefore sits next to videos that have one, showing only its
 `▶ view cached file` link — which reads as a defect in the report rather than as the finding it is.
-Each such entry now carries a `poster_note` saying which of the two happened (the file did not
-decode, typically because only part of it was cached; or it has no video track at all), rendered
+Each such entry now carries a `poster_note` saying which of **three** things happened, rendered
 under the link in the expanded row. The index row is unaffected: with no poster it falls back to
 the plain `▶ <ext>` play button, which still opens the bytes that are there.
+
+1. the file has no video track at all — settled before the worker is ever asked;
+2. the file was decoded and did not yield a frame, typically because only part of it was cached;
+3. **the file was never attempted** — the worker could not be started, or the pass hit `BUDGET_S`.
+
+The third case has to be kept apart from the second, and `run_jobs` is what keeps them apart: a
+video it attempted is in its result (`True`/`False`), a video it never opened is *absent*. "This
+video did not decode" is a finding about the evidence, and a run in which nothing was decoded
+established no such thing. It was written into thousands of rows once already — see below.
+
+### The build in which no poster was ever extracted
+
+`_worker_command` decided between `python -m scripts.data.poster_worker` and re-entering the
+application with `--poster-worker` by looking at `sys.executable`. That cannot work, because a
+Nuitka **standalone** build (what the MSI installs, and what onefile unpacks and runs) sets
+`sys.executable` to the basename of the *build machine's* interpreter joined onto the installation
+directory — `getStandaloneSysExecutablePath` in Nuitka's `CompiledCodeHelpers.c`. Built from a `uv`
+venv, every installed copy therefore reported `<install dir>\python.exe`: a file that has never
+existed there. So the packaged app took the interpreter branch *and* aimed the spawn at nothing,
+`Popen` raised `[WinError 2]`, and all three poster passes — Memories, Library/Caches and
+cache_controller — returned zero posters in well under a second. `sys.argv[0]` is the real binary;
+`__compiled__` (which Nuitka pre-seeds into every compiled module) is the marker that the app is a
+build at all. Neither `sys.frozen` nor `sys._MEIPASS` is set, which is what sent the original test
+to `sys.executable` in the first place.
 
 That file also exposed a mislabel worth stating on its own: an ISO base media file's magic bytes
 (`....ftyp`) say only that it *is* one. Its **major brand** says what is in it, and

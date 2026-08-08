@@ -46,16 +46,46 @@ def _worker_command():
     """How to start a second copy of this code as a process.
 
     From source that is ``python -m scripts.data.poster_worker``. In a packaged build there is no
-    interpreter to run it with — ``sys.executable`` is the application itself — so the application
-    is re-entered with ``--poster-worker``, which `Snapchat_Auto.main` handles before it does
-    anything else. Getting this wrong in a build would launch a GUI per cached video, so the test is
-    on what ``sys.executable`` actually is rather than on a frozen-build marker (Nuitka sets neither
-    ``sys.frozen`` nor ``sys._MEIPASS``).
+    interpreter to run it with, so the application is re-entered with ``--poster-worker``, which
+    `Snapchat_Auto.main` handles before it does anything else.
+
+    Which of the two it is **cannot** be read off ``sys.executable``. A Nuitka standalone build —
+    which is what the MSI installs, and what onefile unpacks — sets ``sys.executable`` to the
+    *basename of the build machine's interpreter* joined onto the installation directory
+    (``getStandaloneSysExecutablePath`` in Nuitka's ``CompiledCodeHelpers.c``). Built from a uv
+    venv that is literally ``<install dir>\\python.exe``: a name that has never existed on the
+    examiner's machine. Testing the basename therefore took the ``-m`` branch *in a build* and
+    aimed the spawn at a phantom file, so every packaged run lost every thumbnail to
+    ``[WinError 2]``. The reliable build marker is ``__compiled__``, which Nuitka pre-seeds into
+    every compiled module (it sets neither ``sys.frozen`` nor ``sys._MEIPASS``); the interpreter is
+    additionally required to *exist*, so a build Nuitka one day stops marking still cannot send the
+    spawn to a file that is not there.
     """
-    exe = os.path.basename(sys.executable or "").lower()
-    if exe.startswith("python") or exe.startswith("pypy"):
-        return [sys.executable, "-m", "scripts.data.poster_worker"], _package_root()
-    return [sys.executable, "--poster-worker"], None
+    exe = sys.executable or ""
+    if ("__compiled__" not in globals() and os.path.isfile(exe)
+            and os.path.basename(exe).lower().startswith(("python", "pypy"))):
+        return [exe, "-m", "scripts.data.poster_worker"], _package_root()
+    return [_application_binary(), "--poster-worker"], None
+
+
+def _application_binary():
+    """This program's own executable, for a build to re-enter.
+
+    Not ``sys.executable`` (see :func:`_worker_command`) — but its *directory* half is sound,
+    because Nuitka builds it from the real binary directory. So: that directory, plus the name this
+    program was invoked under. ``sys.argv[0]`` on its own would not do, because under onefile it is
+    the outer launcher, and re-entering that would unpack the whole payload again for every single
+    video; joining it onto the directory instead lands on the unpacked binary that is already
+    running. ``realpath`` because Nuitka hands back the 8.3 short form of the directory
+    (``…\\SNAPCH~1.DIS``), which works but is unreadable in a log or a process list.
+    """
+    name = os.path.basename(sys.argv[0] or "") or os.path.basename(sys.executable or "")
+    if os.name == "nt" and not os.path.splitext(name)[1]:
+        name += ".exe"
+    binary = os.path.join(os.path.dirname(os.path.abspath(sys.executable or "")), name)
+    if os.path.isfile(binary):
+        return os.path.realpath(binary)
+    return os.path.abspath(sys.argv[0] or name)
 
 
 def _package_root():
@@ -82,8 +112,14 @@ def _drain(stream, sink):
         pass
 
 
+# The worker cannot run at all (it failed to import what it needs). Distinct from a hang: a hang is
+# a statement about the file, this is a statement about the tool, and only one of the two may be
+# written into a report as a property of the evidence.
+FATAL = object()
+
+
 def _await_result(lines, timeout):
-    """True/False for the current file, or None when the worker stopped answering in time."""
+    """True/False for the current file, ``FATAL``, or None when the worker stopped answering."""
     end = time.monotonic() + timeout
     while True:
         remaining = end - time.monotonic()
@@ -98,8 +134,10 @@ def _await_result(lines, timeout):
         if line.startswith("OK ") or line.startswith("NO "):
             return line.startswith("OK ")
         if line.startswith("FATAL "):
-            logger.info(f"Poster frames unavailable: {line[6:]}")
-            return None
+            logger.warning(f"Poster frames unavailable: the extraction worker could not start "
+                           f"({line[6:]}) — the videos are listed without a thumbnail, which says "
+                           f"nothing about whether they decode")
+            return FATAL
 
 
 def _kill(proc):
@@ -130,10 +168,15 @@ def _kill(proc):
 def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=BUDGET_S):
     """Run ``[(src, dst, complete)]`` and return ``({src: True/False}, stderr chunks)``.
 
-    A file the worker does not answer for within ``file_timeout`` is recorded as undecodable and
-    skipped; the worker is killed and a new one takes over from the next file. The whole pass stops
-    at ``budget``, whatever is left undone — a thumbnail is a convenience, and no convenience may
-    cost the examiner their report.
+    A file the worker does not answer for within ``file_timeout`` is recorded as undecodable
+    (``False``) and skipped; the worker is killed and a new one takes over from the next file. The
+    whole pass stops at ``budget``, whatever is left undone — a thumbnail is a convenience, and no
+    convenience may cost the examiner their report.
+
+    A key is **absent** from the result when that file was never attempted — the worker could not be
+    started, it died on its own, or the budget ran out first. Callers must keep that apart from
+    ``False``: "this video did not decode" is a finding about the evidence, and it may not be
+    written next to a file this tool never opened.
     """
     # Resolve here, in the parent, where the working directory is the run folder: the worker runs
     # from the package root so that `-m` can find it, so a relative path would mean a different file
@@ -146,8 +189,9 @@ def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=BUDGET_S):
         try:
             proc = _spawn()
         except Exception as error:
-            logger.info(f"Poster frames unavailable ({error}) — video will be listed without a "
-                        f"thumbnail")
+            logger.warning(f"Poster frames unavailable: the extraction worker could not be started "
+                           f"({error}) — {len(jobs) - index} video(s) will be listed without a "
+                           f"thumbnail, and are NOT reported as undecodable")
             return results, stderr_chunks
         lines = queue.Queue()
         threading.Thread(target=_drain, args=(proc.stdout, lines), daemon=True).start()
@@ -162,9 +206,12 @@ def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=BUDGET_S):
                     break                                      # the worker died on its own
                 answered = _await_result(
                     lines, min(file_timeout, max(0.1, deadline - time.monotonic())))
+                if answered is FATAL:                          # nothing further will work either
+                    return results, stderr_chunks              # the rest stay "never attempted"
                 index += 1                                     # dealt with, either way
                 if answered is None:
                     killed += 1
+                    results[key] = False                       # attempted, and it hung: undecodable
                     break                                      # hung: kill it, start a new one
                 results[key] = answered                        # keyed as the caller passed it
         finally:

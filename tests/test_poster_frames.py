@@ -79,7 +79,7 @@ def test_a_hung_file_is_skipped_and_the_rest_still_run(monkeypatch, tmp_path):
     elapsed = time.monotonic() - started
 
     assert results.get("a") is True                 # before the hang
-    assert "b" not in results                       # the hung one is skipped, not waited out
+    assert results.get("b") is False                # the hung one is answered for, not waited out
     assert results.get("c") is True                 # after it — the worker was restarted
     assert elapsed < 20                             # it cost the timeout, not ten minutes
 
@@ -128,17 +128,58 @@ def test_relative_paths_reach_the_worker_as_the_caller_meant_them(monkeypatch, t
     assert results == {"clip.mp4": True}, "a relative path did not survive the trip to the worker"
 
 
-def test_a_packaged_build_re_enters_itself_rather_than_looking_for_python(monkeypatch):
-    """sys.executable is the application in a build — "-m" there would start a GUI per video."""
-    monkeypatch.setattr(sys, "executable", r"C:\Program Files\Snapchat Auto\Snapchat_Auto.exe")
-    command, cwd = poster_worker._worker_command()
-    assert command[1:] == ["--poster-worker"]
-    assert "-m" not in command
+def test_a_packaged_build_re_enters_itself_rather_than_looking_for_python(monkeypatch, tmp_path):
+    """A build's sys.executable is a phantom python.exe — following it cost every thumbnail.
 
-    monkeypatch.setattr(sys, "executable", r"C:\Python314\python.exe")
+    Nuitka standalone sets ``sys.executable`` to the *build machine's* interpreter basename joined
+    onto the installation directory, so an app built from a uv venv reports
+    ``<install dir>\\python.exe`` — a file that is not there. Reading that as an interpreter both
+    chose the "-m" branch in a build and spawned nothing, which is exactly what happened: every
+    packaged run logged ``[WinError 2]`` and produced no posters at all.
+    """
+    install = tmp_path / "Snapchat_Auto"
+    install.mkdir()
+    binary = install / "Snapchat_Auto.exe"
+    binary.write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "executable", str(install / "python.exe"))   # never exists in a build
+    monkeypatch.setattr(sys, "argv", [str(binary)])
+    monkeypatch.setitem(poster_worker.__dict__, "__compiled__", object())
+
     command, cwd = poster_worker._worker_command()
-    assert command[1:] == ["-m", "scripts.data.poster_worker"]
+    assert command == [str(binary), "--poster-worker"], "a build must re-enter its own binary"
+    assert "-m" not in command
+    assert os.path.isfile(command[0]), "the spawn was aimed at a file that does not exist"
+
+
+def test_running_from_source_still_uses_the_interpreter(monkeypatch):
+    """The other half: a real interpreter runs the module, from the directory it imports from."""
+    monkeypatch.delitem(poster_worker.__dict__, "__compiled__", raising=False)
+    monkeypatch.setattr(sys, "executable", sys.executable)
+    command, cwd = poster_worker._worker_command()
+    assert command == [sys.executable, "-m", "scripts.data.poster_worker"]
     assert cwd and os.path.isdir(cwd)
+
+
+def test_a_video_that_was_never_attempted_is_not_called_undecodable(monkeypatch):
+    """"It did not decode" is a finding about the evidence; a failed spawn establishes nothing."""
+    def no_worker():
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(poster_worker, "_spawn", no_worker)
+    results, _ = poster_worker.run_jobs([("a.mp4", "a.jpg", False), ("b.mp4", "b.jpg", False)])
+    assert results == {}, "a file the worker never opened must not carry a verdict"
+
+
+def test_a_video_that_hung_the_decoder_is_recorded_as_undecodable(monkeypatch, tmp_path):
+    """The other side of the same distinction: a hang IS an answer about that file."""
+    monkeypatch.setattr(poster_worker, "_spawn",
+                        lambda: subprocess.Popen(_fake_worker(tmp_path, HANGS_ON_SECOND),
+                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE, text=True, bufsize=1))
+    results, _ = poster_worker.run_jobs([("a", "a.jpg", False), ("b", "b.jpg", False)],
+                                        file_timeout=0.4, budget=20)
+    assert results.get("a") is True
+    assert results.get("b") is False, "the file that hung the decoder must be reported as such"
 
 
 def test_the_pass_leaves_no_worker_behind(monkeypatch, tmp_path):
