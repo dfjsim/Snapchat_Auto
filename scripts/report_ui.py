@@ -374,6 +374,28 @@ function scSelNote(){
 """
 
 
+FEED_DATE_TITLE = ("Not a message time — this conversation holds no message in arroyo.db. Taken "
+                   "from the conversation's own row in the app's chat feed; open the conversation "
+                   "for which field.")
+
+
+def activity_cell(text, source):
+    """A first/last activity value, marked when it did not come from a message.
+
+    Shared by the Conversations index and the Contacts report so the same date cannot be presented
+    two different ways — and so the marker travels as a *source string* between them rather than as
+    markup: the Contacts report escapes what it is handed, so a ready-made cell arrived there as
+    visible tag soup.
+    """
+    if not text:
+        return '<span class="muted" title="Neither a message nor the conversation\'s own row in ' \
+               'arroyo.db carries a date for this conversation.">no date recorded</span>'
+    if source == "messages":
+        return html.escape(text)
+    return (f'<span class="fromfeed" title="{html.escape(FEED_DATE_TITLE)}">'
+            f'{html.escape(text)} <span class="feedtag">feed</span></span>')
+
+
 def counted_options(states, counts):
     """``<option>``s that say how many rows each one will return, and grey out when that is none.
 
@@ -484,6 +506,11 @@ PAGE_CSS = """
  .mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
  .muted{color:#999} .more{background:#d7d7ee;color:#33367a;border-radius:8px;padding:0 6px;
    font-size:10px}
+ /* An activity date that is NOT a message time (report_ui.activity_cell). Muted and tagged so the
+    column cannot be read as "a message was sent then". Used by Conversations and Contacts. */
+ .fromfeed{color:#6a6a80}
+ .feedtag{background:#e7e7f2;color:#5a5a86;border:1px solid #d2d2e4;border-radius:7px;
+   padding:0 5px;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
  .sect{margin-top:12px;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;
    font-weight:700;border-bottom:1px solid #e2e2ee;padding-bottom:2px}
  .grid{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12.5px;margin-top:4px;

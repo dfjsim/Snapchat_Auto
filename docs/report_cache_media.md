@@ -91,6 +91,15 @@ Three counts are now reported separately, and the File column says which one a r
 | app assets (LZC bundles, fonts, CoreML) | `<type> app asset` | *app assets not decoded* |
 | genuinely unrecoverable | `🔒 not recovered` | **not recovered** |
 
+…and, since a header count nobody can filter on is only half the fix, the **Recovered** dropdown
+carries the same four states with their counts (`_recovered_state`, `RECOVERED_STATES`). It was a
+two-way recovered / not-recovered over `entry["recovered"]` alone, so it put the owned-elsewhere
+and app-asset rows under "not recovered" — disagreeing with the number at the top of the page *and*
+with the row's own "↗ decoded in the Memories report" cell. Asking for "not recovered" therefore
+never got rid of them, which is exactly how it was reported. Recovery wins over ownership: a file
+this report did decode is *recovered here* whatever directory it lives in, which is what the File
+cell already showed.
+
 ### Bytes another report decrypted are *shown*, not described
 
 Saying "↗ decoded in the Memories report" next to no image still reads as a failure — and it was
