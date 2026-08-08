@@ -57,13 +57,19 @@ def test_the_zip_can_be_recorded_without_being_hashed(tmp_path):
 
 # --------------------------------------------------------------------------- sidecars
 
-def test_a_database_is_fingerprinted_with_its_write_ahead_log(tmp_path):
-    """sqlite_open reads every database twice, with the log applied and without, so the log is part
-    of what "the same data" means."""
+def test_a_database_is_fingerprinted_with_its_write_ahead_log_and_not_its_shm(tmp_path):
+    """The log holds the committed-but-uncheckpointed pages, so it is evidence and is fingerprinted.
+
+    The -shm is only the shared-memory index over that log. It holds no data of its own, and — measured
+    on the corpus — two runs of the same build leave the Memories databases' -shm with a new mtime,
+    because something on that path still opens the original in place. Fingerprinting it would have the
+    tool fail its own verification over a file it modified itself, which is exactly the false alarm
+    that would teach an examiner to wave a sidecar difference through.
+    """
     path = _db(tmp_path, "arroyo.db", wal=b"log", shm=b"shm")
     sources = sf.collect({"arroyo": path})
     record = sources["artifacts"]["arroyo"]
-    assert set(record["sidecars"]) == {"-wal", "-shm"}
+    assert set(record["sidecars"]) == {"-wal"}
     assert record["sidecars"]["-wal"]["sha256"] != record["sha256"]
 
 
@@ -106,6 +112,41 @@ def test_the_digest_moves_when_a_sidecar_moves(tmp_path):
 def test_an_unexpected_role_is_recorded_rather_than_dropped(tmp_path):
     sources = sf.collect({"something_new": _file(tmp_path, "x.bin")})
     assert sources["artifacts"]["something_new"]["present"]
+
+
+def test_the_copy_carried_in_a_report_page_holds_no_run_timing(tmp_path):
+    """A report is a work product: two runs of the same build on the same evidence must produce the
+    same one. Embedding the full manifest put the run's own `collected` stamp into every page, so
+    every page of every report differed run to run -- caught by diffing two real runs.
+    """
+    sources = sf.collect({"arroyo": _db(tmp_path, "arroyo.db")},
+                         zip_path=_file(tmp_path, "extraction.zip"))
+    small = sf.compact(sources)
+    text = json.dumps(small)
+    assert "collected" not in text
+    assert sources["collected"] not in text
+    # and no per-file mtime either, for the same reason
+    assert "mtime" not in text
+
+
+def test_the_copy_carried_in_a_report_page_keeps_what_a_later_run_needs(tmp_path):
+    sources = sf.collect({"arroyo": _db(tmp_path, "arroyo.db"), "gallery_encrypteddb": ""},
+                         zip_path=_file(tmp_path, "extraction.zip"))
+    small = sf.compact(sources)
+    assert small["digest"] == sources["digest"]
+    assert small["tool_version"] == sources["tool_version"]
+    arroyo = small["artifacts"]["arroyo"]
+    assert arroyo["sha256"] == sources["artifacts"]["arroyo"]["sha256"]
+    assert arroyo["path"]                                   # so the tool can offer the path back
+    assert arroyo["sidecars"]["-wal"]["sha256"]              # the log is what must be compared
+    assert small["artifacts"]["gallery_encrypteddb"]["present"] is False
+    assert small["zip"]["path"] and small["zip"]["hashed"] is False
+    # it is a projection, not the whole thing
+    assert len(json.dumps(small)) < len(json.dumps(sources)) / 2
+
+
+def test_the_compact_copy_of_nothing_is_nothing():
+    assert sf.compact(None) is None
 
 
 def test_sources_round_trip_through_the_report_folder(tmp_path):
