@@ -47,6 +47,7 @@ from datetime import datetime, timedelta
 from urllib.parse import unquote, urlparse
 
 from scripts import report_ui
+from scripts import app_version
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -1485,7 +1486,13 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
             chunk_of.get(anchor),
             {"cat": e["category"], "loc": loc,
              "rec": _recovered_state(e),
-             "link": "y" if e["links"] else "n"},
+             "link": "y" if e["links"] else "n",
+             # This row's anchor is the hash of its *recovered* content, and rows are merged by that
+             # content — so a build that decodes or decrypts something this one could not will give
+             # the same file a different id, and may merge or split rows. The raw bytes' hashes are
+             # therefore recorded with a selection, and are what a later run matches on when the
+             # anchor no longer exists. Copies are few (one file, its duplicates).
+             "raw": [c["raw_sha256"] for c in e["copies"] if c.get("raw_sha256")]},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1558,7 +1565,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 {report_ui.HINT_CSS}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}
  .vcells>.vc{{font-size:12.5px}}
 </style>
-<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="cm";</script>
+<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="cm";</script>
 <script>{report_ui.SELECT_JS}</script>
 <script src="{rel_prefix}selection.js"></script>
 <script>{report_ui.VTABLE_JS}</script></head><body>
@@ -1616,6 +1623,10 @@ function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
  pager:'pager',pageSize:500,selKind:'cm',
+ /* This anchor is the hash of the *recovered* content, so a build that decodes more moves it.
+    The raw bytes' hashes and the path are what a later run matches on then. */
+ selKeys:function(r){{var m=r[5]||{{}},k={{sha:r[0].slice(3),rel:r[3]['2']}};
+  if(m.raw&&m.raw.length)k.raw=m.raw;return k;}},
  rowHeight:{CM_ROW_H},estDetail:320,cols:'{CM_COLS}',detailBase:'data/detail-',
  query:function(){{return document.getElementById('q').value;}},
  match:function(m,r){{
@@ -1624,7 +1635,7 @@ SCV.init({{
       assets=document.getElementById('assets').checked;
   return (!cat||m.cat===cat)&&(!loc||m.loc===loc)&&(!rec||m.rec===rec)&&(!lk||m.link===lk)
        &&(assets||m.cat!=={json.dumps(CAT_ASSET)})
-       &&(!document.getElementById('selonly').checked||SCSel.get('cm',r[0]));}},
+       &&(!document.getElementById('selonly').checked||SCSel.get('cm',SCV.selId(r[0])));}},
  selectedOnly:function(){{return document.getElementById('selonly').checked;}},
  selCount:function(n){{document.getElementById('selcount').textContent=n+' selected';scSelNote();}},
  count:function(n,t){{document.getElementById('count').textContent=

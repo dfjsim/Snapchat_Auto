@@ -40,6 +40,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from scripts import report_ui
+from scripts import app_version
 from scripts.data import sqlite_open
 from scripts.data import sniff
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
@@ -1662,7 +1663,11 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
              "enc": ("y" if e.get("ondisk_encrypted") and not e.get("decrypted") else
                      "dec" if e.get("ondisk_encrypted") else "n"),
              "wal": ("changed" if (e.get("meta_prior") and e.get("wal") == sqlite_open.BOTH)
-                     else (e.get("wal") or sqlite_open.BOTH))},
+                     else (e.get("wal") or sqlite_open.BOTH)),
+             # The hash of the bytes on disk, recorded with a selection as a fallback match. The
+             # CACHE_KEY itself is a key in cache_controller.db and no parsing change can move it,
+             # so this is belt and braces rather than the primary route.
+             **({"sha": e["ondisk_sha256"]} if e.get("ondisk_sha256") else {})},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1767,7 +1772,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 {report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}
  .vcells>.vc{{font-size:12.5px}}
 </style>
-<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="cc";</script>
+<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="cc";</script>
 <script>{report_ui.SELECT_JS}</script>
 <script src="{rel_prefix}selection.js"></script>
 <script>{report_ui.VTABLE_JS}</script></head><body>
@@ -1850,6 +1855,9 @@ function xall(btn){{
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
  pager:'pager',pageSize:500,selKind:'cc',
+ /* The CACHE_KEY is a key in cache_controller.db, so the anchor is stable; the hash of the
+    bytes on disk is recorded as a fallback match. */
+ selKeys:function(r){{var m=r[5]||{{}},k={{key:r[0].slice(3)}};if(m.sha)k.sha=m.sha;return k;}},
  rowHeight:{CC_ROW_H},estDetail:320,cols:'{CC_COLS}',detailBase:'data/detail-',
  query:function(){{return document.getElementById('q').value;}},
  match:function(m,r){{
@@ -1858,7 +1866,7 @@ SCV.init({{
       wal=document.getElementById('wal').value,enc=document.getElementById('enc').value;
   return (!cat||m.cat===cat)&&(!disk||m.disk===disk)&&(!lk||(m.link||'').indexOf(lk)>-1)
        &&(!xs||m.xs==='yes')&&(!wal||m.wal===wal)&&(!enc||m.enc===enc)
-       &&(!document.getElementById('selonly').checked||SCSel.get('cc',r[0]));}},
+       &&(!document.getElementById('selonly').checked||SCSel.get('cc',SCV.selId(r[0])));}},
  selectedOnly:function(){{return document.getElementById('selonly').checked;}},
  selCount:function(n){{document.getElementById('selcount').textContent=n+' selected';
    scSelNote();}},

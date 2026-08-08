@@ -46,6 +46,9 @@ import logging
 from datetime import datetime
 from urllib.parse import quote
 
+from scripts import app_version
+from scripts import selection_file
+
 logger = logging.getLogger(__name__)
 
 
@@ -245,20 +248,49 @@ NAV_CSS = """
 # selected), changes are held in memory, and "Save selections" downloads the file back so it can be
 # dropped next to the reports and filed with the case. ``localStorage`` is kept purely as a
 # same-tab safety net so an accidental reload does not lose work.
+# One source of truth for the schema number: the module that reads and writes the file. What the JS
+# below emits and what Python accepts must never be able to drift apart.
+SELECTION_SCHEMA = selection_file.SCHEMA
+
 SELECT_JS = """
 var SCSel=(function(){
+ var SCHEMA=__SCHEMA__;
  var KEY='scauto-sel:'+(window.SCAUTO_RUN||'default');
- var data={},subs=[],dirty=false,loadedStamp='';
+ var data={},legacy={},subs=[],dirty=false,loadedStamp='',loadedSchema=SCHEMA;
  function bag(kind){if(!data[kind])data[kind]={};return data[kind];}
  function notify(){subs.forEach(function(f){try{f();}catch(e){}});}
  function stash(){                                  // same-tab safety net only (see above)
   try{window.localStorage.setItem(KEY,JSON.stringify(
-   {saved:new Date().toISOString(),dirty:dirty,selections:data}));}catch(e){}}
+   {saved:new Date().toISOString(),dirty:dirty,schema:loadedSchema,
+    selections:data,legacy:legacy}));}catch(e){}}
  function touched(){dirty=true;stash();notify();}
+ /* A row's stored value is its *key record* — the evidence-derived identifiers that let a partial
+    run find this row again even if our own id for it moved (a better decoder changes a
+    Library/Caches row's content hash, a better carver shifts a positional message anchor). A bare
+    1 is still accepted and means "no alternates recorded". */
+ /* Split incoming selections into what we can attribute and what we cannot.
+    Before schema 2 a message id was a bare per-page anchor ("msg-12.0"), and message numbers restart
+    in every conversation — so the same id matched a different message in every chat. Such an id
+    names no conversation and cannot be attributed to one after the fact: it is quarantined rather
+    than guessed at, because promoting it on whichever page happens to be open would invent a fact,
+    and would put a message the examiner never ticked into a partial report.
+    Every route into the store goes through here — including the localStorage restore, which would
+    otherwise let a stash written by an older build smuggle bare ids back in. */
+ function split(sel){
+  var keep={},quarantine={};
+  for(var k in sel){
+   keep[k]={};
+   for(var id in sel[k]){
+    if(k==='msg'&&id.indexOf('|')<0){
+     if(!quarantine[k])quarantine[k]={};
+     quarantine[k][id]=sel[k][id]||1;
+     continue;}
+    keep[k][id]=sel[k][id]||1;}}
+  return {data:keep,legacy:quarantine};}
  function apply(o){
-  var sel=(o&&o.selections)||{};
-  data={};
-  for(var k in sel){data[k]={};for(var id in sel[k])data[k][id]=1;}
+  var parts=split((o&&o.selections)||{});
+  data=parts.data;legacy=parts.legacy;
+  loadedSchema=(o&&o.schema)||1;
   loadedStamp=(o&&o.exported)||'';
   dirty=false;}
  // Reports/selection.js calls this before the page initialises; it is the durable state.
@@ -270,66 +302,113 @@ var SCSel=(function(){
    if(!raw)return;
    var l=JSON.parse(raw);
    if(l&&l.saved&&(!loadedStamp||l.saved>loadedStamp)&&l.selections){
-    data=l.selections;dirty=!!l.dirty;}
+    var parts=split(l.selections);
+    data=parts.data;dirty=!!l.dirty;
+    // a stash from an older build carries no `legacy` of its own; take whatever the split found
+    legacy=l.legacy||{};
+    for(var k in parts.legacy){
+     if(!legacy[k])legacy[k]={};
+     for(var id in parts.legacy[k])legacy[k][id]=parts.legacy[k][id];}
+    if(l.schema)loadedSchema=l.schema;}
   }catch(e){}}
  function get(kind,id){return !!bag(kind)[id];}
- function set(kind,id,on){
-  if(on)bag(kind)[id]=1;else delete bag(kind)[id];
+ function set(kind,id,on,keys){
+  if(on)bag(kind)[id]=keys||1;else delete bag(kind)[id];
   touched();}
- function setMany(kind,ids,on){
+ /* `keysFor` is optional and is called per id, so "select all shown" records the same key records
+    a row-by-row tick would. */
+ function setMany(kind,ids,on,keysFor){
   var b=bag(kind);
-  ids.forEach(function(id){if(on)b[id]=1;else delete b[id];});
+  ids.forEach(function(id){
+   if(on)b[id]=(keysFor&&keysFor(id))||1;else delete b[id];});
   touched();}
- function ids(kind){return Object.keys(bag(kind));}
- function count(kind){return ids(kind).length;}
+ function ids(kind,prefix){
+  var all=Object.keys(bag(kind));
+  return prefix?all.filter(function(id){return id.indexOf(prefix)===0;}):all;}
+ function keys(kind,id){var v=bag(kind)[id];return (v&&v!==1)?v:null;}
+ /* `prefix` scopes the count to one page's rows, so a conversation page's "N selected" counts the
+    messages selected *in this conversation*, not every conversation's. */
+ function count(kind,prefix){return ids(kind,prefix).length;}
  function total(){var n=0;for(var k in data)n+=Object.keys(data[k]).length;return n;}
- function clear(kind){data[kind]={};touched();}
+ function legacyIds(kind){return Object.keys(legacy[kind]||{});}
+ function schema(){return loadedSchema;}
+ /* `prefix` limits the clear to one page's rows — message ids are qualified with their
+    conversation, so a per-conversation Clear must not wipe every conversation's ticks. */
+ function clear(kind,prefix){
+  if(!prefix){data[kind]={};}
+  else{var b=bag(kind);
+   Object.keys(b).forEach(function(id){if(id.indexOf(prefix)===0)delete b[id];});}
+  touched();}
  function isDirty(){return dirty;}
  function payload(){
-  return {tool:'Snapchat_Auto',run_id:(window.SCAUTO_RUN||'default'),
+  return {tool:'Snapchat_Auto',schema:SCHEMA,
+          tool_version:(window.SCAUTO_VERSION||''),
+          run_id:(window.SCAUTO_RUN||'default'),
+          sources:(window.SCAUTO_SOURCES||null),
           exported:new Date().toISOString(),selections:data};}
- function saveFile(){
-  var body="/* Snapchat Auto \\u2014 examiner selections for run "+(window.SCAUTO_RUN||'default')+
-   ".\\n   Keep this file as <report folder>/selection.js so every report of this run loads it.\\n"+
-   "   It is also a plain record you can file with the case. */\\n"+
-   "SCSel.preload("+JSON.stringify(payload(),null,1)+");\\n";
+ /* Two forms of the same payload. ".json" is the default because browsers flag a ".js" download as
+    dangerous and may refuse it outright; ".js" is the drop-in the reports auto-load. A bare .json
+    renamed to selection.js is a *silent* failure — JSON at statement position is a syntax error the
+    browser swallows — so nothing here ever suggests renaming it. */
+ function saveFile(format){
+  var js=(format==='js'),body;
+  if(js)body="/* Snapchat Auto \\u2014 examiner selections for run "+
+    (window.SCAUTO_RUN||'default')+
+    ".\\n   Keep this file as <report folder>/selection.js so every report of this run loads it.\\n"+
+    "   It is also a plain record you can file with the case. */\\n"+
+    "SCSel.preload("+JSON.stringify(payload(),null,1)+");\\n";
+  else body=JSON.stringify(payload(),null,1)+"\\n";
   var a=document.createElement('a');
-  a.href=URL.createObjectURL(new Blob([body],{type:'application/javascript'}));
-  a.download='selection.js';
+  a.href=URL.createObjectURL(new Blob([body],
+   {type:js?'application/javascript':'application/json'}));
+  a.download=js?'selection.js':'selection.json';
   document.body.appendChild(a);a.click();
   setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},0);
   dirty=false;stash();notify();}
  function loadFile(file,done){
   var r=new FileReader();
   r.onload=function(){
-   var text=String(r.result||''),start=text.indexOf('{'),end=text.lastIndexOf('}');
+   var text=String(r.result||''),start=text.indexOf('{'),end=text.lastIndexOf('}'),o;
    try{
-    var o=JSON.parse(start>=0?text.slice(start,end+1):text);
-    // an explicit load replaces what is here — unlike startup, the same-tab backup must not win
-    apply(o.selections?o:{selections:o});
-    stash();notify();
+    o=JSON.parse(start>=0?text.slice(start,end+1):text);
    }catch(e){done(null,'That file is not a Snapchat Auto selection file.');return;}
+   // a selection from another run loads, but not silently: its ids may name nothing here
+   if(o.run_id&&window.SCAUTO_RUN&&o.run_id!==window.SCAUTO_RUN&&
+      !confirm('That selection was saved for run '+o.run_id+', and these reports are run '+
+               window.SCAUTO_RUN+'.\\n\\nLoad it anyway?')){done(null,null);return;}
+   // an explicit load replaces what is here — unlike startup, the same-tab backup must not win
+   apply(o.selections?o:{selections:o});
+   stash();notify();
    done(total(),null);};
   r.readAsText(file);}
  restash();
  window.addEventListener('beforeunload',function(ev){
   if(!dirty)return;
   ev.preventDefault();ev.returnValue='';});
- // one delegated handler for every checkbox in the document, virtual rows included
+ /* One delegated handler for every checkbox in the document, virtual rows included. The key record
+    is read from the row itself (`data-i` on the .vr) rather than emitted into every row's markup —
+    at 100 000 rows that attribute would cost more than the selection is worth. Hand-written
+    checkboxes carry `data-keys` inline; there are only a handful of those. */
  document.addEventListener('change',function(ev){
   var el=ev.target;
   if(!el||!el.classList||!el.classList.contains('selbox'))return;
-  set(el.getAttribute('data-kind'),el.getAttribute('data-id'),el.checked);});
- return {get:get,set:set,setMany:setMany,ids:ids,count:count,total:total,clear:clear,
+  var keys=null,vr=el.closest?el.closest('.vr[data-i]'):null,raw;
+  if(vr&&window.SCV&&SCV.selKeys)keys=SCV.selKeys(+vr.getAttribute('data-i'));
+  else if((raw=el.getAttribute('data-keys'))){try{keys=JSON.parse(raw);}catch(e){}}
+  set(el.getAttribute('data-kind'),el.getAttribute('data-id'),el.checked,keys);});
+ return {get:get,set:set,setMany:setMany,ids:ids,keys:keys,count:count,total:total,clear:clear,
          preload:preload,onChange:function(f){subs.push(f);},saveFile:saveFile,loadFile:loadFile,
-         dirty:isDirty};
+         dirty:isDirty,legacy:legacyIds,schema:schema};
 })();
 // reflect the stored state onto plain (non-virtual) checkboxes, e.g. on a detail sub-page
+// NOTE the invariant this rests on: `data-id` is the *store* id and must be unique across the whole
+// run. A page-local anchor (a message's, whose number restarts per conversation) must be prefixed —
+// see C.selPrefix in VTABLE_JS.
 function scSyncBoxes(){
  document.querySelectorAll('input.selbox[data-id]').forEach(function(b){
   if(b.closest('.vr'))return;                       // virtual rows are re-rendered from the store
   b.checked=SCSel.get(b.getAttribute('data-kind'),b.getAttribute('data-id'));});}
-"""
+""".replace("__SCHEMA__", str(SELECTION_SCHEMA))
 
 SELECT_CSS = """
  input.selbox{width:15px;height:15px;cursor:pointer;accent-color:#2d2d71;margin:0}
@@ -342,23 +421,47 @@ SELECT_CSS = """
    border-radius:6px;padding:5px 10px;font-size:13px;font-weight:600;color:#2d2d71;cursor:pointer}
  .sellabel:has(input:checked){background:#2d2d71;color:#fff;border-color:#2d2d71}
  .selnote{color:#8a5a00;font-size:11.5px}
+ .sellegacy{background:#fff5e0;border:1px solid #e0bf80;color:#6b4a00;padding:8px 12px;
+   border-radius:6px;font-size:12px;line-height:1.5;margin:6px 0}
  .selrow{display:inline-flex;align-items:center;gap:8px;background:#eef0ff;border:1px solid #c9cdf0;
    border-radius:6px;padding:4px 10px;font-size:12.5px;font-weight:600;color:#2d2d71;cursor:pointer}
  .selrow:has(input:checked){background:#2d2d71;color:#fff;border-color:#2d2d71}
 """
 
 # Toolbar glue shared by both index reports. `flt()` (defined by each report) is called when the
-# "selected only" filter is toggled.
+# "selected only" filter is toggled. `window.SCAUTO_SELPREFIX` scopes Clear and the count to one
+# page's rows where the anchors are page-local (the Conversations message table).
 SELECT_TOOLBAR_JS = """
 function scSelClear(){
- var n=SCSel.count(window.SCAUTO_SELKIND);
+ var p=window.SCAUTO_SELPREFIX||'',n=SCSel.count(window.SCAUTO_SELKIND,p);
  if(!n){alert('Nothing is selected here.');return;}
- if(confirm('Clear all '+n+' selection(s) in this report?'))SCSel.clear(window.SCAUTO_SELKIND);}
-function scSelSave(){
- SCSel.saveFile();
+ if(confirm('Clear all '+n+' selection(s) '+(p?'on this page':'in this report')+'?'))
+  SCSel.clear(window.SCAUTO_SELKIND,p);}
+function scSelLegacyCheck(){
+ var n=SCSel.legacy('msg').length;
+ if(!n)return true;
+ return confirm(n+' message selection(s) in the file you loaded predate per-conversation message '+
+  'ids: they name a message number with no conversation, and the same number exists in every '+
+  'chat.\\n\\nSaving now drops them. Re-tick those messages afterwards.\\n\\nSave anyway?');}
+/* ".json" is the default: browsers flag a ".js" download as dangerous and may refuse it outright.
+   The ".js" form is the drop-in the reports auto-load. Never suggest renaming one to the other —
+   bare JSON loaded as a script is a syntax error the browser swallows, which would leave the
+   examiner with an empty selection and no message at all. */
+function scSelSaveJson(){
+ if(!scSelLegacyCheck())return;
+ SCSel.saveFile('json');
+ alert('selection.json was downloaded.\\n\\nThis is the copy to keep with the case, and the file '+
+  'to hand to Snapchat_Auto when building a partial report.\\n\\nTo have the reports load it '+
+  'again, use "Load\\u2026" \\u2014 or let the tool install it '+
+  '(Snapchat_Auto --install-selection selection.json).');}
+function scSelSaveJs(){
+ if(!scSelLegacyCheck())return;
+ SCSel.saveFile('js');
  alert('selection.js was downloaded.\\n\\nPut it next to the reports (replace '+
   '<report folder>\\\\selection.js) and every report of this run will load your selections the '+
-  'next time it is opened. Keep a copy with the case file.');}
+  'next time it is opened.\\n\\nIf your browser blocked the download, save the .json instead and '+
+  'let the tool install it \\u2014 do NOT rename a .json to .js, the reports cannot read that.');}
+function scSelSave(){scSelSaveJson();}     /* the older single-button entry point */
 function scSelLoad(input){
  var f=input.files&&input.files[0];
  if(!f)return;
@@ -366,11 +469,21 @@ function scSelLoad(input){
    'and you have unsaved changes. Continue?')){input.value='';return;}
  SCSel.loadFile(f,function(total,err){
   input.value='';
-  alert(err?err:(total+' selection(s) loaded.'));});}
+  if(err){alert(err);return;}
+  if(total===null)return;                  // the examiner cancelled a cross-run load
+  scSelNote();
+  alert(total+' selection(s) loaded.');});}
 function scSelNote(){
  var e=document.getElementById('selnote');
- if(!e)return;
- e.textContent=SCSel.dirty()?'unsaved \\u2014 use "Save selections"':'';}
+ if(e)e.textContent=SCSel.dirty()?'unsaved \\u2014 use "Save selections"':'';
+ var g=document.getElementById('sellegacy');
+ if(!g)return;
+ var n=SCSel.legacy('msg').length;
+ g.style.display=n?'block':'none';
+ if(n)g.innerHTML='\\u26a0 This selection file predates per-conversation message ids (schema 1). '+
+  '<b>'+n+'</b> message selection(s) in it name a message number with no conversation \\u2014 the '+
+  'same number exists in several chats, so they cannot be attributed to one and are not counted '+
+  'here. Re-tick those messages and save; saving now drops them.';}
 """
 
 
@@ -439,25 +552,39 @@ def selection_toolbar(noun):
         f'<button onclick="SCV.selectShown(false)" title="Unselect every {noun} matching the '
         'current filters">Unselect shown</button>'
         '<button onclick="scSelClear()" title="Clear the whole selection">Clear</button>'
-        '<button onclick="scSelSave()" title="Download selection.js — put it next to the reports '
-        'to have every report of this run load your selections, and keep a copy with the case">'
-        '💾 Save selections</button>'
-        '<label class="filebtnlike" title="Load a selection.js saved earlier">'
+        '<button onclick="scSelSaveJson()" title="Download selection.json — the copy to keep with '
+        'the case, and the file to hand to Snapchat_Auto when building a partial report">'
+        '💾 Save selections (.json)</button>'
+        '<button onclick="scSelSaveJs()" title="Download the drop-in selection.js — put it next to '
+        'the reports to have every report of this run load your selections. Some browsers block a '
+        '.js download; use the .json in that case.">Save as selection.js</button>'
+        '<label class="filebtnlike" title="Load a selection file saved earlier (.json or .js)">'
         'Load…<input type="file" id="selfile" accept=".js,.json,application/json" hidden '
         'onchange="scSelLoad(this)"></label>'
-        '<span class="selnote" id="selnote"></span></span>')
+        '<span class="selnote" id="selnote"></span></span>'
+        '<div class="sellegacy" id="sellegacy" style="display:none"></div>')
 
 
 SELECTION_STUB = """/* Snapchat Auto — examiner selections for this run.
 
    Every report of this run loads this file at startup, which is how the Memories index, the Memory
    detail sub-pages and the cache_controller report agree on what you have selected. It starts
-   empty: tick rows in a report, press "Save selections", and replace this file with the
-   selection.js your browser downloads. It is a plain text record you can file with the case.
+   empty: tick rows in a report and press "Save selections (.json)". Keep that .json with the case —
+   it is also the file you hand back to Snapchat_Auto to build a partial report.
+
+   To have the reports load your selections automatically again, either use "Load…" each session or
+   let the tool put them here for you:
+
+       Snapchat_Auto --install-selection selection.json
+
+   Do NOT simply rename a .json to selection.js. This file is loaded as a script, and bare JSON is a
+   syntax error the browser discards without a word — the reports would open with nothing selected
+   and no indication why. "Save as selection.js" produces the drop-in form when you want one.
 
    (A report opened from file:// cannot write to disk, and browsers give each file:// page its own
-   private, tab-scoped storage — so saving this file is what makes a selection last.) */
-SCSel.preload({"tool": "Snapchat_Auto", "run_id": %s, "exported": "", "selections": {}});
+   private, tab-scoped storage — so a saved file is what makes a selection last.) */
+SCSel.preload({"tool": "Snapchat_Auto", "schema": %d, "run_id": %s, "tool_version": %s,
+               "sources": null, "exported": "", "selections": {}});
 """
 
 
@@ -473,7 +600,8 @@ def write_selection_stub(report_dir, run_id_value):
     try:
         os.makedirs(report_dir or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write(SELECTION_STUB % json.dumps(run_id_value))
+            fh.write(SELECTION_STUB % (SELECTION_SCHEMA, json.dumps(run_id_value),
+                                       json.dumps(app_version.get_version())))
     except OSError as error:
         logger.debug(f"Could not write the selection stub in {report_dir}: {error}")
     return path
@@ -606,10 +734,10 @@ function init(o){
  if(o.sort!==undefined&&o.sort>=0){sortCol=o.sort;sortDir=o.sortDir||1;}
  if(o.selKind&&window.SCSel)SCSel.onChange(function(){
   if(C.selectedOnly&&C.selectedOnly())refilter();else{dirty=true;render();}
-  if(C.selCount)C.selCount(SCSel.count(o.selKind));});
+  if(C.selCount)C.selCount(SCSel.count(o.selKind,o.selPrefix));});
  refilter();
  sync();
- if(C.selCount&&window.SCSel)C.selCount(SCSel.count(o.selKind));}
+ if(C.selCount&&window.SCSel)C.selCount(SCSel.count(o.selKind,o.selPrefix));}
 
 /* ---------- filtering / sorting ---------- */
 /* A query is split on '|', and a row matches when it contains ANY of the parts. One token behaves
@@ -768,7 +896,7 @@ function rowHtml(i){
    (op?'auto':C.rowHeight+'px')+'"><div class="vcells" style="height:'+C.rowHeight+
    'px;grid-template-columns:'+(C.selKind?'30px ':'')+C.cols+'">';
  if(C.selKind)s+='<div class="vc sel"><input type="checkbox" class="selbox" data-kind="'+
-   C.selKind+'" data-id="'+id+'"'+(SCSel.get(C.selKind,id)?' checked':'')+
+   C.selKind+'" data-id="'+selId(id)+'"'+(SCSel.get(C.selKind,selId(id))?' checked':'')+
    ' title="mark this row as relevant (saved in this browser; use Export to keep it)"></div>';
  for(var c=0;c<cells.length;c++)s+='<div class="vc c'+c+'">'+cells[c]+'</div>';
  s+='</div>';
@@ -830,10 +958,29 @@ function expandAll(on,limit){
   if(any!==undefined)loadDetail(any,function(){dirty=true;rebuild();});});
  return true;}
 
-/* ---------- selection over the whole filtered set ---------- */
+/* ---------- selection ---------- */
+
+/* A row's *anchor* is only unique within its own document — a message's number restarts in every
+   conversation, so `msg-12.0` names a different message on every conversation page. The *store* id
+   has to be unique across the whole run, so a table whose anchors are page-local sets `selPrefix`
+   (the Conversations message table uses "conv-<id>|"). The anchor itself is left alone, which is
+   why every cross-report link, `cache_links.json` record and SCV.goTo target still resolves. */
+function selId(id){return (C&&C.selPrefix?C.selPrefix:'')+id;}
+/* Every "Selected only" predicate goes through this too, even in the tables that set no prefix: a
+   filter that tested the bare anchor would silently stop matching the day its table acquired one. */
+
+/* The evidence-derived identifiers for a row, recorded alongside the tick so a later run can find
+   this row again even if our own id for it moved. Looked up on demand rather than emitted into
+   every row's markup — see the change handler in SELECT_JS. */
+function selKeys(i){
+ if(!C||!C.selKeys||!rows[i])return null;
+ try{return C.selKeys(rows[i])||null;}catch(e){return null;}}
+
 function selectShown(on){
  if(!C.selKind)return 0;
- SCSel.setMany(C.selKind,view.map(function(i){return rows[i][0];}),on);
+ var byStoreId={};
+ var list=view.map(function(i){var s=selId(rows[i][0]);byStoreId[s]=i;return s;});
+ SCSel.setMany(C.selKind,list,on,function(s){return selKeys(byStoreId[s]);});
  return view.length;}
 
 /* ---------- anchor navigation ---------- */
@@ -892,6 +1039,7 @@ function clearFilters(){
 return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
         expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
         remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
+        selId:selId,selKeys:selKeys,
         page:function(){return page;},
         pages:pageCount,count:function(){return view.length;}};
 })();

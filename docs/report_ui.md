@@ -205,10 +205,87 @@ The durable store is therefore **a file the examiner saves**: `Reports/selection
   selected.
 * Ticks are held in memory; a **“unsaved”** marker appears next to the count, and leaving the page
   with unsaved ticks raises the browser's "leave site?" confirmation.
-* **💾 Save selections** downloads a new `selection.js` (a small, human-readable
-  `SCSel.preload({…})` file, ids in plain text). Dropping it back next to the reports makes the
-  selection load automatically from then on — and it is a record that can be filed with the case.
-  **Load…** reads one back explicitly.
 * `localStorage` is still written as a same-tab safety net, so an accidental reload does not lose
   work; a stash newer than the loaded file wins on reload, but an explicit **Load…** always
   replaces what is in memory.
+
+### Two save forms, and why `.json` is the default
+
+Chrome and Edge treat a `.js` download as a dangerous file type: the examiner gets a "keep / discard"
+prompt at best, and on some configurations the download is blocked outright. So the toolbar offers
+both forms of the same payload:
+
+| button | file | what it is for |
+|---|---|---|
+| **💾 Save selections (.json)** | `selection.json` | plain JSON. The copy to keep with the case, and the file handed back to the tool. Downloads without a warning. |
+| **Save as selection.js** | `selection.js` | the same payload wrapped in `SCSel.preload(…)` — the drop-in form a report auto-loads. |
+
+**A `.json` renamed to `selection.js` does not work, and fails silently.** The reports load that file
+as a script, and bare JSON at statement position is a syntax error the browser discards without a
+word — the reports open with nothing selected and no indication why. Nothing in the UI suggests the
+rename; instead the tool does the conversion itself:
+
+```
+Snapchat_Auto --install-selection selection.json [--report-dir …\Reports]
+```
+
+`scripts/selection_file.py` owns both directions (`parse_selection_text` reads either form,
+`selection_js_text` writes the drop-in one, `install_selection` places it and backs up whatever was
+there). It is stdlib-only and imports nothing else from the project, because it is also the surface
+an external tool needs in order to produce a selection of its own.
+
+### What a selection file records — schema 2
+
+```json
+{"tool": "Snapchat_Auto", "schema": 2, "tool_version": "1.5.2+build.20260808",
+ "run_id": "…", "sources": null, "exported": "…Z",
+ "selections": {"conv": {"conv-<id>": {"conv": "<id>", "server": "<id>"}},
+                "msg":  {"conv-<id>|msg-12.0": {"conv": "<id>", "smid": "12.0"}},
+                "mem":  {"mem-<ZSNAPID>": {"snap": "…", "mediaid": "…"}},
+                "cc":   {"ck-<CACHE_KEY>": {"key": "…", "sha": "…"}},
+                "cm":   {"cm-<sha256>": {"sha": "…", "raw": ["…"], "rel": "…"}},
+                "ct":   {"ct-<user id>": {"uid": "…", "user": "…"}}}}
+```
+
+Two things changed from schema 1, both because a selection is about to be the *input* to a partial
+report rather than only a working note.
+
+**1. A message id is qualified with its conversation.** `server_message_id` is a per-conversation
+ordinal (`12.0` = message 12, part 0), so the row anchor `msg-12.0` is unique only on its own page —
+and the store is shared by the whole run. Ticking message 12.0 in one chat therefore marked message
+12.0 in *every* chat. The **anchor is unchanged** (every cross-report link, `cache_links.json` record
+and `SCV.goTo` target depends on it); what changed is the *stored* id, via a new `selPrefix` in the
+virtual table's config:
+
+```js
+SCV.init({… selKind:"msg", selPrefix:"conv-<conversation id>|" …})
+```
+
+`SCV.selId(anchor)` applies it, `selectShown` stores the same prefixed ids, and
+`SCSel.count(kind, prefix)` / `SCSel.clear(kind, prefix)` take a prefix so a conversation page's
+count and Clear button mean *this* conversation. A table whose anchors are already globally unique
+(`conv-`, `ct-`, `mem-`, `ck-`, `cm-`) sets no prefix and behaves exactly as before.
+
+A schema-1 file loads, but its bare `msg-…` ids go to a quarantine bag that is **not** part of the
+selection: they are not counted, not saved, and an amber banner explains that they name a message
+number with no conversation and must be re-ticked. They are never promoted to whichever conversation
+happens to be open — that would invent a fact, and would put a message the examiner never ticked into
+a partial report.
+
+**2. Each ticked row records the identifiers it can be found by again.** Four of the six id schemes
+are read straight out of the evidence and survive any parsing improvement — `mem-<ZSNAPID>` and
+`conv-<client conversation id>` are device-assigned UUIDs, `ck-<CACHE_KEY>` is a key in
+`cache_controller.db`, `msg-<server_message_id>` comes from `conversation_message`. Two do not:
+
+* **`cm-<sha256>` is hashed over the *decoded* payload**, and Library/Caches rows are merged by
+  decoded content — so a build that decrypts or decodes something an earlier one could not gives the
+  same file a different id, and may merge or split rows. Every copy's *raw* hash and the path travel
+  with the selection.
+* **the fallback branches of `msg` and `ct`.** `msg-row<N>` is positional (recovering one more
+  message shifts every later one, as would the WAL free-space carving in `TODO.md`), and
+  `contact_anchor` falls back username → conversation id → `ct-unknown`, which is not even unique.
+
+The keys cost nothing per row in the data files: `SCV.init` takes a `selKeys(row)` callback and the
+delegated `change` handler looks the row up through the `data-i` attribute `.vr` already carries, so
+they are read only when a box is actually ticked. Hand-written checkboxes (a Memory sub-page's member
+blocks, a conversation page's own box) carry `data-keys` inline — there are only a handful.

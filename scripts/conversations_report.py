@@ -45,6 +45,7 @@ import logging
 from datetime import datetime, timezone
 
 from scripts import report_ui
+from scripts import app_version
 from scripts.data import sqlite_open
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, text_html, cell)
@@ -931,12 +932,18 @@ function xall(btn){
 """
 
 
-def _head(title, rel_prefix, run_id, sel_kind, asset_prefix):
-    """The common ``<head>`` of the index and the detail pages."""
+def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix=""):
+    """The common ``<head>`` of the index and the detail pages.
+
+    ``sel_prefix`` is set on a conversation page, whose message anchors are page-local: it scopes the
+    selection count and the Clear button to this conversation's messages. See ``report_ui.selId``.
+    """
     return (f'<!doctype html><html><head><meta charset="utf-8"><title>{_esc(title)}</title>'
             f'<link rel="stylesheet" href="{asset_prefix}assets/ui.css">'
             f'<script>window.SCAUTO_RUN={json.dumps(run_id)};'
-            f'window.SCAUTO_SELKIND="{sel_kind}";</script>'
+            f'window.SCAUTO_VERSION={json.dumps(app_version.get_version())};'
+            f'window.SCAUTO_SELKIND="{sel_kind}";'
+            f'window.SCAUTO_SELPREFIX={json.dumps(sel_prefix)};</script>'
             f'<script src="{asset_prefix}assets/ui.js"></script>'
             f'<script src="{rel_prefix}selection.js"></script></head>')
 
@@ -1183,7 +1190,13 @@ def _message_rows(conv, chunk_of):
             # the type filter matches any of a message's types, so they travel delimited
             {"dir": direction, "type": "|" + "|".join(msg["types"] or ["(none)"]) + "|",
              "att": "y" if atts else "n",
-             "wal": "gone" if msg.get("wal") == sqlite_open.MAIN_ONLY else "live"},
+             "wal": "gone" if msg.get("wal") == sqlite_open.MAIN_ONLY else "live",
+             # The raw server message id, carried so a saved selection identifies this message by
+             # what arroyo.db calls it rather than by our anchor — the anchor is sanitised, may take
+             # a duplicate suffix, and for an unsent message is only a *position* in the
+             # conversation, which shifts the moment the parser recovers one more row. Omitted when
+             # there is none, in which case `selKeys` falls back to the time and sender.
+             **({"smid": msg["smid"]} if msg["smid"] else {})},
         ])
     return rows
 
@@ -1277,12 +1290,21 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         ("Senders", "<br>".join(f"{text_html(s)} &mdash; {n}" for s, n in top_senders), ""),
     ])
 
+    # `data-keys` inline here rather than through SCV.selKeys: this box is not a virtual row, and
+    # there is exactly one of it per page, so the attribute costs nothing.
+    conv_keys = _esc(json.dumps({"conv": conv["id"], "server": conv["server_id"] or ""}))
     selbar = ('<span class="selbar">'
               '<label class="selrow"><input type="checkbox" class="selbox" data-kind="conv" '
-              f'data-id="conv-{_esc(conv["id"])}"> mark this conversation for the case</label>'
-              '<button onclick="scSelSave()" title="Download selection.js — put it next to the '
-              'reports so every report of this run loads it">&#128190; Save selections</button>'
-              '<span class="selnote" id="selnote"></span></span>')
+              f'data-id="conv-{_esc(conv["id"])}" data-keys="{conv_keys}">'
+              ' mark this conversation for the case</label>'
+              '<button onclick="scSelSaveJson()" title="Download selection.json — the copy to keep '
+              'with the case, and the file to hand back to Snapchat_Auto for a partial report">'
+              '&#128190; Save selections (.json)</button>'
+              '<button onclick="scSelSaveJs()" title="Download the drop-in selection.js to put next '
+              'to the reports. Some browsers block a .js download; use the .json then.">'
+              'Save as selection.js</button>'
+              '<span class="selnote" id="selnote"></span></span>'
+              '<div class="sellegacy" id="sellegacy" style="display:none"></div>')
 
     # A conversation with no messages must not trip the virtual table's "row data missing" banner
     # (it fires on an empty row set), and its empty table needs to say why it is empty.
@@ -1293,7 +1315,8 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
     type_opts = "".join(f'<option value="{html.escape(t, quote=True)}">{_esc(t)}</option>'
                         for t in sorted(conv["types"]))
     doc = (
-        _head(f'Conversation {_short(conv["title"], 40)}', "../../", run_id, "msg", "../")
+        _head(f'Conversation {_short(conv["title"], 40)}', "../../", run_id, "msg", "../",
+              sel_prefix=f'conv-{conv["id"]}|')
         + '<body>'
         f'<header><h1>{text_html(conv["title"])} &mdash; conversation</h1>'
         f'<div class="sum">{_kind_badge(conv["kind"])} &middot; {conv["n_messages"]} message(s) '
@@ -1346,6 +1369,14 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         '<script>'
         'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
         'empty:"vempty",pager:"pager",pageSize:500,selKind:"msg",sort:1,sortDir:1,'
+        # A message number restarts in every conversation, so the row anchor ("msg-12.0") is unique
+        # only on this page while the *stored* id has to be unique across the run. The anchor stays
+        # as it is — every cross-report link and cache_links.json record depends on it.
+        f'selPrefix:{json.dumps("conv-" + conv["id"] + "|")},'
+        # what a later run matches this message on if our anchor for it has moved
+        'selKeys:function(r){var m=r[5]||{},k={conv:' + json.dumps(conv["id"]) + '};'
+        'if(m.smid)k.smid=m.smid;'
+        'else{k.ts=r[3]["1"];k.sender=r[3]["3"];k.anchor=r[0];}return k;},'
         f'rowHeight:{MSG_ROW_H},estDetail:300,cols:"{MSG_COLS}",'
         f'detailBase:"data/{key}/detail-",'
         'query:function(){return document.getElementById("q").value;},'
@@ -1490,7 +1521,9 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
             chunk_of.get(anchor),
             {"kind": conv["kind"], "msg": "y" if conv["n_messages"] else "n",
              "att": "y" if conv["n_attachments"] else "n",
-             "wal": "gone" if conv["n_wal_gone"] else "live"},
+             "wal": "gone" if conv["n_wal_gone"] else "live",
+             # the conversation's other identity, recorded with a selection as a fallback match
+             **({"sid": conv["server_id"]} if conv["server_id"] else {})},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1576,13 +1609,15 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         '<script>'
         'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
         'empty:"vempty",pager:"pager",pageSize:500,selKind:"conv",sort:5,sortDir:-1,'
+        'selKeys:function(r){var m=r[5]||{},k={conv:r[0].slice(5)};'
+        'if(m.sid)k.server=m.sid;return k;},'
         f'rowHeight:{CONV_ROW_H},estDetail:200,cols:"{CONV_COLS}",detailBase:"data/detail-",'
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var k=document.getElementById("kind").value,'
         'g=document.getElementById("msg").value,a=document.getElementById("att").value,'
         'w=scFv("wal");'
         'return (!k||m.kind===k)&&(!g||m.msg===g)&&(!a||m.att===a)&&(!w||m.wal===w)'
-        '&&(!document.getElementById("selonly").checked||SCSel.get("conv",r[0]));},'
+        '&&(!document.getElementById("selonly").checked||SCSel.get("conv",SCV.selId(r[0])));},'
         'selectedOnly:function(){return document.getElementById("selonly").checked;},'
         'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
         'scSelNote();},'
