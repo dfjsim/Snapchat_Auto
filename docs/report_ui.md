@@ -99,13 +99,50 @@ Every report — including the plain ones (Communications legacy, Memory detail 
   computed offset.
 * **Works on repeat clicks into an already-open tab.** Reports open each other in *named* tabs
   (`scauto_cache`, `scauto_memories`, `scauto_convs`, `scauto_contacts`,
-  `scauto_comms_legacy`), so a second click on the same link reuses
+  `scauto_comms_legacy`), and the detail sub-pages get one named tab each
+  (`scauto_memory_page`, `scauto_conv_page`), so a second click on the same link reuses
   the tab that is already open. When the URL — fragment included — is unchanged, the browser fires
   **no** event, which is why "it only worked the first time". `NAV_JS` therefore **consumes the
   fragment** after acting on it (`location.hash = '_'`), so the next click is always a real
   `hashchange`. The `_` sentinel is used rather than an empty fragment because an empty fragment
   makes the browser scroll back to the top. `history.replaceState` is deliberately not used: it
   throws on `file://` documents.
+
+**Every** link out of an index must carry its named target — a bare `<a href>` is a bug, not a
+shorthand. Navigating an index away *in place* discards the whole working state of that page: the
+scroll position, the filters, which rows are expanded, the page the pager is on, and the ticks that
+have not yet been written to `selection.js` (those live in memory, so leaving raises the "leave
+site?" prompt and then loses them — see below). The Memories index thumbnail was missing its
+`target` and did exactly that, while the `open ▸` button in the same row did not.
+
+Named tabs are also why these stay plain `<a href>` links rather than `window.open` calls. The name
+is what makes the tab get *reused* — fifty clicks yield one detail tab, not fifty — and keeping the
+href intact preserves the browser's own escape hatches: Ctrl/⌘-click for a separate tab,
+Shift-click for a separate window, middle-click, and the context menu. Intercepting clicks in JS to
+open a sized window would take all of that away, and `window.open` features are applied only on the
+window's *first* open anyway.
+
+## Filter controls — two rules
+
+**Every filter bar ends with a red "✕ Clear all filters"** (`report_ui.clear_filters_button`,
+`SCV.clearFilters()`). The machinery already existed: `C.reset()`, which `findAll`/`goTo` call so a
+filter cannot hide the row a cross-report link was aimed at. What was missing was a way for the
+examiner to ask for it, and without one "the report says 0 rows" is regularly one control left set
+three filters ago, on a bar that does not fit on one line at every window width. It clears the
+search box, every dropdown and *Selected only* — the ticks themselves are kept, which is why it is
+safe to make it the obvious red button.
+
+**A filter with nothing to match is not offered as a choice.** Either the control is left out
+(`conversations_report._wal_filter_html` returns `""` when the `-wal` deleted no message) or the
+dead option is disabled and shows its count
+(`memories_media_report._media_filter_options`: *"partially cached (incomplete) — 0"*). A dropdown
+whose only possible outcome is an empty table is indistinguishable from a broken report, and that
+is exactly how it was read. Counts in the options are the cheaper half of the rule: they say what a
+filter will return *before* it is chosen.
+
+Reading an optional control from `match`/`reset` goes through `scFv(id)` / `scFvReset(id)`, which
+tolerate the element being absent, so the same generated JS works whether or not the control was
+emitted.
 
 ## The "?" popovers
 

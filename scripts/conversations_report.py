@@ -489,46 +489,98 @@ def _smid_sort(smid):
 
 # --------------------------------------------------------------------------- conversation model
 
-def load_arroyo_conversations(arroyo, msg_df=None):
-    """``user_conversation`` → ``{conversation id: {"type", "user_ids", "server_id"}}``.
+_ARROYO_BLANK = {"type": None, "user_ids": [], "server_id": "", "created_ms": None,
+                 "feed_first_ms": None, "feed_last_ms": None, "feed_title": "", "feed_type": None,
+                 "in_arroyo": False}
 
-    The authoritative statement of what a conversation *is* (0 = private, 1 = group) and who is in
-    it. The table is absent on newer Snapchat schemas, so this is best-effort: an empty result just
-    means the report falls back to the friends/groups lists. The server-side conversation id is
-    taken from the message frame when the messages carry one.
+
+def load_arroyo_conversations(arroyo, msg_df=None):
+    """Conversation-level facts from ``arroyo.db``, keyed by client conversation id.
+
+    Three tables, all optional, because the schema moves between app versions:
+
+    * ``user_conversation`` — what a conversation *is* (0 = private, 1 = group) and who is in it.
+      **Absent on the newest schemas**, which is why the rest of this is worth reading.
+    * ``conversation.creation_timestamp`` — when this device created its local row for the
+      conversation. Verified against the corpus: it is *not* the date of the first message. On a
+      device restored from a backup it is the restore, and messages years older sit under it.
+    * ``feed_entry.display_timestamp`` / ``last_updated_timestamp`` — the chat-feed entry's own
+      dates, i.e. what the app shows in the chat list.
+
+    The last two exist for a conversation that holds **no message at all**, which is the only
+    statement of when such a conversation was active. See :func:`build_conversations` for how they
+    are used and how they are labelled — they are not message times and must not be shown as if
+    they were.
     """
     out = {}
     if msg_df is not None and COL_SCONV in getattr(msg_df, "columns", []):
         for conv_id, server_id in zip(msg_df[COL_CONV], msg_df[COL_SCONV]):
             key, value = cell(conv_id), _id_str(server_id)
             if key and value:
-                out.setdefault(key, {"type": None, "user_ids": [], "server_id": ""})
+                out.setdefault(key, dict(_ARROYO_BLANK))
                 out[key]["server_id"] = out[key]["server_id"] or value
     if not (arroyo and os.path.isfile(arroyo)):
         return out
+    # both readings of arroyo.db — a conversation row the write-ahead log has since dropped still
+    # describes a conversation whose messages are in this report
+    views = sqlite_open.open_views(arroyo)
     try:
-        # both readings of arroyo.db — a conversation membership row the write-ahead log has since
-        # dropped still describes a conversation whose messages are in this report
-        views = sqlite_open.open_views(arroyo)
-        conn = views.merged
+        def both(sql):
+            rows, _marks = sqlite_open.query_both(views, sql)
+            return rows
+
+        def rec(conv_id):
+            return out.setdefault(str(conv_id), dict(_ARROYO_BLANK))
+
         try:
-            rows, _marks = sqlite_open.query_both(
-                views, "select client_conversation_id, conversation_type, "
-                       "group_concat(user_id) from user_conversation "
-                       "group by client_conversation_id, conversation_type")
-            for conv_id, ctype, user_ids in rows:
+            for conv_id, ctype, user_ids in both(
+                    "select client_conversation_id, conversation_type, group_concat(user_id) "
+                    "from user_conversation group by client_conversation_id, conversation_type"):
                 if not conv_id:
                     continue
-                rec = out.setdefault(str(conv_id),
-                                     {"type": None, "user_ids": [], "server_id": ""})
+                entry = rec(conv_id)
                 if ctype is not None:
-                    rec["type"] = ctype
-                rec["user_ids"] += [u for u in str(user_ids or "").split(",") if u]
-        finally:
-            views.close()
-    except sqlite3.DatabaseError as error:
-        logger.info(f"Conversations: user_conversation not available ({error}) — conversation type "
-                    f"and participants will come from the friends/groups lists only")
+                    entry["type"] = ctype
+                entry["user_ids"] += [u for u in str(user_ids or "").split(",") if u]
+        except sqlite3.DatabaseError as error:
+            logger.info(f"Conversations: user_conversation not available ({error}) — conversation "
+                        f"type and participants will come from the friends/groups lists only")
+
+        try:
+            for conv_id, created in both("select client_conversation_id, creation_timestamp "
+                                         "from conversation"):
+                if not conv_id:
+                    continue
+                entry = rec(conv_id)
+                entry["in_arroyo"] = True
+                if created:
+                    entry["created_ms"] = min(entry["created_ms"] or int(created), int(created))
+        except sqlite3.DatabaseError as error:
+            logger.info(f"Conversations: the conversation table is not available ({error}) — "
+                        f"conversations with no message will carry no date")
+
+        try:
+            for conv_id, disp, updated, title, ctype in both(
+                    "select client_conversation_id, display_timestamp, last_updated_timestamp, "
+                    "conversation_title, conversation_type from feed_entry"):
+                if not conv_id:
+                    continue
+                entry = rec(conv_id)
+                entry["in_arroyo"] = True
+                # earliest of the "shown against the conversation" dates, latest of the updates:
+                # both readings of the database can offer one, and the pair is a range
+                if disp:
+                    entry["feed_first_ms"] = min(entry["feed_first_ms"] or int(disp), int(disp))
+                if updated:
+                    entry["feed_last_ms"] = max(entry["feed_last_ms"] or 0, int(updated))
+                entry["feed_title"] = entry["feed_title"] or cell(title)
+                if ctype is not None and entry["feed_type"] is None:
+                    entry["feed_type"] = ctype
+        except sqlite3.DatabaseError as error:
+            logger.info(f"Conversations: feed_entry is not available ({error}) — conversations "
+                        f"with no message will carry no date")
+    finally:
+        views.close()
     return out
 
 
@@ -573,20 +625,81 @@ def _participant_html(part, root, chip=True):
     return f'<span class="party">{body}</span>' if chip else body
 
 
-def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=None):
+_FEED_BASIS = (
+    "This conversation holds no message in arroyo.db, so there is no message time to show. The "
+    "dates come from the conversation's own row instead: feed_entry.display_timestamp and "
+    "feed_entry.last_updated_timestamp — the dates the app itself shows against the conversation "
+    "in its chat list — falling back to conversation.creation_timestamp. They say when the "
+    "conversation was active on this device; they do NOT say that a message existed at that "
+    "moment, and they are not evidence of message content.")
+
+_ACTIVITY_HINT = (
+    "First and last activity in this conversation.\n\n"
+    "• Normally these are the first and last arroyo.db conversation_message.creation_timestamp — "
+    "actual message times, and the row's Msgs count says how many.\n\n"
+    "• A conversation with NO message still gets a range, taken from the conversation's own row "
+    "(feed_entry.display_timestamp / last_updated_timestamp, or conversation.creation_timestamp). "
+    "Those cells are marked «feed» and say so on hover. That is why the columns are labelled "
+    "activity rather than message: the two are different statements about different records.\n\n"
+    "Do not read conversation.creation_timestamp as the start of the conversation. It is when THIS "
+    "device created its local row, and on a device restored from a backup it post-dates the "
+    "messages it contains — observed on the test corpus, where a conversation created in one year "
+    "holds messages from two years earlier. The conversation's own page states all three values.")
+
+
+def _ms_to_unix(ms):
+    """arroyo stores Unix **milliseconds**; the rest of this report works in Unix seconds."""
+    try:
+        return int(ms) // 1000 if ms else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _activity(times, info, timefmt):
+    """First/last activity for one conversation, and where each value came from.
+
+    ``times`` are the message times (Unix seconds). When there are none the conversation's own
+    feed/creation timestamps stand in — the only record of when a message-less conversation was
+    active — and are flagged so the report never presents them as message times.
+    """
+    def fmt(unix_s):
+        return timefmt(unix_s - _COCOA_EPOCH) if (timefmt and unix_s) else ""
+
+    created = _ms_to_unix((info or {}).get("created_ms"))
+    out = {"created": fmt(created), "created_sort": created or 0}
+    if times:
+        out.update({"first_sort": min(times), "last_sort": max(times),
+                    "first": fmt(min(times)), "last": fmt(max(times)), "source": "messages"})
+        return out
+    feed_first = _ms_to_unix((info or {}).get("feed_first_ms")) or created
+    feed_last = _ms_to_unix((info or {}).get("feed_last_ms")) or feed_first
+    if not feed_first:
+        out.update({"first_sort": 0, "last_sort": 0, "first": "", "last": "", "source": ""})
+        return out
+    out.update({"first_sort": feed_first, "last_sort": feed_last,
+                "first": fmt(feed_first), "last": fmt(feed_last), "source": "feed"})
+    return out
+
+
+def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=None, timefmt=None):
     """Assemble one record per conversation, from the messages **and** the contact/group lists.
 
     A conversation is listed even when it has no messages: a friend or group whose conversation id
     the app knows about but for which ``arroyo.db`` holds nothing is a real (and easy to miss)
-    finding, so it appears with 0 messages rather than being left out.
+    finding, so it appears with 0 messages rather than being left out. **Including when only
+    arroyo.db knows it** — a ``conversation`` / ``feed_entry`` row with no message, no friend and no
+    group behind it was previously dropped from the report altogether, which is the one case where
+    "not listed" and "no messages" look identical to the reader. Those rows still carry the dates
+    the app shows in its chat list, so the conversation is listed with that range.
 
     Every derived value records where it came from (``*_src``), which is what the "?" icons show.
     """
     by_contact = {c["conv_id"]: c for c in contacts if c["conv_id"]}
     by_group = {g["conv_id"]: g for g in groups}
+    in_arroyo = {k for k, v in (arroyo_info or {}).items() if v.get("in_arroyo") or v.get("user_ids")}
 
     conversations = []
-    for conv_id in sorted(set(by_conv) | set(by_contact) | set(by_group)):
+    for conv_id in sorted(set(by_conv) | set(by_contact) | set(by_group) | in_arroyo):
         msgs = by_conv.get(conv_id, [])
         group = by_group.get(conv_id)
         contact = by_contact.get(conv_id)
@@ -603,6 +716,12 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
         elif contact:
             kind, kind_src = "Private", ("This conversation id is the CONVERSATION_ID of a single "
                                          "contact in the friends list.")
+        elif info.get("feed_type") in (0, 1):
+            kind = "Group" if info["feed_type"] == 1 else "Private"
+            kind_src = (f"arroyo.db feed_entry.conversation_type = {info['feed_type']} "
+                        f"({'1 = group' if info['feed_type'] == 1 else '0 = private'}) — the "
+                        f"conversation's own row in the chat feed. Used because neither the "
+                        f"friends/groups lists nor user_conversation covers this conversation.")
         else:
             kind, kind_src = "Unknown", ("Neither the friends list, the groups list nor "
                                          "arroyo.db user_conversation names this conversation id; "
@@ -620,6 +739,11 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
             title = contact["display"] or contact["username"]
             title_src = ("The display name / username of the contact whose CONVERSATION_ID this "
                          "is, from the friends list.")
+        elif info.get("feed_title"):
+            title = info["feed_title"]
+            title_src = ("arroyo.db feed_entry.conversation_title — the name the app itself shows "
+                         "against this conversation in its chat list. Used because no contact or "
+                         "group in the extraction names it.")
         else:
             senders = [m["sender"] for m in msgs if m["sender"] and m["direction"] != "Sent"]
             title = senders[0] if senders else "(unidentified conversation)"
@@ -651,6 +775,7 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
         participants = [_participant(k, contact_links) for k in keys if k]
 
         times = [m["created_unix"] for m in msgs if m["created_unix"]]
+        activity = _activity(times, info, timefmt)
         senders = {}
         for m in msgs:
             if m["sender"]:
@@ -672,8 +797,10 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
             "n_attachments": sum(1 for m in msgs if m["atts"]),
             "n_missing": sum(1 for m in msgs for a in m["atts"] if not a["rel"]),
             "senders": senders, "types": types,
-            "first_sort": min(times) if times else 0,
-            "last_sort": max(times) if times else 0,
+            "n_wal_gone": sum(1 for m in msgs if m.get("wal") == sqlite_open.MAIN_ONLY),
+            "first_sort": activity["first_sort"],
+            "last_sort": activity["last_sort"],
+            "activity": activity,
             "page": f"pages/{_page_key(conv_id)}.html",
         })
     # busiest first: that is the order an examiner wants to triage in
@@ -709,6 +836,11 @@ def write_assets(outdir):
 _REPORT_CSS = """
  .vcells>.vc{font-size:12.5px}
  .cid{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#888}
+ /* An activity date that is NOT a message time. Muted and tagged so the column cannot be read as
+    "a message was sent then" — see _FEED_BASIS. */
+ .fromfeed{color:#6a6a80}
+ .feedtag{background:#e7e7f2;color:#5a5a86;border:1px solid #d2d2e4;border-radius:7px;
+   padding:0 5px;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
  .kindbadge{font-weight:700;font-size:11px;white-space:nowrap}
  .kindbadge.group{color:#8a1f5a} .kindbadge.private{color:#25348a} .kindbadge.unknown{color:#999}
  header .kindbadge,header .kindbadge.group,header .kindbadge.private{color:#fff}
@@ -1045,9 +1177,38 @@ def _message_rows(conv, chunk_of):
             chunk_of.get(msg["anchor"]),
             # the type filter matches any of a message's types, so they travel delimited
             {"dir": direction, "type": "|" + "|".join(msg["types"] or ["(none)"]) + "|",
-             "att": "y" if atts else "n"},
+             "att": "y" if atts else "n",
+             "wal": "gone" if msg.get("wal") == sqlite_open.MAIN_ONLY else "live"},
         ])
     return rows
+
+
+def _wal_filter_html(n_gone, noun):
+    """The "-wal" filter, emitted **only** when there is something for it to match.
+
+    A message that exists only in the reading of ``arroyo.db`` *without* its write-ahead log has
+    been deleted since the last checkpoint — recovered prior state, not a live message, and the one
+    thing in a chat report an examiner most wants to isolate. It was badged on the row but could not
+    be filtered for, in either table. On a database whose -wal deleted nothing the control is left
+    out entirely rather than offered as a choice that can only ever empty the table.
+    """
+    if not n_gone:
+        return ""
+    if noun == "conversation":
+        what, gone, live = ("Conversations holding at least one message that the write-ahead log "
+                            "deleted after the last checkpoint",
+                            f"with deleted message(s) ({n_gone})",
+                            "with no deleted message")
+    else:
+        what, gone, live = ("Messages recovered by reading arroyo.db without its write-ahead log "
+                            "(-wal): the app deleted them after the last checkpoint, so they are "
+                            "recovered prior state rather than part of the live conversation",
+                            f"deleted since the checkpoint ({n_gone})",
+                            "still in the live conversation")
+    return (f'<label title="{_esc(what)}">'
+            '-wal <select id="wal" onchange="flt()"><option value="">any</option>'
+            f'<option value="gone">{_esc(gone)}</option>'
+            f'<option value="live">{_esc(live)}</option></select></label>')
 
 
 _PARTY_HINT = ("Each participant is shown as \"display name (username)\" and opens that contact's "
@@ -1149,7 +1310,9 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         '</select></label>'
         '<label>Attachment <select id="att" onchange="flt()"><option value="">any</option>'
         '<option value="y">with</option><option value="n">without</option></select></label>'
+        + _wal_filter_html(conv["n_wal_gone"], "message") +
         '<button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>'
+        f'{report_ui.clear_filters_button("message")}'
         f'<span id="count" style="color:#555"></span></div>'
         f'<div class="toolbar">{selbar}</div>'
         '<div class="pager" id="pager"></div>'
@@ -1182,14 +1345,16 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         f'detailBase:"data/{key}/detail-",'
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var d=document.getElementById("dir").value,'
-        't=document.getElementById("type").value,a=document.getElementById("att").value;'
-        'return (!d||m.dir===d)&&(!t||m.type.indexOf("|"+t+"|")>-1)&&(!a||m.att===a);},'
+        't=document.getElementById("type").value,a=document.getElementById("att").value,'
+        'w=scFv("wal");'
+        'return (!d||m.dir===d)&&(!t||m.type.indexOf("|"+t+"|")>-1)&&(!a||m.att===a)'
+        '&&(!w||m.wal===w);},'
         'rowClass:function(m){return m.dir==="Sent"?"out":"";},'
         'count:function(n,t){document.getElementById("count").textContent='
         'n===t?(n+" messages"):(n+" of "+t+" shown");},'
         'reset:function(){document.getElementById("q").value="";'
         'document.getElementById("dir").value="";document.getElementById("type").value="";'
-        'document.getElementById("att").value="";}});'
+        'document.getElementById("att").value="";scFvReset("wal");}});'
         'scSyncBoxes();scSelNote();SCSel.onChange(function(){scSyncBoxes();scSelNote();});'
         'scConsumeHash();'
         '</script></body></html>')
@@ -1200,15 +1365,21 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
 
 
 def _first_last(conv, which):
-    """The conversation's first/last message time, already formatted by the message builder.
+    """One activity cell: the time, plus a marker when it is not a message time.
 
-    ``build_messages`` sorted each conversation chronologically with the timestamp-less rows last,
-    so the dated messages are already in order here.
+    A conversation with messages shows theirs. A conversation with none shows the dates on its own
+    feed row — the only record that it was ever active — badged «feed» so the cell cannot be read
+    as "a message was sent then". See :data:`_FEED_BASIS`.
     """
-    dated = [m for m in conv["messages"] if m["created_unix"]]
-    if not dated:
+    act = conv.get("activity") or {}
+    value = act.get(which) or ""
+    if not value:
         return ""
-    return dated[0]["created"] if which == "first" else dated[-1]["created"]
+    if act.get("source") == "messages":
+        return _esc(value)
+    return (f'<span class="fromfeed" title="Not a message time — this conversation holds no '
+            f'message. Taken from the conversation\'s own feed row; expand the row for which '
+            f'field.">{_esc(value)} <span class="feedtag">feed</span></span>')
 
 
 # --------------------------------------------------------------------------- index page
@@ -1239,7 +1410,41 @@ def _index_detail(conv):
             + '<div class="sect">Conversation IDs</div>'
             + _grid([("Client", f'<span class="mono">{_esc(conv["id"])}</span>', ""),
                      ("Server", f'<span class="mono">{_esc(conv["server_id"])}</span>'
-                      if conv["server_id"] else '<span class="muted">not recorded</span>', "")]))
+                      if conv["server_id"] else '<span class="muted">not recorded</span>', "")])
+            + _activity_block(conv))
+
+
+def _activity_block(conv):
+    """The dates section of an expanded row: where each one came from, stated field by field.
+
+    Always rendered, not only for message-less conversations — ``creation_timestamp`` is worth
+    seeing next to the message range precisely when both exist, because the two disagreeing is
+    itself a finding (a restored device creates its conversation rows on restore day).
+    """
+    act = conv.get("activity") or {}
+    if not act.get("source"):
+        return ('<div class="sect">Dates</div><span class="muted">This conversation carries no '
+                'date at all: no message, and arroyo.db holds no conversation or feed_entry row '
+                'for it.</span>')
+    if act["source"] == "messages":
+        rows = [("First message", _esc(act["first"]), ""), ("Last message", _esc(act["last"]), "")]
+        note = ("arroyo.db conversation_message.creation_timestamp, first and last of the "
+                f'{conv["n_messages"]} message(s) listed on this conversation\'s page.')
+    else:
+        rows = [("First activity (feed)", _esc(act["first"]), ""),
+                ("Last activity (feed)", _esc(act["last"]), "")]
+        note = _FEED_BASIS
+    if act.get("created"):
+        rows.append(("Conversation row created", _esc(act["created"]), ""))
+    return (f'<div class="sect">Dates{report_ui.info_icon(note + " " + _CREATED_ROW_HINT)}</div>'
+            + _grid(rows))
+
+
+_CREATED_ROW_HINT = (
+    "\"Conversation row created\" is arroyo.db conversation.creation_timestamp — when THIS device "
+    "created its local row for the conversation, which is not the same as when the conversation "
+    "started. On a device restored from a backup it is the restore, and the conversation's own "
+    "messages are older than it. Verified on the test corpus.")
 
 
 def generate_index(conversations, outdir, tz_label, run_id, stats):
@@ -1266,8 +1471,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
             shown,
             str(conv["n_messages"]),
             str(conv["n_attachments"]) if conv["n_attachments"] else "",
-            _esc(_first_last(conv, "first")),
-            _esc(_first_last(conv, "last")),
+            _first_last(conv, "first"),
+            _first_last(conv, "last"),
             f'<a class="openbtn" target="scauto_conv_page" title="open this conversation in its '
             f'own tab" href="{_esc(conv["page"])}#conv-{_esc(conv["id"])}">open &#9656;</a>',
         ]
@@ -1286,7 +1491,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
              "6": conv["n_attachments"], "7": conv["first_sort"], "8": conv["last_sort"]},
             chunk_of.get(anchor),
             {"kind": conv["kind"], "msg": "y" if conv["n_messages"] else "n",
-             "att": "y" if conv["n_attachments"] else "n"},
+             "att": "y" if conv["n_attachments"] else "n",
+             "wal": "gone" if conv["n_wal_gone"] else "live"},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1342,6 +1548,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         '</select></label>'
         '<label>Attachments <select id="att" onchange="flt()"><option value="">any</option>'
         '<option value="y">with</option><option value="n">without</option></select></label>'
+        + _wal_filter_html(sum(1 for c in conversations if c["n_wal_gone"]), "conversation")
+        + report_ui.clear_filters_button("conversation") +
         '<span id="count" style="color:#555"></span></div>'
         f'<div class="toolbar">{report_ui.selection_toolbar("conversation")}</div>'
         '<div class="pager" id="pager"></div>'
@@ -1356,8 +1564,10 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         '<div class="vc" onclick="SCV.setSort(4)">Participants <span class="ar">&#8597;</span></div>'
         '<div class="vc" onclick="SCV.setSort(5)">Msgs <span class="ar">&#8597;</span></div>'
         '<div class="vc" onclick="SCV.setSort(6)">Att. <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(7)">First message <span class="ar">&#8597;</span></div>'
-        '<div class="vc" onclick="SCV.setSort(8)">Last message <span class="ar">&#8597;</span></div>'
+        f'<div class="vc" onclick="SCV.setSort(7)">First activity'
+        f'{report_ui.info_icon(_ACTIVITY_HINT)} <span class="ar">&#8597;</span></div>'
+        f'<div class="vc" onclick="SCV.setSort(8)">Last activity'
+        f'{report_ui.info_icon(_ACTIVITY_HINT)} <span class="ar">&#8597;</span></div>'
         '<div class="vc nosort">Detail</div>'
         '</div></div>'
         '<div class="vwrap convs" id="vwrap"><div class="vpad" id="vpad"></div>'
@@ -1371,8 +1581,9 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         f'rowHeight:{CONV_ROW_H},estDetail:200,cols:"{CONV_COLS}",detailBase:"data/detail-",'
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var k=document.getElementById("kind").value,'
-        'g=document.getElementById("msg").value,a=document.getElementById("att").value;'
-        'return (!k||m.kind===k)&&(!g||m.msg===g)&&(!a||m.att===a)'
+        'g=document.getElementById("msg").value,a=document.getElementById("att").value,'
+        'w=scFv("wal");'
+        'return (!k||m.kind===k)&&(!g||m.msg===g)&&(!a||m.att===a)&&(!w||m.wal===w)'
         '&&(!document.getElementById("selonly").checked||SCSel.get("conv",r[0]));},'
         'selectedOnly:function(){return document.getElementById("selonly").checked;},'
         'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
@@ -1381,7 +1592,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         'n===t?(n+" conversations"):(n+" of "+t+" shown");},'
         'reset:function(){document.getElementById("q").value="";'
         'document.getElementById("kind").value="";document.getElementById("msg").value="";'
-        'document.getElementById("att").value="";'
+        'document.getElementById("att").value="";scFvReset("wal");'
         'document.getElementById("selonly").checked=false;}});'
         'scSelNote();scConsumeHash();'
         '</script></body></html>')
@@ -1506,7 +1717,8 @@ def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="
     by_conv, drop_stats = build_messages(msg_df, cachefiles_dir, os.path.join(outdir, "media"),
                                          timefmt, cache_key_for, owner_user_id, owner_names)
     conversations = build_conversations(by_conv, contacts, groups,
-                                        load_arroyo_conversations(arroyo, msg_df), contact_links)
+                                        load_arroyo_conversations(arroyo, msg_df), contact_links,
+                                        timefmt)
 
     write_assets(outdir)
     for conv in conversations:

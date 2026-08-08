@@ -374,6 +374,37 @@ function scSelNote(){
 """
 
 
+def counted_options(states, counts):
+    """``<option>``s that say how many rows each one will return, and grey out when that is none.
+
+    A dropdown whose only possible outcome is an empty table is indistinguishable from a broken
+    report, and that is how it was read: "incomplete only" on a device with no incomplete media
+    looked like a filter that did not work. Stating the count turns the same control into an answer
+    — the choice is still visible (that this device has none of something is worth seeing), it just
+    cannot be mistaken for a way to find rows that are not there.
+
+    ``states`` is ``[(value, label)]`` in display order; ``counts`` maps value -> number of rows.
+    """
+    return "".join(
+        f'<option value="{value}"{"" if counts.get(value) else " disabled"}>'
+        f'{label} &mdash; {counts.get(value, 0)}</option>' for value, label in states)
+
+
+def clear_filters_button(noun="row"):
+    """The "clear every filter" control, last in each report's filter bar.
+
+    Every report already had the machinery — ``C.reset()``, which `findAll`/`goTo` call so a filter
+    cannot hide the row a cross-report link was aimed at. What was missing was a way for the
+    examiner to ask for it. Without one, "the report says 0 rows" is regularly one control left set
+    three filters ago, on a bar that does not fit on one line at every window width. It is coloured
+    as a destructive action because it is the one button here that throws work away — the row
+    selection survives, but the query, the dropdowns and *Selected only* do not.
+    """
+    return (f'<button type="button" class="clearflt" onclick="SCV.clearFilters()" '
+            f'title="Put the search box and every filter above back to «any», and show every '
+            f'{noun} again. Your ticked selections are kept.">&#10005; Clear all filters</button>')
+
+
 def selection_toolbar(noun):
     """The selection controls both index reports put in their toolbar."""
     return (
@@ -445,6 +476,9 @@ PAGE_CSS = """
  .toolbar button{font-size:13px;padding:5px 10px;border:1px solid #bcbcd0;border-radius:5px;
    background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}
  .toolbar button:hover{background:#e7e7f4}
+ /* The one control on the bar that discards work, so it is the one that looks like it does. */
+ .toolbar button.clearflt{background:#fdeceb;border-color:#e3b3ae;color:#9a2b20}
+ .toolbar button.clearflt:hover{background:#f8d9d6;border-color:#d29089}
  a.back{display:inline-block;margin:14px 24px 0;color:#2d2d71;font-weight:600;text-decoration:none;
    font-size:13px} a.back:hover{text-decoration:underline}
  .mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
@@ -819,12 +853,27 @@ function scrollTo(i){
  window.scrollTo(0,Math.max(0,y));
  dirty=true;render();}
 
+/* Put every filter back to "any" and show the whole table again. The same C.reset() that
+   findAll()/goTo() already use to stop a filter hiding the row they were sent to — the only new
+   part is that the examiner can now ask for it, instead of hunting the control that is still set.
+   Selected-only is a filter too and is cleared with the rest; the ticks themselves are untouched. */
+function clearFilters(){
+ if(C&&C.reset)C.reset();
+ page=0;
+ refilter();}
+
 return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
         expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
-        remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,
+        remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
         page:function(){return page;},
         pages:pageCount,count:function(){return view.length;}};
 })();
+
+/* Read / clear a filter control that a report only emits when the data has something for it to
+   match — a "-wal" filter on a database with no such rows would be a control that can do nothing
+   but return an empty table. `match` and `reset` go through these so the same JS works either way. */
+function scFv(id){var e=document.getElementById(id);return e?e.value:'';}
+function scFvReset(id){var e=document.getElementById(id);if(e)e.value='';}
 """
 
 

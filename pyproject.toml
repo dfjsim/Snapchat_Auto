@@ -1,6 +1,6 @@
 [project]
     name = "Snapchat_Auto"
-    version = "1.5.2+build.20260807"
+    version = "1.5.2+build.20260808"
     description = "Add your description here"
     readme = "README.md"
     requires-python = ">=3.14,<3.15"

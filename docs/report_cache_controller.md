@@ -34,10 +34,26 @@ content does:
 | File | the bytes, previewed | the bytes, previewed |
 | Links | | |
 
-The Category cell holds badges (`-wal only`, `changed`) and their "?" icons. The row is a fixed
-height, so a line that does not fit is **cut through the middle** rather than dropped — which is how
-a "?" came out sliced in half. The badges are held on one line of their own and the column is wide
-enough for them, so the cell is never more than two lines.
+A collapsed row is a **fixed height** (`CC_ROW_H` / `CM_ROW_H`) — the virtual table computes every
+scroll offset from it. So a line of content that does not fit is **cut through the middle** rather
+than dropped, and the cell shows a row of half-height glyphs that reads as a broken report. Every
+index cell therefore has to be built to a known number of lines:
+
+* The Category cell holds badges (`-wal only`, `changed`) and their "?" icons, on one line of their
+  own, in a column wide enough for them — so the cell is never more than two lines. A "?" sliced in
+  half is what prompted that.
+* The **Links** cell is a `.chiprow`: `display:flex` with `flex-wrap:nowrap`, so the chips stay on
+  one line and anything past the cell edge is clipped horizontally instead of wrapping into a
+  second, half-visible line. It is also the `compact` form — chips only, no "?" explanations, which
+  are far too long for a row. The expanded row repeats every chip *with* its explanation and wraps
+  freely, so nothing is lost. In `cache_media_report.py` the `compact` argument was accepted and
+  never used, so its index rendered the full detail form and wrapped on any row with more than two
+  links; that is the bug this describes.
+
+Do **not** put `mask-image`, `filter` or `transform` on `.chiprow` to fade the clipped edge. Each of
+those makes the element a containing block for `position:fixed` descendants, and the "?" popover is
+`position:fixed` precisely so that it escapes the cell's `overflow:hidden` (see
+[report_ui.md](report_ui.md)). The fade would come back as clipped popovers.
 
 ## Poster frames for cached video
 

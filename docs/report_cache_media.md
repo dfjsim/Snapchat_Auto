@@ -129,6 +129,9 @@ No duration/size/`mvhd`-time correlation. Each link records the method, in prior
 ## Cross-report links
 
 Out: `#ck-<CACHE_KEY>` (cache_controller), `#mem-<ZSNAPID>` (Memories), `#msg-<id>` (Conversations).
+The index row's Links cell is the one-line `compact` form; see
+[report_cache_controller.md](report_cache_controller.md) for why a cell that wraps is cut in half
+rather than shown short.
 Back: this report writes `CacheMedia/by_cache_key.json`, which the cache_controller report reads to
 show a **🗂 Library/Caches** chip on entries whose bytes also exist there. That is why this report
 runs **before** cache_controller in the pipeline.

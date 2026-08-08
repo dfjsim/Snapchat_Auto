@@ -1178,10 +1178,12 @@ def _links_html(entry, rel_prefix, compact=False):
         sid = entry["memory"]["snap_id"]
         page = entry["memory"].get("page")
         chips.append(f'<a class="chip mem" target="scauto_memories" '
+                     f'title="open this Memory\'s row in the Memories index" '
                      f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
-                     f'🧠 Memory {_esc(sid[:8])}… (index)</a>' + why(entry.get("memory_basis")))
+                     f'🧠 Memory {_esc(sid[:8])}…</a>' + why(entry.get("memory_basis")))
         if page:
             chips.append(f'<a class="chip mem" target="scauto_memories" '
+                         f'title="open this Memory\'s own detail page" '
                          f'href="{rel_prefix}Memories/{_esc(page)}#mem-{_esc(sid)}">📄 detail</a>')
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
@@ -1224,7 +1226,13 @@ def _links_html(entry, rel_prefix, compact=False):
         if entry["on_disk"].get("cross_scope"):
             chips.append('<span class="chip warn">⚠ cross-scope copy</span>'
                          + why(_cross_scope_basis(entry)))
-    return "".join(chips)
+    if not chips:
+        return ""
+    if not compact:
+        return "".join(chips)
+    # One line for the index row: a collapsed virtual row is exactly CC_ROW_H tall, so chips that
+    # wrap onto a second line are sliced through rather than shown short.
+    return '<div class="chiprow">' + "".join(chips) + "</div>"
 
 
 def _file_cell(entry, rel_prefix):
@@ -1721,6 +1729,11 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  table.sub td.hex{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7a1f5a}}
  .paths{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;margin-top:4px;overflow-wrap:anywhere}}
  .muted{{color:#999}}
+ /* The index row's Links cell — see the note in _links_html. No mask/filter/transform on this:
+    they would become the containing block for the "?" popover, which is position:fixed exactly so
+    that it escapes the cell's overflow:hidden. */
+ .chiprow{{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;overflow:hidden;margin-top:2px}}
+ .chiprow>*{{flex:0 0 auto}} .chiprow .chip{{margin:0}}
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
    font-size:11px;text-decoration:none;font-weight:600}}
  .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}
@@ -1797,6 +1810,7 @@ counted as encrypted.">Encrypted <select id="enc" onchange="flt()"><option value
    <option value="changed">metadata changed since the checkpoint</option>
    </select></label>
  <button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>
+ {report_ui.clear_filters_button("cache entry")}
  <span id="count" style="color:#555"></span>
 </div>
 <div class="toolbar">{report_ui.selection_toolbar('cache entry')}</div>
