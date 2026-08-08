@@ -21,10 +21,14 @@ path, size and mtime always, and hashed only on request: tens of GB is a long se
 is the per-artifact hashes that actually bind the output.
 
 Each database is fingerprinted **with its ``-wal`` and ``-shm`` sidecars**, because
-``scripts/data/sqlite_open.py`` reads every database twice — with the log applied and without it — so
-the log is part of "the same data" (see docs/sqlite_wal_handling.md). They are reported as their own
-verdict lines: a sidecar can legitimately differ where the main file does not, and calling that "the
-evidence changed" would be both alarming and wrong.
+``scripts/data/sqlite_open.py`` reads every database twice — with the log applied and without it — and
+marks the rows only one reading contains. The log is therefore not incidental: it is where the deleted
+and superseded rows come from (see docs/sqlite_wal_handling.md).
+
+So a differing log is a **real difference in the evidence**, and is treated as one. It gets its own
+verdict line — which says precisely *what* differs rather than blaming the database — but it is never
+presented as harmless. Two logs can leave the current rows identical while recovering a different set
+of deleted rows, and "the live data looks the same" is not a reason to trust it.
 """
 
 import os
@@ -247,10 +251,11 @@ def _sha(record):
 def verify(expected, found):
     """Compare the source manifest a selection carries against this run's.
 
-    Sidecars get their own line. A ``-wal`` legitimately differs where the database does not — it is
-    rewritten whenever something opens the file — so folding it into the database's verdict would
-    report "the evidence changed" for a difference that may mean nothing. The examiner is told which
-    kind of difference they have.
+    Sidecars get their own line so the examiner is told *what* differs rather than being handed one
+    verdict for a whole database. That is a diagnosis, not a discount: a differing ``-wal`` fails the
+    verdict exactly as a differing database does. The log is where the recovered deleted and
+    superseded rows come from, so two logs can agree on every current row and still disagree about
+    what was deleted.
     """
     if not expected or not (expected.get("artifacts")):
         return Verdict("sources", False, [], comparable=False,
@@ -295,9 +300,9 @@ def verify(expected, found):
             what = f"{label} {suffix}"
             # ASCII: this note is shown on a page *and* printed to a console, and the console
             # code page turns an em dash into a replacement character.
-            note = ("A write-ahead log is rewritten whenever something opens the database, so "
-                    "this can differ while the database itself does not. The recovered prior "
-                    "state may not be identical.")
+            note = ("The log is where the deleted and superseded rows come from, so a different "
+                    "log is different evidence even when the current rows are identical. Do not "
+                    "treat this as harmless because the database file matches.")
             if e is None:
                 lines.append(_line(role, what, NEW_NOW, "not recorded", _sha(g), note))
             elif g is None:
