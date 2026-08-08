@@ -5,6 +5,8 @@ from scripts import getCacheAndroid
 from scripts.data import extract_zip
 from scripts import parseSnapvideos_PREFETCH
 from scripts import offline_maps
+from scripts import app_version
+from scripts import selection_file
 import os
 import json
 import logging
@@ -31,67 +33,13 @@ else:
 logger.info(app_path)
 
 
-def _pyproject_candidates():
-    """Locations pyproject.toml may live in across run modes: source tree, a Nuitka onefile bundle
-    (dirname(__file__)), a PyInstaller bundle (sys._MEIPASS), and beside the built binary."""
-    seen, out = set(), []
-    for base in (app_path,
-                 os.path.dirname(os.path.abspath(__file__)),
-                 getattr(sys, "_MEIPASS", None),
-                 os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else None):
-        if not base:
-            continue
-        cand = os.path.join(base, "pyproject.toml")
-        if cand not in seen:
-            seen.add(cand)
-            out.append(cand)
-    return out
-
-
-def _pyproject_field(key):
-    """Read `[project].<key>` from whichever pyproject.toml this run mode can see, else None."""
-    try:
-        import tomllib
-    except Exception:
-        return None
-    for path in _pyproject_candidates():
-        try:
-            with open(path, "rb") as f:
-                value = tomllib.load(f).get("project", {}).get(key)
-        except FileNotFoundError:
-            continue
-        except Exception:
-            continue
-        if value:
-            return value
-    return None
-
-
-def get_version():
-    """Return the project version — from a bundled/source pyproject.toml, else package metadata.
-
-    The build bundles pyproject.toml (see build_nuitka.cmd) so the frozen GUI shows the real version;
-    Nuitka sets neither sys.frozen nor sys._MEIPASS, so we probe several candidate locations.
-    """
-    v = _pyproject_field("version")
-    if v:
-        return v
-    try:
-        from importlib.metadata import version, PackageNotFoundError
-        try:
-            return version("Snapchat_Auto")
-        except PackageNotFoundError:
-            pass
-    except Exception:
-        pass
-    return "unknown"
-
-
-def get_project_name():
-    """The distribution name. It is the first half of the installer filenames the update check
-    matches (`Snapchat_Auto-<version>-win64.msi`), so it has to come from the same pyproject.toml
-    as the version it is published with."""
-    return _pyproject_field("name") or "Snapchat_Auto"
+# The reports need the version too — a partial run refuses to reuse anything a *different* build
+# extracted or decrypted — and a report module cannot import this one (that re-runs the logging and
+# environment setup above). So both live in scripts/app_version.py and are re-exported here, which
+# keeps every existing `get_version()` call site working.
+get_version = app_version.get_version
+get_project_name = app_version.get_project_name
+_pyproject_field = app_version._pyproject_field
 
 
 def _updater():
@@ -354,6 +302,14 @@ def print_usage():
           "  --tile-server <url>     Offline map tile server, {z}/{x}/{y} template.\n"
           "  --run-name <name>       Use this run-folder name instead of a timestamp, so a\n"
           "                          repeated run lands in the same place.\n\n"
+          "Selections (the rows an examiner ticked in the reports):\n"
+          "  --install-selection <file>   Put a saved selection.json (or .js) where the reports\n"
+          "                          load it, as <report folder>/selection.js. Browsers refuse to\n"
+          "                          save a .js, and renaming a .json will NOT work — the reports\n"
+          "                          load it as a script and bare JSON fails silently. This does\n"
+          "                          the conversion. Any existing file is backed up.\n"
+          "  --report-dir <dir>      Which report folder to install into (default: ./Reports).\n"
+          "  --force yes             Install even when the selection names a different run.\n\n"
           "Other:\n"
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
@@ -421,6 +377,72 @@ def run_cli(args):
     return 0
 
 
+# Its own option table, kept out of `_CLI_OPTIONS` so `run_cli`'s "--zip is required" rule is
+# untouched. Every option takes a value, which is what `_parse_cli`'s idiom requires.
+_SELECTION_OPTIONS = {"install-selection": True, "report-dir": True, "force": True}
+
+
+def _parse_options(args, table):
+    """`_parse_cli`, against any option table. Returns (values, error message or None)."""
+    values, index = {}, 0
+    while index < len(args):
+        token = args[index]
+        name = token.lstrip("-/").lower()
+        if name not in table:
+            return values, f"unknown option '{token}'"
+        index += 1
+        if index >= len(args) or args[index].startswith("-"):
+            return values, f"'{token}' requires a value"
+        values[name] = args[index]
+        index += 1
+    return values, None
+
+
+def run_install_selection(args):
+    """`--install-selection <file>`: place a saved selection where the reports load it."""
+    values, error = _parse_options(args, _SELECTION_OPTIONS)
+    if error:
+        print(f"Snapchat Auto: {error}\n")
+        print_usage()
+        return 2
+    source = values["install-selection"]
+    if not os.path.isfile(source):
+        print(f"Snapchat Auto: selection file not found: {source}")
+        return 2
+    report_dir = values.get("report-dir") or os.path.join(".", "Reports")
+    if not os.path.isdir(report_dir):
+        print(f"Snapchat Auto: report folder not found: {report_dir}\n"
+              "Point --report-dir at the Reports folder of the run these selections were made in.")
+        return 2
+    force = (values.get("force") or "").lower() in ("yes", "y", "true", "1")
+
+    logger.info(f"Snapchat Auto v{get_version()}")
+    try:
+        target, info = selection_file.install_selection(report_dir, source, force=force)
+    except selection_file.SelectionFormatError as error:
+        logger.error(str(error))
+        return 1
+
+    counts = info["counts"]
+    total = sum(counts.values())
+    logger.info(f"Installed {total} selection(s) into {target}")
+    for kind in sorted(counts):
+        logger.info(f"  {kind:<5} {counts[kind]}")
+    logger.info(f"  selection digest {info['digest']}")
+    if info["backup"]:
+        logger.info(f"  previous file kept as {os.path.basename(info['backup'])}")
+    if info["run_id_mismatch"]:
+        logger.warning(f"Installed despite a run mismatch: the selection names run "
+                       f"{info['run_id']!r}, these reports are run {info['report_run_id']!r}. "
+                       f"Some of its ids may name nothing here.")
+    if info["unattributed_msg_ids"]:
+        logger.warning(
+            f"{len(info['unattributed_msg_ids'])} message selection(s) were dropped: they predate "
+            f"per-conversation message ids and name a message number with no conversation, and the "
+            f"same number exists in several chats. Re-tick those messages and save again.")
+    return 0
+
+
 def _hint(text, width=88):
     """One of the small explanatory lines under a settings field.
 
@@ -448,6 +470,8 @@ def main(args):
         sys.exit(0)
     if flag in ("diag-keychain", "diagkeychain"):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
+    if flag in ("install-selection", "installselection"):
+        sys.exit(run_install_selection(args))
     if flag in _CLI_OPTIONS:                                  # a headless run
         sys.exit(run_cli(args))
     if flag:                                                  # an argument was given but not

@@ -59,6 +59,7 @@ from scripts.data import poster_worker
 from scripts.data import sniff
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
+from scripts import app_version
 from scripts import offline_maps
 
 logger = logging.getLogger(__name__)
@@ -2479,12 +2480,20 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
         if not loc_shared:
             parts.append(f"<div class='sect'>Location (gallery.encrypteddb)</div>"
                          f"<div class='geo'>📍 {loc[idx]}</div>{_map_html([m], media_prefix)}")
-        # the examiner's own selection — the same checkbox as the index row, same stored state
+        # The examiner's own selection — the same checkbox as the index row, same stored state.
+        # `data-keys` carries what a later run matches this Memory on; it is inline here because
+        # these are hand-written boxes, not virtual rows (see SCV.selKeys for those).
+        mem_keys = {"snap": m["snap_id"]}
+        if m["ids"].get("ZMEDIAID"):
+            mem_keys["mediaid"] = str(m["ids"]["ZMEDIAID"])
+        if m["ids"].get("ZENTRYID"):
+            mem_keys["entry"] = str(m["ids"]["ZENTRYID"])
         parts.append(
             f"<label class='selrow' title='Mark this Memory as relevant. Shared with the Memories "
             f"index; saved in this browser, and exportable from the index toolbar.'>"
             f"<input type='checkbox' class='selbox' data-kind='mem' "
-            f"data-id='mem-{html.escape(m['snap_id'])}'>Selected for the case</label>")
+            f"data-id='mem-{html.escape(m['snap_id'])}' "
+            f"data-keys='{html.escape(json.dumps(mem_keys))}'>Selected for the case</label>")
         mem_blocks.append("<div class='mem'>" + "".join(parts) + "</div>")
 
     frows = []
@@ -2556,15 +2565,21 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
             '← Back to Memories index</a>')
     # The selection controls: the same store as the index (both load ../selection.js), saved back
     # to a file the examiner keeps — see report_ui.SELECT_JS for why that is the durable route.
-    selbar = ('<div class="subsel"><button onclick="scSelSave()" title="Download selection.js — '
-              'put it next to the reports so every report of this run loads it">💾 Save selections'
-              '</button><span class="selnote" id="selnote"></span>'
+    selbar = ('<div class="subsel">'
+              '<button onclick="scSelSaveJson()" title="Download selection.json — the copy to keep '
+              'with the case, and the file to hand back to Snapchat_Auto for a partial report">'
+              '💾 Save selections (.json)</button>'
+              '<button onclick="scSelSaveJs()" title="Download the drop-in selection.js to put next '
+              'to the reports. Some browsers block a .js download; use the .json then.">'
+              'Save as selection.js</button>'
+              '<span class="selnote" id="selnote"></span>'
               '<span class="selhint">ticking a Memory below marks it for the case; it is shared '
-              'with the Memories index</span></div>')
+              'with the Memories index</span>'
+              '<div class="sellegacy" id="sellegacy" style="display:none"></div></div>')
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
            f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
@@ -2949,7 +2964,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'
@@ -3006,6 +3021,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
            f'empty:"vempty",pager:"pager",pageSize:500,selKind:"mem",'
+           # ZSNAPID is a device-assigned UUID, so the anchor is stable; the media id is recorded
+           # as a fallback for a Memory whose row is only reachable through its media object.
+           'selKeys:function(r){var k={snap:r[0].slice(4)},s=(r[3]["3"]||"").split("|");'
+           'if(s[0])k.mediaid=s[0];return k;},'
            f'rowHeight:{MEM_ROW_H},cols:"{MEM_COLS}",detailBase:null,'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
@@ -3013,7 +3032,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
            '&&(!wa||m.wal===wa)'
-           '&&(!document.getElementById("selonly").checked||SCSel.get("mem",r[0]));},'
+           '&&(!document.getElementById("selonly").checked||SCSel.get("mem",SCV.selId(r[0])));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
            'scSelNote();},'

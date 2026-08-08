@@ -29,6 +29,7 @@ import sqlite3
 import logging
 
 from scripts import report_ui
+from scripts import app_version
 from scripts.data import sqlite_open
 
 logger = logging.getLogger(__name__)
@@ -622,7 +623,14 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
             {"conv": "y" if (conv_id or convs) else "n", "msg": "y" if n_msgs else "n",
              "owner": "y" if contact["is_owner"] else "n",
              "legacy": "y" if legacy else "n",
-             "multi": "y" if len(convs) > 1 else "n"},
+             "multi": "y" if len(convs) > 1 else "n",
+             # Every identifier this contact has, so a saved selection is not left depending on
+             # `contact_anchor`'s fallback chain — which can name a contact by username, or by a
+             # conversation id, or "unknown", none of which is guaranteed to survive a build that
+             # resolves one more identifier.
+             **({"uid": contact["user_id"]} if contact["user_id"] else {}),
+             **({"user": contact["username"]} if contact["username"] else {}),
+             **({"conv_id": conv_id} if conv_id else {})},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -655,7 +663,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<title>Snapchat contacts</title>'
            f'<style>{report_ui.PAGE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_SELKIND="ct";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="ct";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="{rel_prefix}selection.js"></script>'
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'
@@ -733,13 +741,19 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
            f'empty:"vempty",pager:"pager",pageSize:500,selKind:"ct",sort:6,sortDir:-1,'
+           # contact_anchor falls back username -> conversation id -> "ct-unknown", so the anchor is
+           # not always the user id and is not always unique; every identifier this row has travels
+           # with the selection so a later run can still find the contact.
+           'selKeys:function(r){var m=r[5]||{},k={};'
+           'if(m.uid)k.uid=m.uid;if(m.user)k.user=m.user;if(m.conv_id)k.conv=m.conv_id;'
+           'return k;},'
            f'rowHeight:{CT_ROW_H},estDetail:200,cols:"{CT_COLS}",detailBase:"data/detail-",'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var c=document.getElementById("conv").value,'
            'g=document.getElementById("msg").value,l=document.getElementById("legacy").value,'
            'x=document.getElementById("multi").value;'
            'return (!c||m.conv===c)&&(!g||m.msg===g)&&(!l||m.legacy===l)&&(!x||m.multi===x)'
-           '&&(!document.getElementById("selonly").checked||SCSel.get("ct",r[0]));},'
+           '&&(!document.getElementById("selonly").checked||SCSel.get("ct",SCV.selId(r[0])));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
            'scSelNote();},'
