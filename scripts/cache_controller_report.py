@@ -1567,6 +1567,9 @@ def _external_key_summary(claims):
 
 def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, manifest,
                     db_display, run_id="default", wal_infos=None):
+    # The source fingerprints this run recorded, so the examiner's saved selection carries
+    # them and a later partial run can check the extraction it is handed against this one.
+    sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
     total = len(entries)
     on_disk = sum(1 for e in entries if e["on_disk"]["found"])
     mem_linked = sum(1 for e in entries if e["memory"])
@@ -1772,7 +1775,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 {report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}
  .vcells>.vc{{font-size:12.5px}}
 </style>
-<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="cc";</script>
+<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="cc";</script>
 <script>{report_ui.SELECT_JS}</script>
 <script src="{rel_prefix}selection.js"></script>
 <script>{report_ui.VTABLE_JS}</script></head><body>

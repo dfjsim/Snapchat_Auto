@@ -48,6 +48,7 @@ from urllib.parse import quote
 
 from scripts import app_version
 from scripts import selection_file
+from scripts import source_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -586,6 +587,33 @@ SELECTION_STUB = """/* Snapchat Auto — examiner selections for this run.
 SCSel.preload({"tool": "Snapchat_Auto", "schema": %d, "run_id": %s, "tool_version": %s,
                "sources": null, "exported": "", "selections": {}});
 """
+
+
+_SOURCES_CACHE = {}
+
+
+def sources_script(report_dir):
+    """``window.SCAUTO_SOURCES=…;`` for a report's ``<head>``, or "" when there is nothing recorded.
+
+    This is what puts the source fingerprints into the examiner's saved selection file, so a partial
+    run can check them against the extraction it is handed — even when the original report folder is
+    no longer at hand. The whole table travels (roughly a dozen entries): a digest alone could say
+    *that* something differs but not *which* artifact, and the paths are what let the tool offer the
+    same ZIP and keychain back.
+
+    Read from ``sources.json`` rather than passed in, because every report already receives its
+    report directory and threading one more argument through five generators would only be a second
+    way for the two to disagree. Cached per directory: five reports and every conversation page ask.
+    """
+    key = os.path.abspath(report_dir or ".")
+    if key not in _SOURCES_CACHE:
+        sources = source_fingerprint.read_sources(report_dir)
+        if sources:
+            # the prose belongs on the page, not in every selection file the examiner saves
+            sources = {k: v for k, v in sources.items() if k != "note"}
+        _SOURCES_CACHE[key] = (f"window.SCAUTO_SOURCES={json.dumps(sources, separators=(',', ':'))};"
+                               if sources else "")
+    return _SOURCES_CACHE[key]
 
 
 def write_selection_stub(report_dir, run_id_value):

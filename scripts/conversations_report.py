@@ -932,16 +932,19 @@ function xall(btn){
 """
 
 
-def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix=""):
+def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix="", reports_root=""):
     """The common ``<head>`` of the index and the detail pages.
 
     ``sel_prefix`` is set on a conversation page, whose message anchors are page-local: it scopes the
     selection count and the Clear button to this conversation's messages. See ``report_ui.selId``.
+    ``reports_root`` is where ``sources.json`` lives, so the examiner's saved selection carries the
+    source fingerprints of the run it was made in.
     """
     return (f'<!doctype html><html><head><meta charset="utf-8"><title>{_esc(title)}</title>'
             f'<link rel="stylesheet" href="{asset_prefix}assets/ui.css">'
             f'<script>window.SCAUTO_RUN={json.dumps(run_id)};'
             f'window.SCAUTO_VERSION={json.dumps(app_version.get_version())};'
+            f'{report_ui.sources_script(reports_root) if reports_root else ""}'
             f'window.SCAUTO_SELKIND="{sel_kind}";'
             f'window.SCAUTO_SELPREFIX={json.dumps(sel_prefix)};</script>'
             f'<script src="{asset_prefix}assets/ui.js"></script>'
@@ -1316,7 +1319,8 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
                         for t in sorted(conv["types"]))
     doc = (
         _head(f'Conversation {_short(conv["title"], 40)}', "../../", run_id, "msg", "../",
-              sel_prefix=f'conv-{conv["id"]}|')
+              sel_prefix=f'conv-{conv["id"]}|',
+              reports_root=os.path.dirname(os.path.abspath(outdir)))
         + '<body>'
         f'<header><h1>{text_html(conv["title"])} &mdash; conversation</h1>'
         f'<div class="sum">{_kind_badge(conv["kind"])} &middot; {conv["n_messages"]} message(s) '
@@ -1552,7 +1556,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
                   + '</div>') if empty else ""
 
     doc = (
-        _head("Snapchat conversations", "../", run_id, "conv", "")
+        _head("Snapchat conversations", "../", run_id, "conv", "",
+              reports_root=os.path.dirname(os.path.abspath(outdir)))
         + '<body>'
         f'<header><h1>Snapchat conversations</h1>'
         f'<div class="sum"><b>{len(conversations)}</b> conversation(s) &middot; '

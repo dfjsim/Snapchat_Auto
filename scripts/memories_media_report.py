@@ -2576,10 +2576,13 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
               '<span class="selhint">ticking a Memory below marks it for the case; it is shared '
               'with the Memories index</span>'
               '<div class="sellegacy" id="sellegacy" style="display:none"></div></div>')
+    # The source fingerprints this run recorded, so the examiner's saved selection carries
+    # them and a later partial run can check the extraction it is handed against this one.
+    sources_js = report_ui.sources_script(os.path.dirname(os.path.dirname(os.path.abspath(pages_dir))))
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
            f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
@@ -2760,6 +2763,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
     link straight to a memory's detail page. Returns (index_path, linked, located).
     """
+    # The source fingerprints this run recorded, so the examiner's saved selection carries
+    # them and a later partial run can check the extraction it is handed against this one.
+    sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
     userids = userids or {}
     os.makedirs(outdir, exist_ok=True)
     total = len(memories)
@@ -2964,7 +2970,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="mem";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'

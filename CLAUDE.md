@@ -98,6 +98,10 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
 
 ## Research notes / findings
 
+- [Partial reports](docs/report_partial.md) — the selection file the examiner saves (schema, the
+  `.json`/`.js` forms and why renaming one to the other fails silently, `--install-selection`), and
+  the source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a
+  later run is looking at the same evidence and may reuse anything of it.
 - Per-report internals and the cross-report linking scheme:
   [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
   [report_conversations.md](docs/report_conversations.md),

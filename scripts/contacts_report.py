@@ -528,6 +528,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
     participants}``), which is what lets each contact row link to **every** conversation that
     contact takes part in — see :func:`contact_conversations`.
     """
+    # The source fingerprints this run recorded, so the examiner's saved selection carries
+    # them and a later partial run can check the extraction it is handed against this one.
+    sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
     conv_index = conv_index or {}
     os.makedirs(outdir, exist_ok=True)
 
@@ -663,7 +666,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<title>Snapchat contacts</title>'
            f'<style>{report_ui.PAGE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}</style>'
-           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};window.SCAUTO_SELKIND="ct";</script>'
+           f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="ct";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="{rel_prefix}selection.js"></script>'
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'

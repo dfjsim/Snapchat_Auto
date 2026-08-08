@@ -19,6 +19,7 @@ import hashlib
 from io import BytesIO
 from scripts import DecryptLocalMemories_iOS
 from scripts import report_ui
+from scripts import source_fingerprint
 import math
 import logging
 import numpy as np
@@ -1837,7 +1838,7 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
     return friends_df
 
 def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
-         tile_server=""):
+         tile_server="", zip_path="", hash_zip=False):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1870,7 +1871,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     base_folder_share = ""
     groupPlist = ""
     app_group_plist_storage = ""
-    
+    source_artifacts = {}                 # role -> path, filled in as the locate block resolves them
+
     for root, dirs, files in os.walk(Application):
         if uuid_pattern.match(dirs[0]):
             base_folder_data = dirs[0]
@@ -1943,6 +1945,23 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                     logger.info("SCDB-27 database could not be found, will not decrypt memories")
                     scdb = ""
         keychain_file = keychain
+        # Everything the run reads that decides what the reports contain, hashed and recorded once,
+        # here — where the paths have just been resolved. The fingerprinter is handed those paths
+        # rather than globbing for them itself: one place decides where an artifact lives, and it is
+        # this function that has to find it anyway.
+        client_enc = glob.glob(snapchatFolder + "/Documents/ClientEncryptionService.plist")
+        source_artifacts = {
+            "arroyo": arroyo[0] if arroyo else "",
+            "scdb": scdb,
+            "gallery_encrypteddb": galleryEncrypteddb,
+            "cache_controller": cacheController[0] if cacheController else "",
+            "contentmanager": contentmanager,
+            "primary_docobjects": primaryDoc[0] if primaryDoc else "",
+            "user_plist": str(userPlist) if userPlist and os.path.exists(userPlist) else "",
+            "client_encryption": client_enc[0] if client_enc else "",
+            "group_plist": groupPlist,
+            "keychain": keychain_file,
+        }
         # Every SCContent cache folder, the logged-in account's first. A chat attachment can sit in
         # any of them — the folder name carries a file-manager generation (3, 4, …) and usually,
         # but not always, the account's user id — so pinning one folder silently lost attachments.
@@ -1955,6 +1974,19 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         sys.exit()
     except Exception as Error:
         logger.error(Error)
+
+    # Hash and record the sources before any report is written, so every report of this run can stamp
+    # them into its pages and the examiner's selection file can carry a copy. A later partial run
+    # checks that copy against the extraction it is given, and refuses to reuse anything a different
+    # build produced. See scripts/source_fingerprint.py.
+    sources = source_fingerprint.collect(source_artifacts, zip_path=zip_path, hash_zip=hash_zip)
+    source_fingerprint.write_sources(report_dir, sources)
+    n_found = sum(1 for r in sources["artifacts"].values() if r.get("present"))
+    logger.info(f"Sources: {n_found} of {len(sources['artifacts'])} artifact(s) present, digest "
+                f"{sources['digest'][:16]}…")
+    for role, record in sorted(sources["artifacts"].items()):
+        if not record.get("present"):
+            logger.info(f"  {role}: not present ({record.get('why') or 'not located'})")
 
     # if os.path.exists(groupPlist) and os.path.exists(snapchatFolder):
         # pass
