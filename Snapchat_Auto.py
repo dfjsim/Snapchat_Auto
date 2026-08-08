@@ -7,6 +7,7 @@ from scripts import parseSnapvideos_PREFETCH
 from scripts import offline_maps
 from scripts import app_version
 from scripts import selection_file
+from scripts import source_fingerprint
 import os
 import json
 import logging
@@ -177,9 +178,51 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
     def _src_row(label, path):
         val = _esc(path) if path else '<span class="none">(none provided)</span>'
         return f'<div class="srow"><span class="lbl">{label}</span><span class="val">{val}</span></div>'
+    # The hashes of what the run actually read, on the face of the report rather than only in
+    # sources.json — a partial report built later re-checks them and says whether they still match.
+    fp = source_fingerprint.read_sources(os.path.join(root_dir, reports_subdir))
+    artifact_rows = ""
+    if fp and fp.get("artifacts"):
+        rows = []
+        for role, record in sorted(fp["artifacts"].items()):
+            label = record.get("label") or role
+            if not record.get("present"):
+                why = record.get("why") or "not located"
+                rows.append(f'<div class="srow"><span class="lbl">{_esc(label)}</span>'
+                            f'<span class="val none">not in this extraction ({_esc(why)})</span></div>')
+                continue
+            rows.append(
+                f'<div class="srow"><span class="lbl">{_esc(label)}</span><span class="val">'
+                f'{_esc(record.get("path"))}<br>{record.get("bytes", 0):,} bytes'
+                f'<br>MD5 {_esc(record.get("md5"))}<br>SHA-256 {_esc(record.get("sha256"))}'
+                + "".join(
+                    f'<br><b>{_esc(suffix)}</b> {side.get("bytes", 0):,} bytes '
+                    f'&middot; SHA-256 {_esc(side.get("sha256"))}'
+                    for suffix, side in sorted((record.get("sidecars") or {}).items()))
+                + '</span></div>')
+        z = fp.get("zip") or {}
+        if z.get("present"):
+            zip_hashes = (f'<br>MD5 {_esc(z.get("md5"))}<br>SHA-256 {_esc(z.get("sha256"))}'
+                          if z.get("hashed") else
+                          '<br><span class="none">not hashed &mdash; run with --hash-zip yes to '
+                          'record it</span>')
+            rows.append(f'<div class="srow"><span class="lbl">extraction ZIP</span>'
+                        f'<span class="val">{z.get("bytes", 0):,} bytes{zip_hashes}</span></div>')
+        artifact_rows = (
+            '<div class="snote">The databases, plists and keychain this run read &mdash; what decides '
+            'what every report here contains. Cached media files are not listed: each one carries its '
+            'own MD5 and SHA-256 in the cache reports. A database is hashed together with its '
+            '<b>-wal</b>/<b>-shm</b>, because each one is read twice, with the log applied and '
+            'without.</div>'
+            + "".join(rows)
+            + f'<div class="srow"><span class="lbl">Tool version</span>'
+              f'<span class="val">{_esc(fp.get("tool_version"))}</span></div>'
+              f'<div class="srow"><span class="lbl">Source digest</span>'
+              f'<span class="val">{_esc(fp.get("digest"))}</span></div>')
     sources = (f'<div class="sources"><div class="stitle">Sources</div>'
                f'{_src_row("Extraction", zip_path)}'
-               f'{_src_row("Keychain / keystore", keychain_path)}</div>')
+               f'{_src_row("Keychain / keystore", keychain_path)}'
+               f'{artifact_rows}</div>')
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto v{get_version()} report</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
@@ -191,6 +234,8 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
  .srow .lbl{{color:#666;font-weight:600}}
  .srow .val{{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#33367a;overflow-wrap:anywhere}}
  .srow .none{{color:#999;font-style:italic;font-family:-apple-system,Segoe UI,Roboto,sans-serif}}
+ .sources .snote{{font-size:12px;color:#666;margin:8px 0 6px;line-height:1.5}}
+ .sources{{max-width:920px}}
  ul{{list-style:none;padding:16px 26px 22px;max-width:760px}}
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
@@ -216,7 +261,7 @@ def _map_timezone(tzval):
 
 
 def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
-        tile_server="", run_name=None, pause=False):
+        tile_server="", run_name=None, pause=False, hash_zip=False):
     """Do one extraction + report run. Shared by the GUI and the command line.
 
     Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
@@ -254,7 +299,9 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 logger.info("Found SnapFixedVideos folder, skipping that step")
             ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
                                    padding=padding, tz=tz, report_dir="./Reports",
-                                   tile_server=tile_server)
+                                   tile_server=tile_server,
+                                   zip_path=os.path.abspath(zip_path) if zip_path else "",
+                                   hash_zip=hash_zip)
             # Write the report index BEFORE the pause, so index.html exists when the "press any
             # key" prompt appears (previously the pause lived inside the parser and blocked this).
             write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
@@ -283,7 +330,7 @@ def diag_keychain(path):
     # Everything goes to the console (the built app keeps its console window), so the check stays
     # scriptable — no dialog to dismiss.
     res = memkeys.diagnose_keychain(path)
-    logger.info(f"Format: {res['format'] or 'not recognized'} — {res['items']} item(s), "
+    logger.info(f"Format: {res['format'] or 'not recognized'} - {res['items']} item(s), "
                 f"{res['snap_items']} in the Snapchat access group")
     return 0 if res["status"] == "ok" else 1
 
@@ -297,15 +344,18 @@ def print_usage():
           "  --keychain <file>       Keychain plist / objection JSON (iOS only).\n"
           "  --workdir <dir>         Where the run folder is created (default: current dir).\n"
           "  --os ios|android        Which parser to use (default: ios).\n"
-          "  --tz <spec>             local | utc | <IANA name> | <±HH:MM>  (default: local).\n"
+          "  --tz <spec>             local | utc | <IANA name> | <+/-HH:MM>  (default: local).\n"
           "  --padding both|strip|keep   Memories media padding (default: both).\n"
           "  --tile-server <url>     Offline map tile server, {z}/{x}/{y} template.\n"
           "  --run-name <name>       Use this run-folder name instead of a timestamp, so a\n"
-          "                          repeated run lands in the same place.\n\n"
+          "                          repeated run lands in the same place.\n"
+          "  --hash-zip yes          Also record the extraction ZIP's MD5 and SHA-256. Off by\n"
+          "                          default: tens of GB is a long read, and it is the database\n"
+          "                          hashes that bind what the reports contain.\n\n"
           "Selections (the rows an examiner ticked in the reports):\n"
           "  --install-selection <file>   Put a saved selection.json (or .js) where the reports\n"
           "                          load it, as <report folder>/selection.js. Browsers refuse to\n"
-          "                          save a .js, and renaming a .json will NOT work — the reports\n"
+          "                          save a .js, and renaming a .json will NOT work - the reports\n"
           "                          load it as a script and bare JSON fails silently. This does\n"
           "                          the conversion. Any existing file is backed up.\n"
           "  --report-dir <dir>      Which report folder to install into (default: ./Reports).\n"
@@ -320,7 +370,7 @@ def print_usage():
 
 # The headless options, and whether each takes a value.
 _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz": True,
-                "padding": True, "tile-server": True, "run-name": True}
+                "padding": True, "tile-server": True, "run-name": True, "hash-zip": True}
 
 
 def _parse_cli(args):
@@ -369,7 +419,9 @@ def run_cli(args):
                      workdir=values.get("workdir", "."), os_mode=os_mode, padding=padding,
                      tz=_map_timezone(values.get("tz", "local")),
                      tile_server=(values.get("tile-server") or "").strip(),
-                     run_name=values.get("run-name"), pause=False)
+                     run_name=values.get("run-name"), pause=False,
+                     hash_zip=(values.get("hash-zip") or "").lower()
+                              in ("yes", "y", "true", "1"))
     except Exception as error:
         logger.error(f"Run failed: {error}")
         return 1
