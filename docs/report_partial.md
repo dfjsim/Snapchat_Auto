@@ -124,16 +124,18 @@ anyway; a second set of globs would drift from the first.
 A **missing** artifact is recorded as missing, not omitted. "This run had no `gallery.encrypteddb`" is
 a finding, and a later run that suddenly has one is a difference worth showing.
 
-### Sidecars get their own verdict
+### Sidecars get their own verdict — and a differing log is a real difference
 
 Each database is fingerprinted together with its `-wal` and `-shm`, because
 `scripts/data/sqlite_open.py` reads every database **twice** — with the log applied and without it —
-so the log is part of what "the same data" means.
+and marks the rows only one reading contains. The log is where the **deleted and superseded rows**
+come from, so it is not incidental to what the reports say.
 
-They are compared as **separate lines**. A `-wal` is rewritten whenever anything opens the database,
-so it can legitimately differ where the database does not; folding that into the database's verdict
-would announce "the evidence changed" for a difference that may mean nothing. The examiner is told
-which kind of difference they have.
+They are compared as **separate lines**, so the examiner is told precisely *what* differs instead of
+getting one verdict for a whole database. That is a diagnosis, not a discount: **a differing `-wal`
+fails the verdict exactly as a differing database does, and nothing may be reused.** Two logs can
+agree on every current row and still recover a different set of deleted rows, so "the live data looks
+the same" is not a reason to trust it.
 
 ### The two verdicts
 

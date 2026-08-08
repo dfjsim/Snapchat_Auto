@@ -140,21 +140,37 @@ def test_changed_bytes_are_reported_as_a_difference(tmp_path):
     assert [line["status"] for line in verdict.problems] == [sf.DIFFERS]
 
 
-def test_a_changed_write_ahead_log_is_its_own_verdict_line_not_the_databases(tmp_path):
-    """A -wal is rewritten whenever something opens the database. Folding that into the database's
-    verdict would announce "the evidence changed" for a difference that may mean nothing."""
+def test_a_changed_write_ahead_log_fails_the_verdict_even_though_the_database_matches(tmp_path):
+    """A differing log is a real difference in the evidence, not a cosmetic one.
+
+    The log is where sqlite_open recovers the deleted and superseded rows, so two logs can agree on
+    every current row and still disagree about what was deleted. It gets its own verdict line so the
+    examiner is told *what* differs — that is a diagnosis, not a discount.
+    """
     first, path = _two_runs(tmp_path)
     (tmp_path / "arroyo.db-wal").write_bytes(b"a different log")
     verdict = sf.verify(first, sf.collect({"arroyo": path}))
 
-    assert not verdict.ok
+    assert not verdict.ok                     # the whole manifest fails on the log alone
     problems = verdict.problems
     assert len(problems) == 1
     assert problems[0]["what"].endswith("-wal")
-    assert "write-ahead log" in problems[0]["note"]
-    # the database itself still matched, and says so
+    assert problems[0]["status"] == sf.DIFFERS
+    # and nothing in the wording invites treating it as harmless
+    assert "different evidence" in problems[0]["note"]
+    assert "harmless" in problems[0]["note"]
+    # the database itself still matched, and says so — the point of the separate line
     assert any(line["status"] == sf.MATCH and line["what"] == "arroyo.db"
                for line in verdict.lines)
+
+
+def test_reuse_is_refused_when_only_the_write_ahead_log_differs(tmp_path):
+    """The case the wording used to invite: current rows identical, log not. Nothing may be reused."""
+    first, path = _two_runs(tmp_path)
+    (tmp_path / "arroyo.db-wal").write_bytes(b"a different log")
+    verdict = sf.verify(first, sf.collect({"arroyo": path}))
+    ok, why = sf.reuse_allowed(sf.check_version("1.0.0", "1.0.0"), verdict)
+    assert not ok and "not identical" in why
 
 
 def test_an_artifact_present_then_and_absent_now_is_missing_not_differing(tmp_path):
