@@ -87,6 +87,15 @@ format examples.
 
 The corpus itself, and the script that runs it, live outside the repo for the same reason.
 
+### Commit messages — the co-author trailer
+
+A commit Claude Code contributed to ends with exactly this trailer, and nothing else naming the
+assistant (**Never name the model**):
+
+```
+Co-authored-by: Claude Code <noreply@anthropic.com>
+```
+
 ## Research notes / findings
 
 - Per-report internals and the cross-report linking scheme:
