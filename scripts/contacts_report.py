@@ -454,6 +454,16 @@ def contact_conversations(contact, conv_index):
     return first + rest
 
 
+_ACTIVITY_HINT = (
+    "The earliest and latest activity across EVERY conversation this contact takes part in, not "
+    "only the one the friends list names — so for someone in several group chats these are not one "
+    "conversation's dates. The Msgs count is the same sum, which is why two contacts in the same "
+    "group chat can show the same figure.\n\n"
+    "Normally these are message times (arroyo.db conversation_message.creation_timestamp). A value "
+    "marked «feed» comes from a conversation that holds no message, where the only record of "
+    "activity is the conversation's own row in the app's chat feed — that is not a message time. "
+    "Expand the row to see which conversation each date came from.")
+
 _WHY_LABEL = {
     "friends": ("from the friends list",
                 "This is the CONVERSATION_ID the friends artifact records against this contact — "
@@ -481,13 +491,14 @@ def _contact_detail(contact, convs, rel_prefix):
             + f'<td class="mono">{_esc(c["id"])}</td>'
             + f'<td>{_esc(c.get("kind") or "")}</td>'
             + f'<td class="num">{c.get("messages") or 0}</td>'
-            + f'<td>{_esc(c.get("first") or "")}</td>'
-            + f'<td>{_esc(c.get("last") or "")}</td>'
+            + f'<td>{report_ui.activity_cell(c.get("first"), c.get("date_source"))}</td>'
+            + f'<td>{report_ui.activity_cell(c.get("last"), c.get("date_source"))}</td>'
             + f'<td>{_esc(_WHY_LABEL.get(c["why"], (c["why"], ""))[0])}'
             + report_ui.info_icon(_WHY_LABEL.get(c["why"], ("", ""))[1]) + "</td>"
             "</tr>" for c in convs)
         table = ('<table class="sub"><tr><th>Conversation</th><th>Conversation ID</th><th>Type</th>'
-                 '<th>Msgs</th><th>First message</th><th>Last message</th><th>Listed because</th>'
+                 '<th>Msgs</th><th>First activity</th><th>Last activity</th>'
+                 '<th>Listed because</th>'
                  f'</tr>{rows}</table>')
     elif contact.get("conv_id"):
         table = (f'<div class="mono">{_esc(contact["conv_id"])}</div>'
@@ -539,9 +550,14 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
         firsts = [c["first_sort"] for c in convs if c.get("first_sort")]
         lasts = [c["last_sort"] for c in convs if c.get("last_sort")]
         first_sort, last_sort = (min(firsts) if firsts else 0), (max(lasts) if lasts else 0)
-        first_txt = next((c.get("first") or "" for c in convs
-                          if c.get("first_sort") == first_sort), "")
-        last_txt = next((c.get("last") or "" for c in convs if c.get("last_sort") == last_sort), "")
+        # the date AND where it came from: a conversation with no message contributes its feed
+        # dates, which must stay marked as such here too rather than becoming a bare timestamp
+        first_c = next((c for c in convs if c.get("first_sort") == first_sort), None)
+        last_c = next((c for c in convs if c.get("last_sort") == last_sort), None)
+        first_txt = (first_c or {}).get("first") or ""
+        last_txt = (last_c or {}).get("last") or ""
+        first_src = (first_c or {}).get("date_source") or ""
+        last_src = (last_c or {}).get("date_source") or ""
         if conv_id or convs:
             with_conv += 1
         if n_msgs:
@@ -586,8 +602,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
                                         if contact["is_owner"] else ""),
             conv_cell,
             str(n_msgs) if (conv_id or convs) else "",
-            _esc(first_txt),
-            _esc(last_txt),
+            report_ui.activity_cell(first_txt, first_src),
+            report_ui.activity_cell(last_txt, last_src),
         ]
         searchable = [contact["display"], contact["username"], legacy, contact["user_id"], conv_id]
         # every conversation id and title the contact is in, so searching an id finds the people in
@@ -703,8 +719,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<div class="vc" onclick="SCV.setSort(5)">Conversations'
            f'{report_ui.info_icon(MULTI_CONV_NOTE)} <span class="ar">&#8597;</span></div>'
            f'<div class="vc" onclick="SCV.setSort(6)">Msgs <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(7)">First message <span class="ar">&#8597;</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(8)">Last message <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(7)">First activity{report_ui.info_icon(_ACTIVITY_HINT)} <span class="ar">&#8597;</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(8)">Last activity{report_ui.info_icon(_ACTIVITY_HINT)} <span class="ar">&#8597;</span></div>'
            f'</div></div>'
            f'<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div>'
            f'<div class="vwin" id="vwin"></div></div>'

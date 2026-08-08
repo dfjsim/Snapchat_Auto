@@ -489,9 +489,19 @@ def _smid_sort(smid):
 
 # --------------------------------------------------------------------------- conversation model
 
-_ARROYO_BLANK = {"type": None, "user_ids": [], "server_id": "", "created_ms": None,
-                 "feed_first_ms": None, "feed_last_ms": None, "feed_title": "", "feed_type": None,
-                 "in_arroyo": False}
+def _arroyo_blank():
+    """A fresh record per conversation.
+
+    A module-level template copied with ``dict()`` is a shallow copy, so every conversation shared
+    one ``user_ids`` **list**: each conversation ended up holding every participant in the database,
+    every contact therefore matched every conversation, and every contact's row showed the message
+    total of the whole extraction. That is a false attribution of people to conversations — the kind
+    :func:`contacts_report.contact_conversations` refuses to make from a display name, arrived at by
+    accident instead.
+    """
+    return {"type": None, "user_ids": [], "server_id": "", "created_ms": None,
+            "feed_first_ms": None, "feed_last_ms": None, "feed_title": "", "feed_type": None,
+            "in_arroyo": False}
 
 
 def load_arroyo_conversations(arroyo, msg_df=None):
@@ -517,7 +527,7 @@ def load_arroyo_conversations(arroyo, msg_df=None):
         for conv_id, server_id in zip(msg_df[COL_CONV], msg_df[COL_SCONV]):
             key, value = cell(conv_id), _id_str(server_id)
             if key and value:
-                out.setdefault(key, dict(_ARROYO_BLANK))
+                out.setdefault(key, _arroyo_blank())
                 out[key]["server_id"] = out[key]["server_id"] or value
     if not (arroyo and os.path.isfile(arroyo)):
         return out
@@ -530,7 +540,7 @@ def load_arroyo_conversations(arroyo, msg_df=None):
             return rows
 
         def rec(conv_id):
-            return out.setdefault(str(conv_id), dict(_ARROYO_BLANK))
+            return out.setdefault(str(conv_id), _arroyo_blank())
 
         try:
             for conv_id, ctype, user_ids in both(
@@ -836,11 +846,6 @@ def write_assets(outdir):
 _REPORT_CSS = """
  .vcells>.vc{font-size:12.5px}
  .cid{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#888}
- /* An activity date that is NOT a message time. Muted and tagged so the column cannot be read as
-    "a message was sent then" — see _FEED_BASIS. */
- .fromfeed{color:#6a6a80}
- .feedtag{background:#e7e7f2;color:#5a5a86;border:1px solid #d2d2e4;border-radius:7px;
-   padding:0 5px;font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.03em}
  .kindbadge{font-weight:700;font-size:11px;white-space:nowrap}
  .kindbadge.group{color:#8a1f5a} .kindbadge.private{color:#25348a} .kindbadge.unknown{color:#999}
  header .kindbadge,header .kindbadge.group,header .kindbadge.private{color:#fff}
@@ -1372,14 +1377,7 @@ def _first_last(conv, which):
     as "a message was sent then". See :data:`_FEED_BASIS`.
     """
     act = conv.get("activity") or {}
-    value = act.get(which) or ""
-    if not value:
-        return ""
-    if act.get("source") == "messages":
-        return _esc(value)
-    return (f'<span class="fromfeed" title="Not a message time — this conversation holds no '
-            f'message. Taken from the conversation\'s own feed row; expand the row for which '
-            f'field.">{_esc(value)} <span class="feedtag">feed</span></span>')
+    return report_ui.activity_cell(act.get(which) or "", act.get("source"))
 
 
 # --------------------------------------------------------------------------- index page
@@ -1666,9 +1664,14 @@ def conversation_index(conversations):
     only to the one CONVERSATION_ID the friends artifact recorded against them. A contact in three
     group chats is in three conversations, and a report that shows one of them is hiding two.
     """
+    # first/last travel as PLAIN TEXT with the source beside them, not as the index's marked-up
+    # cell: the Contacts report escapes what it is given, so markup arrives there as visible tag
+    # soup. It renders the same "feed" marker itself, from `date_source`.
     return {c["id"]: {"page": c["page"], "title": c["title"], "kind": c["kind"],
                       "messages": c["n_messages"], "attachments": c["n_attachments"],
-                      "first": _first_last(c, "first"), "last": _first_last(c, "last"),
+                      "first": (c["activity"] or {}).get("first", ""),
+                      "last": (c["activity"] or {}).get("last", ""),
+                      "date_source": (c["activity"] or {}).get("source", ""),
                       "first_sort": c["first_sort"], "last_sort": c["last_sort"],
                       "participants": [{"user_id": p["user_id"], "username": p["username"],
                                         "display": p["display"], "raw": p["raw"],

@@ -710,6 +710,36 @@ UNRECOVERED_BASIS = (
     "bundles, fonts, shader and CoreML caches) that hold no user content. Counting those as "
     "'not recovered' made this number an order of magnitude too large.")
 
+RECOVERED_STATES = (
+    ("y", "recovered here"),
+    ("n", "not recovered"),
+    ("elsewhere", "decoded by the report that owns it"),
+    ("asset", "app asset, no user content"),
+)
+
+
+def _recovered_state(entry):
+    """Which of four things "not recovered" means for this file.
+
+    The filter used to be a two-way recovered / not-recovered over ``entry["recovered"]`` alone,
+    which put the caching-media packs and the app assets under "not recovered" — the exact two
+    groups :data:`UNRECOVERED_BASIS` says are **not** failures and that the header count excludes.
+    So the filter disagreed with the number at the top of the report *and* with the row's own cell,
+    which says "↗ decoded in the Memories report" on a file the filter called unrecovered. Asking
+    for "not recovered" therefore never got rid of them.
+
+    Recovery wins over ownership: a file this report did decode is "recovered here" whatever
+    directory it lives in, which is what the File cell already shows.
+    """
+    if entry.get("recovered"):
+        return "y"
+    if entry.get("category") == CAT_ELSEWHERE:
+        return "elsewhere"
+    if entry.get("category") == CAT_ASSET:
+        return "asset"
+    return "n"
+
+
 # Which report already owns a location, so it is inventoried and cross-linked here but never
 # decoded a second time.
 _OWNED_ELSEWHERE = {
@@ -1454,13 +1484,17 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
              "5": e["ext"] or e["kind"], "6": e["bytes"]},
             chunk_of.get(anchor),
             {"cat": e["category"], "loc": loc,
-             "rec": "y" if e["recovered"] else "n",
+             "rec": _recovered_state(e),
              "link": "y" if e["links"] else "n"},
         ])
     report_ui.write_rows(data_dir, rows)
 
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
     loc_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in locations)
+    rec_counts = {}
+    for row in rows:
+        rec_counts[row[5]["rec"]] = rec_counts.get(row[5]["rec"], 0) + 1
+    rec_opts = report_ui.counted_options(RECOVERED_STATES, rec_counts)
     key_line = (f"Story-cache key: {html.escape(key_info.get('note') or 'not looked for')}"
                 + (_info(CLIENT_KEY_BASIS) if key_info.get("key") else ""))
 
@@ -1545,8 +1579,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
  <input type="search" id="q" placeholder="Search path, filename, hash, URL, snap id…" oninput="flt()">
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>Location <select id="loc" onchange="flt()"><option value="">all</option>{loc_opts}</select></label>
- <label>Recovered <select id="rec" onchange="flt()"><option value="">any</option>
-   <option value="y">recovered</option><option value="n">not recovered</option></select></label>
+ <label title="{_esc(UNRECOVERED_BASIS)}">Recovered
+   <select id="rec" onchange="flt()"><option value="">any</option>{rec_opts}</select></label>
  <label>Linked <select id="link" onchange="flt()"><option value="">any</option>
    <option value="y">linked</option><option value="n">not linked</option></select></label>
  <label title="App fonts, lens models and shader caches are hidden unless this is ticked">

@@ -66,6 +66,16 @@ conversation comes from. They say the conversation was *active*; they do not say
 at that moment, and they are not evidence of content. The expanded row's **Dates** section names
 the field each value came from.
 
+A conversation can legitimately end up with **no** date: one the friends list names but that has
+no `conversation` row, no `feed_entry` row and no message leaves nothing to date it with. The cell
+says *no date recorded* rather than being blank, so it reads as a fact about the extraction rather
+than as a gap in the report.
+
+The Contacts report shows the same two columns, aggregated across every conversation a contact is
+in, and renders them through the same `report_ui.activity_cell` so a feed date is marked there too.
+The value travels between the reports as **plain text plus a `date_source`**, never as a ready-made
+cell: the Contacts report escapes what it is handed, so markup arrives there as visible tag soup.
+
 **`conversation.creation_timestamp` is not the start of the conversation.** It is when *this
 device* created its local row. Verified on the corpus: on a device restored from a backup it is the
 restore, and the conversation's own messages can pre-date it by years. It is shown in the expanded
