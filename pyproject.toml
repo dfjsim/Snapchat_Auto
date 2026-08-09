@@ -16,6 +16,10 @@
         "freesimplegui",
         "nuitka",
         "dfjsim_shared_tools",
+        # The selection file format, in its own dependency-free distribution so an external tool can
+        # produce a selection without taking on anything above. The application imports the same
+        # module (scripts/selection_file.py re-exports it) so there is one implementation.
+        "snapchat-auto-selection",
     ]
 
 
@@ -40,7 +44,13 @@
 [tool.uv]
     package = true
 
+    # A path inside this repository, unlike the local editable path this replaced: a fresh clone
+    # resolves it, which is what makes the build reproducible for anyone.
+    [tool.uv.workspace]
+        members = ["packages/*"]
+
     [tool.uv.sources]
+        snapchat-auto-selection = { workspace = true }
         nuitka = { url = "https://github.com/Nuitka/Nuitka/archive/main.zip" }
         # Pinned to a tag, not a branch: a build has to be reproducible, and this repository is
         # public so anyone cloning it can resolve the dependency. It replaces a local editable path

@@ -24,10 +24,11 @@ sections appear here as the feature is built.
 * [What a partial run leaves out](#what-a-partial-run-leaves-out-beyond-the-unselected-rows) beyond
   the unselected rows.
 
-Related: [report_ui.md](report_ui.md) (how rows are selected in the browser, and where a `file://`
-page can keep that), [cross_report_linking.md](cross_report_linking.md) (the anchors a selection names
-and the links between reports), [sqlite_wal_handling.md](sqlite_wal_handling.md) (why a database's
-`-wal` is part of "the same data").
+Related: [selection_format.md](selection_format.md) (the **normative** file format, for another tool
+producing a selection), [report_ui.md](report_ui.md) (how rows are selected in the browser, and where a
+`file://` page can keep that), [cross_report_linking.md](cross_report_linking.md) (the anchors a
+selection names and the links between reports), [sqlite_wal_handling.md](sqlite_wal_handling.md) (why a
+database's `-wal` is part of "the same data").
 
 ---
 

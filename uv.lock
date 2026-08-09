@@ -11,6 +11,12 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P10D"
 
+[manifest]
+members = [
+    "snapchat-auto",
+    "snapchat-auto-selection",
+]
+
 [[package]]
 name = "annotated-types"
 version = "0.8.0"
@@ -400,6 +406,7 @@ dependencies = [
     { name = "pyasn1" },
     { name = "pycryptodome" },
     { name = "requests" },
+    { name = "snapchat-auto-selection" },
 ]
 
 [package.optional-dependencies]
@@ -426,11 +433,17 @@ requires-dist = [
     { name = "pyasn1" },
     { name = "pycryptodome" },
     { name = "requests" },
+    { name = "snapchat-auto-selection", editable = "packages/snapchat_auto_selection" },
     { name = "sqlcipher3", marker = "extra == 'sqlcipher3'" },
     { name = "sqlcipher3-binary", marker = "extra == 'sqlcipher3-binary'" },
     { name = "sqlcipher3-wheels", marker = "extra == 'sqlcipher3-wheels'" },
 ]
 provides-extras = ["sqlcipher3", "sqlcipher3-binary", "sqlcipher3-wheels"]
+
+[[package]]
+name = "snapchat-auto-selection"
+version = "1.0.0"
+source = { editable = "packages/snapchat_auto_selection" }
 
 [[package]]
 name = "sqlcipher3"

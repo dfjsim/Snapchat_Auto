@@ -309,9 +309,10 @@ def verify(expected, found):
     """
     if not expected or not (expected.get("artifacts")):
         return Verdict("sources", False, [], comparable=False,
-                       summary=("No source fingerprints to check against — this selection was saved "
-                                "before the tool recorded them, so it cannot be verified that it "
-                                "came from this extraction."))
+                       summary=("No source fingerprints to check against, so it cannot be verified "
+                                "that this selection came from this extraction. Either it was made "
+                                "by another tool, which has no access to ours, or it was saved "
+                                "before this tool recorded them."))
 
     exp_art = expected.get("artifacts") or {}
     got_art = (found or {}).get("artifacts") or {}
@@ -383,8 +384,9 @@ def check_version(expected, running=None):
     running = running or app_version.get_version()
     if not expected:
         return Verdict("version", False, [], comparable=False,
-                       summary=("The selection does not record which build produced it, so nothing "
-                                f"can be reused from an earlier run. Running {running}."))
+                       summary=("The selection does not record which build produced it — normal for "
+                                "one built by another tool — so nothing can be reused from an "
+                                f"earlier run. Running {running}."))
     same = expected == running
     line = _line("tool_version", "Snapchat_Auto version", MATCH if same else DIFFERS,
                  expected, running,
