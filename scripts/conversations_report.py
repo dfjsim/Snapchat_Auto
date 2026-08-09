@@ -46,9 +46,11 @@ from datetime import datetime, timezone
 
 from scripts import report_ui
 from scripts import app_version
+from scripts import partial_report
 from scripts.data import sqlite_open
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
-                                     load_identifiers, contact_link_index, text_html, cell)
+                                     load_identifiers, contact_link_index, contact_anchor,
+                                     text_html, cell)
 # Reused so every report of a run labels and converts timestamps identically (DST-aware).
 from scripts.memories_media_report import make_time_formatter, guess_media
 
@@ -1722,9 +1724,9 @@ def conversation_index(conversations):
 
 # --------------------------------------------------------------------------- entry
 
-def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="local",
-         owner_user_id="", owner_username="", cache_key_for=None, report_dir=None, primary=None,
-         identifiers=None):
+def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="local",
+          owner_user_id="", owner_username="", cache_key_for=None, report_dir=None, primary=None,
+          identifiers=None):
     """Build the conversations report.
 
     msg_df         : the parser's message frame (see the COL_* names) — **before** its content is
@@ -1757,11 +1759,70 @@ def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="
     if owner_username:
         owner_names.append(re.sub(r"</?b>", "", str(owner_username)).strip())
 
+    # Attachment publishing happens inside build_messages, so it stays on the index side. Unlike the
+    # decryption and hashing the other reports defer, these are hard links out of the folder the
+    # parser already filled — near-zero cost. What that does mean is that a partial run's media/ will
+    # hold files no included message references, so the partial writer has to prune it to what the
+    # rendered rows actually point at.
     by_conv, drop_stats = build_messages(msg_df, cachefiles_dir, os.path.join(outdir, "media"),
                                          timefmt, cache_key_for, owner_user_id, owner_names)
     conversations = build_conversations(by_conv, contacts, groups,
                                         load_arroyo_conversations(arroyo, msg_df), contact_links,
                                         timefmt)
+
+    # The closure's view: two kinds, because a conversation and the messages inside it are separately
+    # selectable. A message's *store* id is qualified with its conversation — a message number
+    # restarts in every chat, so the page anchor alone names a different message in every one.
+    sel_conv = partial_report.Index("conv")
+    sel_msg = partial_report.Index("msg")
+    for conv in conversations:
+        conv_row = f'conv-{conv["id"]}'
+        sel_conv.add(conv_row, conv, conv=conv["id"], server=conv.get("server_id"))
+        for participant in conv.get("participants") or ():
+            if participant.get("user_id"):
+                sel_conv.link(partial_report.EDGE_CONV_PARTICIPANT, conv_row, "ct",
+                              contact_anchor(participant))
+        for msg in conv.get("messages") or ():
+            msg_row = f'{conv_row}|{msg["anchor"]}'
+            sel_msg.add(msg_row, msg, smid=msg.get("smid"))
+            if msg.get("created_unix") and msg.get("sender"):
+                # what finds a message whose anchor was only its position in the conversation
+                sel_msg.keys[("ts_sender",
+                              f'{msg["created_unix"]}|{str(msg["sender"]).lower()}')].add(msg_row)
+            sel_msg.contains(msg_row, conv_row)
+            sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
+            for att in msg.get("atts") or ():
+                if att and att.get("cache_key"):
+                    sel_msg.link(partial_report.EDGE_MESSAGE_CACHE, msg_row, "cc",
+                                 f'ck-{att["cache_key"]}')
+
+    return partial_report.Stage("conv", conversations, sel_conv,
+                                indexes={"conv": sel_conv, "msg": sel_msg},
+                                outdir=outdir, tz_label=tz_label, run_id=run_id,
+                                contact_links=contact_links, drop_stats=drop_stats)
+
+
+def render(stage, closure=None):
+    """Write the index, the per-conversation pages and the manifests.
+
+    ``closure=None`` renders everything. With a closure, a conversation shows only the messages the
+    closure includes — which is what "parts of conversations" means.
+    """
+    outdir, tz_label, run_id = stage["outdir"], stage["tz_label"], stage["run_id"]
+    contact_links = stage["contact_links"]
+    conversations = [record for _row_id, record in stage.sel.keep(closure)]
+
+    if closure is not None:
+        # a shallow copy per conversation, with its message list narrowed: the model itself must stay
+        # intact, because the closure was decided from it and other reports still read it
+        kept = closure.included.get("msg", set())
+        narrowed = []
+        for conv in conversations:
+            trimmed = dict(conv)
+            trimmed["messages"] = [m for m in conv.get("messages") or ()
+                                   if f'conv-{conv["id"]}|{m["anchor"]}' in kept]
+            narrowed.append(trimmed)
+        conversations = narrowed
 
     write_assets(outdir)
     for conv in conversations:
@@ -1773,12 +1834,31 @@ def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="
              "attachments": sum(c["n_attachments"] for c in conversations),
              "groups": sum(1 for c in conversations if c["kind"] == "Group"),
              "private": sum(1 for c in conversations if c["kind"] == "Private"),
-             **drop_stats}
+             **stage["drop_stats"]}
     report = generate_index(conversations, outdir, tz_label, run_id, stats)
     write_page_manifest(conversations, outdir)
     write_cache_links(conversations, outdir)
 
     logger.info(f"Conversations report: {os.path.abspath(report)}")
-    logger.info(f"  {len(conversations)} conversation(s), {stats['messages']} message(s), "
-                f"{stats['attachments']} with an attachment ({stats['files']} file(s))")
+    if closure is None:
+        logger.info(f"  {len(conversations)} conversation(s), {stats['messages']} message(s), "
+                    f"{stats['attachments']} with an attachment ({stats['files']} file(s))")
+    else:
+        logger.info(f"  {len(conversations)} of {len(stage.model)} conversation(s) in this extract, "
+                    f"holding {sum(len(c['messages']) for c in conversations)} selected message(s)")
     return report, conversation_index(conversations)
+
+
+def main(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz="local",
+         owner_user_id="", owner_username="", cache_key_for=None, report_dir=None, primary=None,
+         identifiers=None):
+    """Build the Conversations report: :func:`index` then :func:`render`.
+
+    See :func:`index` for the arguments. A partial run calls the two halves separately, so the closure
+    is decided from every report's index before any page is written.
+    """
+    stage = index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=arroyo, tz=tz,
+                  owner_user_id=owner_user_id, owner_username=owner_username,
+                  cache_key_for=cache_key_for, report_dir=report_dir, primary=primary,
+                  identifiers=identifiers)
+    return render(stage)

@@ -41,6 +41,7 @@ from urllib.parse import urlparse
 
 from scripts import report_ui
 from scripts import app_version
+from scripts import partial_report
 from scripts.data import sqlite_open
 from scripts.data import sniff
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
@@ -1900,16 +1901,15 @@ scConsumeHash();
 
 # --------------------------------------------------------------------------- entry
 
-def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
-    """
-    Build a cache_controller.db report.
+def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+    """Work out which cache entries exist and what each links to, without hashing or publishing.
 
-    app_or_root : Snapchat app-container path, or any extraction root containing it.
-    outdir      : output directory (default: ./Snapchat_CacheController_report_<timestamp>).
-    tz          : timezone for displayed timestamps — 'local', 'utc', an IANA name, or '±HH:MM'.
-    src_root    : extraction root the files were unzipped under (for archive-relative source paths).
-    report_dir  : the sibling reports root (…/Reports). Used to find the chat report's chat-link
-                  manifest and to compute relative links to the Memories/chat reports.
+    Reading the database and joining the claims happens here — the closure cannot be decided without
+    the rows. What it defers is the expensive per-row half: hashing the cached bytes on disk,
+    reconstructing byte-range files, and extracting poster frames. A partial run does that only for
+    the entries it will show. See :func:`main` for the arguments.
+
+    Returns a :class:`partial_report.Stage`, or ``None`` when there is no ``cache_controller.db``.
     """
     app = find_app_container(app_or_root)
     dbs = find_cache_controllers(app)
@@ -1953,6 +1953,36 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
         all_entries.extend(orphans)
         all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
 
+    # The closure's view. Rows keep the order established above, which `render` preserves: poster
+    # extraction runs under an overall budget, so re-ordering the publish could change which frames
+    # get extracted.
+    sel = partial_report.Index("cc")
+    for e in all_entries:
+        row_id = f"ck-{e['cache_key']}"
+        sel.add(row_id, e, key=e["cache_key"])
+        if e.get("memory"):
+            sel.link(partial_report.EDGE_MEMORY_CACHE, row_id, "mem",
+                     f"mem-{e['memory']['snap_id']}")
+        for chat in e.get("chats") or ():
+            if chat.get("conversation_id") and chat.get("server_message_id"):
+                sel.link(partial_report.EDGE_MESSAGE_CACHE, row_id, "msg",
+                         f"conv-{chat['conversation_id']}|msg-{chat['server_message_id']}")
+
+    return partial_report.Stage("cc", all_entries, sel, app=app, outdir=outdir, dbs=dbs,
+                                virtual=virtual, wal_infos=wal_infos, tz_label=tz_label,
+                                rel_prefix=rel_prefix, rdir=rdir, scfull=scfull, scparts=scparts,
+                                manifest=manifest, src_root=src_root, memory_media=memory_media,
+                                cache_media=cache_media)
+
+
+def render(stage, closure=None):
+    """Hash, publish and render. ``closure=None`` does the whole index, exactly as before."""
+    all_entries = [record for _row_id, record in stage.sel.keep(closure)]
+    outdir, app, rdir = stage["outdir"], stage["app"], stage["rdir"]
+    scfull, scparts = stage["scfull"], stage["scparts"]
+    memory_media, cache_media = stage["memory_media"], stage["cache_media"]
+    dbs, src_root, manifest = stage["dbs"], stage["src_root"], stage["manifest"]
+
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
@@ -1970,10 +2000,12 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
         e["cache_media"] = cache_media.get(e["cache_key"].lower(), [])
 
     db_display = device_path(dbs[0], src_root, manifest) if dbs else ""
-    report, stats = generate_report(all_entries, virtual, outdir, tz_label, rel_prefix,
-                                    src_root, manifest, db_display, report_ui.run_id(rdir),
-                                    wal_infos)
+    report, stats = generate_report(all_entries, stage["virtual"], outdir, stage["tz_label"],
+                                    stage["rel_prefix"], src_root, manifest, db_display,
+                                    report_ui.run_id(rdir), stage["wal_infos"])
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
+    if closure is not None:
+        logger.info(f"  {len(all_entries)} of {len(stage.model)} cache entry/entries in this extract")
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "
                 f"{stats['deleted']} deleted")
@@ -1985,6 +2017,26 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                     f"{stats['main_only']} only without it, {stats['meta_changed']} whose metadata "
                     f"row changed since the last checkpoint (both versions reported)")
     return report
+
+
+def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+    """
+    Build a cache_controller.db report.
+
+    app_or_root : Snapchat app-container path, or any extraction root containing it.
+    outdir      : output directory (default: ./Snapchat_CacheController_report_<timestamp>).
+    tz          : timezone for displayed timestamps — 'local', 'utc', an IANA name, or '±HH:MM'.
+    src_root    : extraction root the files were unzipped under (for archive-relative source paths).
+    report_dir  : the sibling reports root (…/Reports). Used to find the chat report's chat-link
+                  manifest and to compute relative links to the Memories/chat reports.
+
+    A full run in one call: :func:`index` then :func:`render`. A partial run calls the two halves
+    separately, so the closure is decided before anything is hashed or published.
+    """
+    stage = index(app_or_root, outdir=outdir, tz=tz, src_root=src_root, report_dir=report_dir)
+    if stage is None:
+        return None
+    return render(stage)
 
 
 if __name__ == "__main__":

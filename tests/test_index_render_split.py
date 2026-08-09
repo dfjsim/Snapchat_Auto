@@ -121,6 +121,32 @@ def test_contacts_render_with_a_closure_writes_only_the_included_rows(tmp_path):
     assert sorted(_anchors(report)) == ["ct-u-0001", "ct-u-0003"]
 
 
+def test_two_rows_sharing_one_id_both_survive_the_filter():
+    """A row id is not guaranteed unique, and a row must never vanish because of that.
+
+    `contact_anchor` falls back username -> conversation id -> "ct-unknown", so two contacts can
+    collapse to one id. The first version of `Index` stored rows in a dict keyed by id, so the second
+    of any pair was silently overwritten -- which the corpus byte-diff caught as a Contacts report
+    short of rows on all four devices. Two such rows do share one selection, which is a real
+    limitation of that fallback chain; losing one from the report is a different and worse thing.
+    """
+    sel = partial_report.Index("ct")
+    sel.add("ct-unknown", {"display": "First Nameless"})
+    sel.add("ct-unknown", {"display": "Second Nameless"})
+    sel.add("ct-u-0001", {"display": "Alice Test"})
+
+    assert len(sel) == 3                                      # rows, not ids
+    assert [r["display"] for _id, r in sel.keep(None)] == ["First Nameless", "Second Nameless",
+                                                           "Alice Test"]
+
+    selection = {"schema": 2, "selections": {"ct": {"ct-unknown": 1}}}
+    indexes = {"ct": sel}
+    closure = partial_report.expand(indexes, partial_report.resolve(indexes, selection),
+                                    {**partial_report.default_options(), "relations": {}})
+    # selecting the shared id keeps both rows -- it cannot distinguish them, and must not guess
+    assert [r["display"] for _id, r in sel.keep(closure)] == ["First Nameless", "Second Nameless"]
+
+
 def test_contacts_main_is_still_one_call_and_renders_everything(tmp_path):
     outdir = str(tmp_path / "Contacts")
     report = contacts_report.main(_friends(CONTACTS), outdir, report_dir=str(tmp_path),

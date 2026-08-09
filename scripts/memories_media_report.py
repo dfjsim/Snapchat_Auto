@@ -60,6 +60,7 @@ from scripts.data import sniff
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
 from scripts import app_version
+from scripts import partial_report
 from scripts import offline_maps
 
 logger = logging.getLogger(__name__)
@@ -3060,10 +3061,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 
 # --------------------------------------------------------------------------- entry
 
-def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
-         tile_server=""):
+def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
+          tile_server=""):
     """
-    Build a Memories media report.
+    Recover the Memories and their media, and hand back the closure's view of them.
 
     app_or_root : Snapchat app-container path, or any extraction root containing it.
     keychain    : path to a keychain plist (optional; enables geolocation / old-schema / MEO).
@@ -3163,6 +3164,16 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
                            f"({', '.join(s[:8] + '…' for s in sorted(carved))})")
             all_memories.update(carved)
 
+    # Unlike the other four reports, the decryption stays on THIS side of the split, and that is a
+    # constraint rather than a choice: Memories are grouped partly by identical media bytes, and the
+    # link from a Memory to the cache entry its media came from is derived per recovered file — so
+    # both facts the closure needs exist only once the media is recovered. Deferring it would mean
+    # deciding group membership from ZMEDIAID alone, which would silently drop a sibling grouped by
+    # bytes, and the group is all-or-nothing by design.
+    #
+    # The cost is that a partial run still decrypts every Memory. What pays it back is the reuse path
+    # (scripts/source_fingerprint.py): when the build and every source artifact are identical, the
+    # media a previous run already decrypted can be taken instead of decrypted again.
     collect_media(all_memories, app, media_dir, padding, scfull=scfull, scparts=scparts,
                   ccindex=ccindex)
     # media link paths are relative to Memories.html (which sits in outdir)
@@ -3170,21 +3181,68 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
         for f in m["media_files"]:
             f["path"] = "media/" + f["out"]
 
-    render_maps(all_memories, outdir, tile_server)
+    # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
+    # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds
+    # it without this report deriving it twice.
+    sel = partial_report.Index("mem")
+    for snap_id, m in all_memories.items():
+        row_id = f"mem-{snap_id}"
+        ids = m.get("ids") or {}
+        sel.add(row_id, m, snap=snap_id, mediaid=ids.get("ZMEDIAID"), entry=ids.get("ZENTRYID"))
+    groups, _snap_to_key = assign_groups(all_memories)
+    for _group_key, members in groups:
+        for m in members:
+            for other in members:
+                if m is not other:
+                    sel.link(partial_report.EDGE_MEMORY_GROUP, f"mem-{m['snap_id']}", "mem",
+                             f"mem-{other['snap_id']}")
+
+    return partial_report.Stage("mem", all_memories, sel, app=app, outdir=outdir, workdir=workdir,
+                                tile_server=tile_server, tz_label=tz_label, userids=userids,
+                                src_root=src_root, manifest=manifest,
+                                keychain_available=keychain_available, keychain_note=kc["detail"],
+                                meo_owners=meo_owners)
+
+
+def render(stage, closure=None):
+    """Draw the maps and write the report. ``closure=None`` renders every Memory."""
+    outdir, workdir = stage["outdir"], stage["workdir"]
+    memories = {row_id[4:]: record for row_id, record in stage.sel.keep(closure)}
+
+    render_maps(memories, outdir, stage["tile_server"])
 
     reports_root = os.path.dirname(os.path.abspath(outdir))
     run = report_ui.run_id(reports_root)
     report_ui.write_selection_stub(reports_root, run)       # shared by every report of the run
-    report, linked, located = generate_report(all_memories, outdir, keychain_available,
-                                              userids=userids, tz_label=tz_label,
-                                              src_root=src_root, manifest=manifest, run_id=run,
-                                              keychain_note=kc["detail"], meo_owners=meo_owners)
+    report, linked, located = generate_report(memories, outdir, stage["keychain_available"],
+                                              userids=stage["userids"], tz_label=stage["tz_label"],
+                                              src_root=stage["src_root"],
+                                              manifest=stage["manifest"], run_id=run,
+                                              keychain_note=stage["keychain_note"],
+                                              meo_owners=stage["meo_owners"])
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 
     logger.info(f"Memories report: {os.path.abspath(report)}")
-    logger.info(f"  {len(all_memories)} memories, {linked} with media, {located} geolocated")
+    if closure is None:
+        logger.info(f"  {len(memories)} memories, {linked} with media, {located} geolocated")
+    else:
+        logger.info(f"  {len(memories)} of {len(stage.model)} memories in this extract, "
+                    f"{linked} with media, {located} geolocated")
     return report
+
+
+def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
+         tile_server=""):
+    """Build a Memories media report: :func:`index` then :func:`render`.
+
+    See :func:`index` for the arguments. A partial run calls the two halves separately, so the closure
+    is decided before the maps are drawn and the report written — though unlike the other reports the
+    media recovery itself is on the index side; :func:`index` says why.
+    """
+    stage = index(app_or_root, keychain=keychain, outdir=outdir, padding=padding, tz=tz,
+                  src_root=src_root, tile_server=tile_server)
+    return render(stage)
 
 
 if __name__ == "__main__":
