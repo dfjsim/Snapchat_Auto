@@ -180,55 +180,75 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
     if not items:
         return
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    # source provenance block (extraction ZIP + keychain/keystore) shown at the top of the index
-    def _src_row(label, path):
-        val = _esc(path) if path else '<span class="none">(none provided)</span>'
-        return f'<div class="srow"><span class="lbl">{label}</span><span class="val">{val}</span></div>'
-    # The hashes of what the run actually read, on the face of the report rather than only in
-    # sources.json — a partial report built later re-checks them and says whether they still match.
+    # What the run read, and its hashes, on the face of the report rather than only in sources.json —
+    # a partial report built later re-checks them and says whether they still match.
+    #
+    # One collapsed row per artifact, because this block is not what the page is for. Spelled out, ten
+    # artifacts with a path, a size, an MD5, a SHA-256 and two sidecar lines each pushed the report
+    # links — the reason anyone opens this page — below the fold. The row states what the artifact is
+    # and how big it is; opening it shows the rest. <details> rather than script: a file:// page with
+    # no JS cannot get this wrong.
     fp = source_fingerprint.read_sources(os.path.join(root_dir, reports_subdir))
+
+    def _hash_lines(record):
+        out = [f'<div class="sk">path</div><div class="sv mono">{_esc(record.get("path"))}</div>']
+        for field in ("md5", "sha256"):
+            if record.get(field):
+                out.append(f'<div class="sk">{field.upper().replace("SHA256", "SHA-256")}</div>'
+                           f'<div class="sv mono">{_esc(record[field])}</div>')
+        for suffix, side in sorted((record.get("sidecars") or {}).items()):
+            out.append(f'<div class="sk">{_esc(suffix)}</div><div class="sv mono">'
+                       f'{side.get("bytes", 0):,} bytes &middot; SHA-256 '
+                       f'{_esc(side.get("sha256"))}</div>')
+        return '<div class="sgrid">' + "".join(out) + "</div>"
+
+    def _artifact_row(label, record, note=""):
+        if not record.get("present"):
+            why = record.get("why") or note or "not located"
+            return (f'<div class="arow none"><span class="an">{_esc(label)}</span>'
+                    f'<span class="ab">not in this extraction ({_esc(why)})</span></div>')
+        size = f'{record.get("bytes", 0):,} bytes'
+        sidecars = record.get("sidecars") or {}
+        extra = f' + {", ".join(sorted(sidecars))}' if sidecars else ""
+        return (f'<details class="arow"><summary><span class="an">{_esc(label)}</span>'
+                f'<span class="ab">{size}{extra}</span></summary>{_hash_lines(record)}</details>')
+
     artifact_rows = ""
     if fp and fp.get("artifacts"):
-        rows = []
-        for role, record in sorted(fp["artifacts"].items()):
-            label = record.get("label") or role
-            if not record.get("present"):
-                why = record.get("why") or "not located"
-                rows.append(f'<div class="srow"><span class="lbl">{_esc(label)}</span>'
-                            f'<span class="val none">not in this extraction ({_esc(why)})</span></div>')
-                continue
-            rows.append(
-                f'<div class="srow"><span class="lbl">{_esc(label)}</span><span class="val">'
-                f'{_esc(record.get("path"))}<br>{record.get("bytes", 0):,} bytes'
-                f'<br>MD5 {_esc(record.get("md5"))}<br>SHA-256 {_esc(record.get("sha256"))}'
-                + "".join(
-                    f'<br><b>{_esc(suffix)}</b> {side.get("bytes", 0):,} bytes '
-                    f'&middot; SHA-256 {_esc(side.get("sha256"))}'
-                    for suffix, side in sorted((record.get("sidecars") or {}).items()))
-                + '</span></div>')
+        rows = [_artifact_row(record.get("label") or role, record)
+                for role, record in sorted(fp["artifacts"].items())]
         z = fp.get("zip") or {}
-        if z.get("present"):
-            zip_hashes = (f'<br>MD5 {_esc(z.get("md5"))}<br>SHA-256 {_esc(z.get("sha256"))}'
-                          if z.get("hashed") else
-                          '<br><span class="none">not hashed &mdash; run with --hash-zip yes to '
-                          'record it</span>')
-            rows.append(f'<div class="srow"><span class="lbl">extraction ZIP</span>'
-                        f'<span class="val">{z.get("bytes", 0):,} bytes{zip_hashes}</span></div>')
+        if z.get("path"):
+            rows.append(_artifact_row(
+                "extraction ZIP", z,
+                note="not recorded") if z.get("present") else "")
+            if z.get("present") and not z.get("hashed"):
+                rows.append('<div class="snote">The extraction ZIP was not hashed &mdash; run with '
+                            '<b>--hash-zip yes</b> to record its MD5 and SHA-256. Tens of GB is a long '
+                            'read, and it is the per-artifact hashes above that bind what these '
+                            'reports contain.</div>')
         artifact_rows = (
-            '<div class="snote">The databases, plists and keychain this run read &mdash; what decides '
-            'what every report here contains. Cached media files are not listed: each one carries its '
-            'own MD5 and SHA-256 in the cache reports. A database is hashed together with its '
-            '<b>-wal</b>/<b>-shm</b>, because each one is read twice, with the log applied and '
-            'without.</div>'
-            + "".join(rows)
-            + f'<div class="srow"><span class="lbl">Tool version</span>'
-              f'<span class="val">{_esc(fp.get("tool_version"))}</span></div>'
-              f'<div class="srow"><span class="lbl">Source digest</span>'
-              f'<span class="val">{_esc(fp.get("digest"))}</span></div>')
-    sources = (f'<div class="sources"><div class="stitle">Sources</div>'
+            "".join(r for r in rows if r)
+            + f'<div class="arow"><span class="an">Tool version</span>'
+              f'<span class="ab mono">{_esc(fp.get("tool_version"))}</span></div>'
+              f'<div class="arow"><span class="an">Source digest</span>'
+              f'<span class="ab mono">{_esc(fp.get("digest"))}</span></div>'
+            + '<div class="snote">The databases, plists and keychain this run read &mdash; what decides '
+              'what every report here contains. Open a row for its path and hashes. Cached media files '
+              'are not listed: each one carries its own MD5 and SHA-256 in the cache reports. A '
+              'database is hashed together with its <b>-wal</b>, because each one is read twice, with '
+              'the log applied and without.</div>')
+
+    def _src_row(label, path):
+        val = (f'<span class="ab mono">{_esc(path)}</span>' if path else
+               '<span class="ab none">(none provided)</span>')
+        return f'<div class="arow"><span class="an">{label}</span>{val}</div>'
+
+    sources = (f'<details class="sources"><summary class="stitle">Sources &mdash; what this run read, '
+               f'and its hashes</summary><div class="sbody">'
                f'{_src_row("Extraction", zip_path)}'
                f'{_src_row("Keychain / keystore", keychain_path)}'
-               f'{artifact_rows}</div>')
+               f'{artifact_rows}</div></details>')
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     provenance = (partial_report.provenance_html(closure, prov, open_by_default=True)
                   if closure is not None else "")
@@ -237,24 +257,35 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
  header{{background:#2d2d71;color:#fff;padding:18px 26px}} header h1{{margin:0;font-size:20px}}
  header .sub{{opacity:.85;font-size:13px;margin-top:4px}}
- .sources{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin:22px 26px 0;max-width:760px}}
- .sources .stitle{{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#2d2d71;font-weight:700;margin-bottom:6px}}
- .srow{{display:grid;grid-template-columns:150px 1fr;gap:8px;font-size:13px;padding:2px 0}}
- .srow .lbl{{color:#666;font-weight:600}}
- .srow .val{{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#33367a;overflow-wrap:anywhere}}
- .srow .none{{color:#999;font-style:italic;font-family:-apple-system,Segoe UI,Roboto,sans-serif}}
- .sources .snote{{font-size:12px;color:#666;margin:8px 0 6px;line-height:1.5}}
- .sources{{max-width:920px}}
- ul{{list-style:none;padding:16px 26px 22px;max-width:760px}}
- li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
+ ul{{list-style:none;padding:18px 26px 8px;max-width:920px;margin:0}}
+ li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin-bottom:10px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
+ /* The sources block sits BELOW the report links and starts closed. It is provenance, not
+    navigation: spelled out it ran to a screen and a half of hashes and pushed the links -- the
+    reason anyone opens this page -- out of sight. */
+ .sources{{background:#fff;border:1px solid #ddd;border-radius:8px;margin:8px 26px 24px;max-width:920px}}
+ .sources>summary{{cursor:pointer;padding:11px 18px;font-size:12px;text-transform:uppercase;
+   letter-spacing:.04em;color:#2d2d71;font-weight:700}}
+ .sources .sbody{{padding:0 18px 12px}}
+ .arow{{display:flex;gap:12px;align-items:baseline;font-size:13px;padding:4px 0;
+   border-top:1px solid #f0f0f5}}
+ details.arow{{display:block}} details.arow>summary{{cursor:pointer;display:flex;gap:12px;
+   align-items:baseline;padding:4px 0}}
+ .arow .an{{color:#333;font-weight:600;min-width:230px}}
+ .arow .ab{{color:#666;font-size:12px;overflow-wrap:anywhere}}
+ .arow.none .ab,.arow .ab.none{{color:#999;font-style:italic}}
+ .mono{{font-family:ui-monospace,Consolas,monospace;color:#33367a}}
+ .sgrid{{display:grid;grid-template-columns:90px 1fr;gap:2px 10px;font-size:11.5px;
+   padding:2px 0 8px 12px}}
+ .sgrid .sk{{color:#888}} .sgrid .sv{{overflow-wrap:anywhere}}
+ .sources .snote{{font-size:12px;color:#666;margin:10px 0 2px;line-height:1.5}}
 {partial_css}
 </style></head><body>
 <header><h1>Snapchat Auto v{get_version()} &mdash; Report index</h1><div class="sub">Generated {generated}</div></header>
 {banner}{provenance}
-{sources}
 <ul>{''.join(items)}</ul>
+{sources}
 </body></html>"""
     with open(os.path.join(root_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(html)

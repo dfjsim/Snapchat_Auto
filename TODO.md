@@ -47,6 +47,24 @@ corpus these are the correct answers, not defects.
   report shows it; the legacy report still shows only the attachment.
 
 # Snapchat Memories report
+- **One index row per group, not per Memory**, expandable to show the members, with a single Details
+  link to the group's sub-page. Requested, and right: today a group of three Memories is three rows
+  each linking to the same sub-page, which reads as three findings.
+  What makes this more than a loop change — and the reason it is not folded into a UI pass:
+  - **Cross-report links target a specific snap.** Both cache reports link to
+    `Memories_report.html#mem-<ZSNAPID>`, and `SCV.goTo` resolves an anchor through the row index. With
+    one row per group anchored on the lead snap, every link naming a non-lead member lands on nothing.
+    The virtual table needs an **alias map** (member anchor -> group row) in `report_ui.VTABLE_JS`, which
+    is shared with four other reports.
+  - **Selection semantics.** The store holds `mem-<ZSNAPID>` per Memory, which is what a partial report
+    resolves and must not change. A group row's checkbox therefore has to tick every member
+    (`setMany`), read as mixed when only some are ticked, and the expanded row needs a checkbox per
+    member so part of a group can still be selected.
+  - **Every per-member column, filter and sort key has to aggregate**: user, MEO, thumbnail, media
+    state and the `-wal` badges are per-row today, and "any member matches" is the only honest rule for
+    a filter. The search text must carry every member's ids or searching a member's ZSNAPID stops
+    finding it.
+  Worth doing, with the corpus byte-diff around it, as its own change.
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
   - The **selection and report half is done** — `--selection` builds a partial report holding only the
     ticked Memories (and whatever related items are asked for), see docs/report_partial.md. The PDF
