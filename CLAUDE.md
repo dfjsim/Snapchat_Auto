@@ -47,6 +47,11 @@ Memories / My Eyes Only.
 - Headless runs: `Snapchat_Auto.py --zip <file> [--keychain …] [--workdir …] [--run-name …]`
   runs the whole pipeline with no GUI and no pause, which is how the tool is scripted over
   several extractions. `run()` is the shared entry point for both the GUI and the CLI.
+- Partial reports: adding `--selection <file>` to a normal run renders **only** the rows an examiner
+  ticked plus the related items they asked for, into `Reports_partial_<stamp>/` — the full `Reports/`
+  is never touched. Same pipeline, in two halves: every report's `index()`, then one closure, then
+  every report's `render()`. `scripts/partial_report.py` owns the closure and what the pages say about
+  it; see [report_partial.md](docs/report_partial.md).
 
 ## Handling forensic data — read this first
 

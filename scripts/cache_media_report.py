@@ -1785,7 +1785,7 @@ def collect_documents(app, ms_fmt, src_root=None, manifest=None):
 
 # --------------------------------------------------------------------------- entry
 
-def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, links_dir=None):
     """Work out which cached files exist and what each links to, without publishing or rendering.
 
     The walk that hashes every file under ``Library/Caches`` happens here, because the closure cannot
@@ -1820,9 +1820,12 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     claims_by_uuid, claims_by_triple, _keys = load_claims(app)
     sc_by_size = index_sccontent_by_size(app)
     mem_index = load_memory_index(app)
-    memory_pages = load_memory_pages(rdir)
-    memory_packs = load_memory_packs(rdir)
-    chat_by_key, chat_by_message = load_chat_links(rdir)
+    # `links_dir` is where the manifests the earlier reports write are read from; see the same
+    # parameter on cache_controller_report.index for why a partial run points it elsewhere.
+    ldir = links_dir or rdir
+    memory_pages = load_memory_pages(ldir)
+    memory_packs = load_memory_packs(ldir)
+    chat_by_key, chat_by_message = load_chat_links(ldir)
     for entry in entries:
         entry["links"] = attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size,
                                    mem_index, memory_pages, chat_by_key, chat_by_message,

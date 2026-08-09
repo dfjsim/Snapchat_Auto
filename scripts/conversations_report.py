@@ -1808,11 +1808,15 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
                               participant.get("anchor") or contact_anchor(participant))
         for msg in conv.get("messages") or ():
             msg_row = f'{conv_row}|{msg["anchor"]}'
-            sel_msg.add(msg_row, msg, smid=msg.get("smid"))
+            # Both alternates are qualified with the conversation, for the same reason the row id is:
+            # a server message id is a per-conversation ordinal and a timestamp is not unique across
+            # chats, so an unqualified key would put one selection on a message in every conversation.
+            sel_msg.add(msg_row, msg,
+                        smid=f'{conv["id"]}|{msg["smid"]}' if msg.get("smid") else "")
             if msg.get("created_unix") and msg.get("sender"):
                 # what finds a message whose anchor was only its position in the conversation
-                sel_msg.keys[("ts_sender",
-                              f'{msg["created_unix"]}|{str(msg["sender"]).lower()}')].add(msg_row)
+                sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
+                                           f'|{str(msg["sender"]).lower()}')].add(msg_row)
             sel_msg.contains(msg_row, conv_row)
             sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
             for att in msg.get("atts") or ():

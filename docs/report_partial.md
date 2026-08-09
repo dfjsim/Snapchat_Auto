@@ -17,6 +17,12 @@ sections appear here as the feature is built.
   a full report is byte-identical to one built before any of this existed.
 * [What must not be left behind](#what-must-not-be-left-behind) — pruning media the filter orphaned.
 * [Memory groups rendered in part](#memory-groups-rendered-in-part) — stating a group's real size.
+* [Running one](#running-one) — the CLI, the GUI, the exit codes, and where the mismatch questions
+  get asked.
+* [The index pass](#the-index-pass-and-the-cross-report-manifests) — why every report is indexed
+  before any of them renders, and where the cross-report manifests come from.
+* [What a partial run leaves out](#what-a-partial-run-leaves-out-beyond-the-unselected-rows) beyond
+  the unselected rows.
 
 Related: [report_ui.md](report_ui.md) (how rows are selected in the browser, and where a `file://`
 page can keep that), [cross_report_linking.md](cross_report_linking.md) (the anchors a selection names
@@ -316,16 +322,119 @@ columns and the encryption columns describe nobody who is absent.
 
 ---
 
-## Still to wire: the index pass and the cross-report manifests
+## Running one
 
-One ordering problem is left for the orchestrator, and it is written down here so it is not rediscovered
-later. Several `index()` steps read manifests that an **earlier report's `render()`** writes:
-`cache_media_report.index` needs `memory_pages.json`, `cache_links.json` and `memory_packs.json`;
-`cache_controller_report.index` needs `media_by_cache_key.json`. A strict index-all-then-render-all pass
-would run those reads before anything had written the files.
+A partial report is a **normal run with a selection**, not a separate mode of the tool. Same
+extraction, same parsing, same generators; only what gets rendered differs.
 
-The answer is to read them from the **full report folder the selection was made in** — same evidence,
-same build, and it is where the ticked rows live — under the same gate as every other reuse path
-(`source_fingerprint.reuse_allowed`). Interleaving index and render per report is not an option: it is
+```
+Snapchat_Auto --zip <extraction.zip> [--keychain <file>] --workdir <dir> [--run-name <name>]
+              --selection <selection.json>
+              [--relations recommended|minimal|all|<a,b,-c>] [--case-ref <text>]
+              [--dry-run yes] [--unresolved refuse|drop]
+              [--sources-mismatch refuse|proceed] [--version-mismatch refuse|resolve]
+              [--no-reuse yes] [--max-rows <n>] [--links-dir <dir>]
+```
+
+It writes `Reports_partial_<stamp>/` **inside the run folder**, with its own `index.html`,
+`partial_manifest.json` and provenance, so the folder can be handed over as it stands. The full
+`Reports/` is never touched. Pointing a partial run at the same `--workdir`/`--run-name` as the full one
+is the normal case and the fast one: `ExtractedData/` and `SnapFixedVideos/` are already there, so
+nothing is unzipped again.
+
+`--dry-run yes` does everything up to the closure — verifies the evidence, indexes every report,
+resolves the selection, expands the relations — prints what the extract *would* hold, and writes
+nothing.
+
+**Exit codes** are distinct, because a script driving several extractions needs to tell these apart:
+
+| code | meaning |
+|---|---|
+| 0 | built (or dry-run completed) |
+| 2 | bad usage — an unknown option, a missing value, an unknown relation name |
+| 3 | this is not the evidence, or not the build, the selection was made with |
+| 4 | the selection could not be resolved: a ticked row this run has no match for, or an ambiguous one |
+| 1 | anything else |
+
+In the **GUI** the same thing is one optional field: *Selection file*, a **Related items…** dialog
+(one checkbox per relation with its basis, the transitive and legacy switches, and Minimal /
+Recommended / Everything), and a *Case / exhibit reference*. Choosing a file reports what it holds and
+**offers back the paths it was made from** — a recorded path that no longer exists is shown as a hint
+rather than filled in, because a pre-filled path that does not resolve is worse than an empty field.
+The relation policy is remembered between runs; the selection file and the case reference are not, since
+both belong to one case and carrying a case reference onto the next one is a real error.
+
+The GUI converts its dialog into the CLI's own `--relations` spec and parses it back with the same
+code (`partial_report.parse_relations` / `parse_policy`). That round trip is a test: two front ends that
+can drift are two different tools.
+
+### Where the mismatch questions get asked
+
+`partial_report.check_evidence` runs inside the pipeline, immediately after the run records its source
+fingerprints and **before any report is built**: the tool version first (a difference there invalidates
+reuse whatever the hashes say), then every artifact. It refuses unless the options say to proceed, and
+either way both verdicts land in the provenance — and on a mismatch, in the banner of every page.
+
+The GUI asks the same question *twice*, deliberately. Before starting it compares the selection's
+fingerprints against the **full report folder's** `sources.json`, which answers "does this selection
+belong to that run" in a few milliseconds — so the examiner settles it before waiting through an
+extraction rather than after. Whether the ZIP about to be processed is that same evidence can only be
+answered once it is unpacked, and the pipeline answers that too.
+
+## The index pass, and the cross-report manifests
+
+In partial mode the parser runs the reports in two halves rather than one (`ParseSnapchat_iOS`):
+
+```
+_index_stages()   every report's index() -- the rows each would render, and the edges it derived
+resolve()         every ticked id -> a row of this run
+expand()          + the related rows the examiner asked for -> one Closure
+_render_partial() every report's render(), in the order the manifests depend on
+write_manifest()  partial_manifest.json
+```
+
+A report whose `index()` fails is left out with one logged line, exactly as a failing report is in a
+full run — and its ticked rows then come back from `resolve()` as *not produced by this run*, which
+refuses the build. That is the honest outcome: an extract quietly missing evidence is worse than one
+that will not build.
+
+**The one ordering problem, and its answer.** Several `index()` steps read manifests that an *earlier
+report's* `render()` writes: `cache_media_report.index` needs `memory_pages.json`, `cache_links.json`
+and `memory_packs.json`; `cache_controller_report.index` needs `media_by_cache_key.json`. In an
+index-all-then-render-all pass nothing has written them yet. So both take a **`links_dir`**, and a
+partial run points it at the full report folder the selection was made in — same evidence, same build,
+already proved by the gate above. Interleaving index and render per report is not an option: that is
 exactly what makes a backward relation (a ticked cache entry pulling in its Memory) impossible, which is
 the whole reason the index pass exists.
+
+Reading a full run's manifests only works if the page names they contain are still right in the extract,
+and one of them is not free: a Memory group's detail page is named after a hash of its members' snap
+ids. Rendered from part of a group that hash changes, so every `pages/<key>.html` in the full run's
+manifest would point at nothing. `assign_groups` therefore takes the same `group_of` map the page uses
+to state the group's real size, and derives the key from **the whole group** — so the page name is a
+property of the group, not of which members happened to be rendered. Without a `group_of` (a full run)
+the group *is* its members and the key is unchanged.
+
+## What a partial run leaves out beyond the unselected rows
+
+Three things are removed or skipped because they are whole-database or whole-device by construction, and
+each is *stated* in the provenance rather than silently missing:
+
+* **The two legacy reports** (`Communications_legacy`, `LocalMemories_legacy`). Neither has row
+  selection, so both are all-or-nothing; the legacy Memories report decrypts every Memory on the
+  device. Left out by default, `legacy_reports` opts in. The legacy folder is also the parser's staging
+  area for chat attachments, so it is removed *after* the Conversations report has linked out what it
+  needs — those are hard links, so the bytes survive in `Conversations/media/`.
+* **`Communications_legacy/cache_links.json`**, which names every message of every conversation.
+* **`CacheController/sqlite_views/`** — the staged copies of `cache_controller.db`, with its write-ahead
+  log applied and without. In a full report those are transparency: any figure can be read back from the
+  database it came from. In an extract of selected rows they are the entire database, every row of it.
+
+## Still to build
+
+The two **reuse caches** from the source-fingerprint design are not implemented: the `Library/Caches`
+index cache and hard-linking already-decrypted Memory media out of the full run. `reuse_allowed()`
+gates them and the provenance reports what it decided, but today a partial run re-derives both. Neither
+is a correctness gap — the `ExtractedData/` and `SnapFixedVideos/` short-circuits already make a partial
+run into the same run folder skip the expensive unzip — and both are worth having, because the
+`Library/Caches` walk and the Memory decryption are what a partial run cannot otherwise defer.

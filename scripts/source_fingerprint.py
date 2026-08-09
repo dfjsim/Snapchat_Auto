@@ -424,6 +424,11 @@ _STATUS_TEXT = {MATCH: "same", DIFFERS: "DIFFERS", MISSING_NOW: "MISSING NOW",
                 NEW_NOW: "NEW NOW", UNKNOWN: "not checked"}
 
 
+def status_text(status):
+    """One verdict status as a short label, for a console line or a table cell."""
+    return _STATUS_TEXT.get(status, status)
+
+
 def verdict_text(verdict):
     """The verdict as plain lines, for the log and the run's own record."""
     out = [verdict.summary]

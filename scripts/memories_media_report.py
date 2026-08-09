@@ -2296,7 +2296,7 @@ _BASE_CSS = """
 
 # --------------------------------------------------------------------------- grouping
 
-def assign_groups(memories):
+def assign_groups(memories, group_of=None):
     """Group memories by two merge relations, via union-find:
 
     1. shared ``ZMEDIAID`` (the same media object), and
@@ -2306,6 +2306,13 @@ def assign_groups(memories):
 
     Returns ``(groups, snap_to_key)``: ``groups`` is ``[(key, [members...])]`` ordered by earliest
     creation, ``snap_to_key`` maps each ``snap_id`` to its group key (a short, stable hash).
+
+    ``group_of`` maps a snap id to every snap id in its group **in the whole extraction**, and when it
+    is given the key is derived from that rather than from the members present. A partial run needs
+    that: the key names the detail page, and the cross-report manifests that link to
+    ``pages/<key>.html`` were written by the full run. Keyed on the members present, a group rendered
+    in part would land on a different page name and every one of those links would break. Omit it (a
+    full run) and the group *is* its members, so the key is unchanged.
     """
     parent = {}
 
@@ -2357,7 +2364,8 @@ def assign_groups(memories):
     groups, snap_to_key = [], {}
     for members in comps.values():
         members.sort(key=lambda m: (m["created_sort"], m["snap_id"]))
-        key = hashlib.md5("|".join(sorted(x["snap_id"] for x in members)).encode()).hexdigest()[:12]
+        named = (group_of or {}).get(members[0]["snap_id"]) or [x["snap_id"] for x in members]
+        key = hashlib.md5("|".join(sorted(named)).encode()).hexdigest()[:12]
         groups.append((key, members))
         for m in members:
             snap_to_key[m["snap_id"]] = key
@@ -2822,7 +2830,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     snap_tcols = _union_cols(memories.values(), "times")
     entry_tcols = _union_cols(memories.values(), "entry_times")
 
-    groups, snap_to_key = assign_groups(memories)
+    groups, snap_to_key = assign_groups(memories, group_of)
     pages_dir = os.path.join(outdir, "pages")
     for key, members in groups:
         render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
