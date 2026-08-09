@@ -478,9 +478,16 @@ var SCSel=(function(){
    done(total(),null);};
   r.readAsText(file);}
  restash();
- window.addEventListener('beforeunload',function(ev){
-  if(!dirty)return;
-  ev.preventDefault();ev.returnValue='';});
+ /* No beforeunload guard. There was one, and it was wrong twice over.
+    It claimed "changes you made may not be saved" when every tick is written to this tab's
+    localStorage the moment it is made, so closing the tab loses nothing it warned about. And `dirty`
+    is restored from that same storage, so once the examiner had ticked anything *every* report tab they
+    opened afterwards prompted on close -- including tabs they had not touched, and tabs opened after
+    they had already saved the file elsewhere (each file:// tab has its own storage, so a save in one
+    cannot clear the flag in another). A browser will not show custom text in that dialog either, so it
+    could not even explain itself.
+    What the examiner does still need is a reminder to export the selection to a file, and that is the
+    persistent "unsaved -- use Save selections" note in the toolbar, which does not hijack tab close. */
  /* One delegated handler for every checkbox in the document, virtual rows included. The key record
     is read from the row itself (`data-i` on the .vr) rather than emitted into every row's markup —
     at 100 000 rows that attribute would cost more than the selection is worth. Hand-written

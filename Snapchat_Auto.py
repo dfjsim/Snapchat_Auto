@@ -320,11 +320,11 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
             if partial is not None:
                 reports_subdir = os.path.basename(partial_report.partial_dir("."))
                 if not partial.links_dir:
-                    # where the cross-report manifests are read from: this run folder's own full
-                    # reports, which is where the selection was made unless told otherwise
+                    # last resort: this run folder's own full reports. True when a partial run is
+                    # pointed at the same --run-name as the full one, which is the fast path.
                     partial.links_dir = os.path.abspath("Reports")
                 logger.info(f"Partial report: {os.path.abspath(reports_subdir)}")
-                logger.info(f"  cross-report links resolved against {partial.links_dir}")
+                partial_report.check_links_dir(partial.links_dir)
             ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
                                    padding=padding, tz=tz, report_dir="./" + reports_subdir,
                                    tile_server=tile_server,
@@ -519,8 +519,16 @@ def _partial_request(values):
     logger.info(f"Selection {os.path.basename(path)}: "
                 + (", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()) if n)
                    or "nothing ticked"))
-    return partial_report.Request(payload, options, prov,
-                                  links_dir=(values.get("links-dir") or "").strip(),
+    # Where the cross-report manifests come from. Derived from the selection file's own location
+    # unless named: the GUI makes a new run folder for every run, so this run's own Reports/ is not
+    # the folder the selection was made in and guessing it loses every cross-report link.
+    links_dir = (values.get("links-dir") or "").strip()
+    if not links_dir:
+        links_dir = partial_report.find_links_dir(path, values.get("workdir", ""))
+        if links_dir:
+            logger.info(f"Cross-report links will be resolved against {links_dir} "
+                        f"(the report folder this selection was saved from)")
+    return partial_report.Request(payload, options, prov, links_dir=links_dir,
                                   dry_run=_yes(values.get("dry-run"))), None
 
 
@@ -1163,12 +1171,21 @@ def main(args):
             sg.popup_error(error, keep_on_top=True)
             return
 
-    run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
-        os_mode="ios" if values[0] else "android",
-        padding=PADDING_MAP.get(values.get("padding"), "both"),
-        tz=_map_timezone(values.get("timezone")),
-        tile_server=values.get("tile_server", "").strip(),
-        pause=True, partial=partial)
+    try:
+        run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
+            os_mode="ios" if values[0] else "android",
+            padding=PADDING_MAP.get(values.get("padding"), "both"),
+            tz=_map_timezone(values.get("timezone")),
+            tile_server=values.get("tile_server", "").strip(),
+            pause=True, partial=partial)
+    except (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection, LookupError) as error:
+        # A refused partial run reaches here. Without this it left a traceback on the console and
+        # **nothing in the log**, so the examiner saw a run that simply stopped: the reason has to be
+        # in the log next to the run it belongs to, and in front of the person who asked for it.
+        logger.error(str(error))
+        sg.popup_error(f"The partial report was not built.\n\n{error}",
+                       title="Partial report refused", keep_on_top=True)
+        os.system("pause")
 
 
 if __name__ == '__main__':

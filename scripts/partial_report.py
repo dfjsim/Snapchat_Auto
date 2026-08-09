@@ -384,48 +384,62 @@ class Resolution:
                 "ambiguous": self.ambiguous, "notes": self.notes}
 
 
-def _candidates(index, kind, ticked_id, keys):
-    """Every (row id, how) this ticked id could mean, in priority order."""
-    out = []
+def _lookups(kind, name, keys):
+    """The ``((key name, value), how)`` pairs one alternate is looked up by. Usually one; ``raw`` many."""
+    if name == "raw":
+        # a Library/Caches row's *raw* bytes -- the one alternate that is a list, because one row can
+        # be several copies of the same recovered content
+        return [(("raw", str(value)),
+                 f"the raw SHA-256 of one of its copies ({str(value)[:12]}...)")
+                for value in (keys.get("raw") or []) if value]
+    if name == "smid":
+        # A server message id is a **per-conversation ordinal**: message 3 exists in every chat. So
+        # this alternate is only ever looked up together with the conversation, exactly as the row id
+        # itself is qualified. Keying it on the bare number put the same selection on a message in
+        # every conversation -- the collision that qualifying the ids fixed, through the back door.
+        conv, smid = keys.get("conv"), keys.get("smid")
+        if conv and smid:
+            return [(("smid", f"{conv}|{smid}"), "its conversation and server message id")]
+        return []
+    if name == "ts_sender":
+        conv, ts, sender = keys.get("conv"), keys.get("ts"), keys.get("sender")
+        if conv and ts and sender:
+            return [(("ts_sender", f"{conv}|{ts}|{sender}"), "its conversation, time and sender")]
+        return []
+    value = keys.get(name)
+    if not value:
+        return []
+    return [((name, str(value)), f"its {name} ({str(value)[:24]})")]
+
+
+def _resolve_one(index, kind, ticked_id, keys):
+    """``(row id, how, weak)`` for one ticked id. ``row id`` is None when nothing identifies one row.
+
+    Two rules, and the first is the one that matters:
+
+    **An exact id match is the answer.** The alternates exist only to find a row whose *id moved*
+    between builds; consulting them when the id is present can only invent doubt. Collecting every
+    candidate and then refusing on more than one made a grouped Memory unresolvable — ``ZMEDIAID``
+    identifies a media object that several snap rows share by design, which is the very basis of Memory
+    grouping, so it matched two rows and the build refused a selection that was never ambiguous.
+
+    **An alternate that matches several rows is not discriminating, and is not ambiguity.** It is
+    skipped in favour of the next one, and reported in ``weak`` so a genuine dead end can say what it
+    tried. Only when *no* alternate identifies exactly one row is the id ambiguous — which is the case
+    that must still refuse, because a Library/Caches row is identified by its recovered content and
+    rows are merged by that content, so the row ticked and the row offered can be different bytes.
+    """
     if ticked_id in index.rows:
-        out.append((ticked_id, "its own id"))
+        return ticked_id, "its own id", []
+    weak = []
     for name in RESOLVE_ORDER.get(kind, ()):
-        if name == "raw":
-            # a Library/Caches row's *raw* bytes -- the one alternate that is a list, because one row
-            # can be several copies of the same recovered content
-            for value in (keys.get("raw") or []):
-                for hit in sorted(index.keys.get(("raw", str(value)), ())):
-                    out.append((hit, f"the raw SHA-256 of one of its copies ({str(value)[:12]}...)"))
-            continue
-        if name == "smid":
-            # A server message id is a **per-conversation ordinal**: message 3 exists in every chat.
-            # So this alternate is only ever looked up together with the conversation, exactly as the
-            # row id itself is qualified. Keying it on the bare number put the same selection on a
-            # message in every conversation -- the collision that qualifying the ids fixed, coming
-            # back in through the back door.
-            conv, smid = keys.get("conv"), keys.get("smid")
-            if conv and smid:
-                for hit in sorted(index.keys.get(("smid", f"{conv}|{smid}"), ())):
-                    out.append((hit, "its conversation and server message id"))
-            continue
-        if name == "ts_sender":
-            conv, ts, sender = keys.get("conv"), keys.get("ts"), keys.get("sender")
-            if conv and ts and sender:
-                for hit in sorted(index.keys.get(("ts_sender", f"{conv}|{ts}|{sender}"), ())):
-                    out.append((hit, "its conversation, time and sender"))
-            continue
-        value = keys.get(name)
-        if not value:
-            continue
-        for hit in sorted(index.keys.get((name, str(value)), ())):
-            out.append((hit, f"its {name} ({str(value)[:24]})"))
-    # de-duplicate, keeping the first (highest-priority) explanation for each row
-    seen, unique = set(), []
-    for row_id, how in out:
-        if row_id not in seen:
-            seen.add(row_id)
-            unique.append((row_id, how))
-    return unique
+        for key, how in _lookups(kind, name, keys):
+            hits = sorted(index.keys.get(key, ()))
+            if len(hits) == 1:
+                return hits[0], how, weak
+            if len(hits) > 1:
+                weak.append({"by": how, "matches": hits})
+    return None, "", weak
 
 
 def resolve(indexes, selection, *, unresolved="refuse"):
@@ -455,21 +469,22 @@ def resolve(indexes, selection, *, unresolved="refuse"):
         for ticked_id in sorted(ticked):
             keys = ticked[ticked_id]
             keys = keys if isinstance(keys, dict) else {}
-            found = _candidates(index, kind, ticked_id, keys)
-            if not found:
+            row_id, how, weak = _resolve_one(index, kind, ticked_id, keys)
+            if row_id is None and weak:
+                result.ambiguous.append(
+                    {"kind": kind, "id": ticked_id,
+                     "matches": sorted({m for entry in weak for m in entry["matches"]}),
+                     "tried": [entry["by"] for entry in weak],
+                     "why": ("this run has no row with that id, and none of the identifiers recorded "
+                             "with it names exactly one row. A Library/Caches row is identified by "
+                             "its recovered content and rows are merged by that content, so a build "
+                             "that decodes differently can split or merge them.")})
+                continue
+            if row_id is None:
                 result.unresolved.append(
                     {"kind": kind, "id": ticked_id,
                      "why": "no row of this run carries that id or any identifier recorded with it"})
                 continue
-            if len(found) > 1:
-                result.ambiguous.append(
-                    {"kind": kind, "id": ticked_id,
-                     "matches": [row_id for row_id, _how in found],
-                     "why": ("that id now matches several rows. A Library/Caches row is identified "
-                             "by its recovered content, and rows are merged by that content, so a "
-                             "build that decodes differently can split or merge them.")})
-                continue
-            row_id, how = found[0]
             result.seeds[kind].add(row_id)
             result.how[(kind, row_id)] = how
             if row_id != ticked_id:
@@ -1016,6 +1031,68 @@ def check_evidence(request, sources):
               "the mismatch is then recorded in the banner of every page and in "
               "partial_manifest.json.")
     return version, verdict
+
+
+#: The manifests one report writes and another reads. A partial run reads them from ``links_dir``
+#: (the full report folder), because its own reports have not written them yet — see
+#: docs/report_partial.md. Each is what a whole class of cross-report link rests on.
+LINK_MANIFESTS = (
+    ("Conversations/cache_links.json", "which cached file belongs to which chat message"),
+    ("Memories/memory_pages.json", "which detail page a Memory is on"),
+    ("Memories/media_by_cache_key.json", "the decrypted copy of an encrypted cached file"),
+    ("Memories/media_by_pack.json", "which Memory a caching-media pack belongs to"),
+    ("CacheMedia/by_cache_key.json", "the Library/Caches copies of a cache entry"),
+)
+
+
+def find_links_dir(selection_path, workdir=""):
+    """Where to read the cross-report manifests from, given where the selection file is.
+
+    The examiner's ``selection.json`` normally sits in the run folder it was saved from, or next to the
+    reports themselves, so its location is the best evidence of which full report folder this selection
+    belongs to. Guessing the *current* run folder is what fails: the GUI makes a new timestamped run
+    folder for every run, so a partial run's own ``Reports/`` does not exist and every cross-report link
+    silently degrades to nothing.
+
+    Returns the first candidate that looks like a report folder, or "" when none does.
+    """
+    here = os.path.dirname(os.path.abspath(selection_path)) if selection_path else ""
+    candidates = []
+    for base in (here, os.path.dirname(here) if here else "", workdir):
+        if not base:
+            continue
+        candidates += [os.path.join(base, "Reports"), base]
+    for candidate in candidates:
+        if os.path.isfile(os.path.join(candidate, "run_id.txt")):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def check_links_dir(links_dir):
+    """Log what a partial run will and will not be able to link. Returns the manifests it found.
+
+    Worth a warning rather than silence: with none of these the extract still builds, and every
+    cross-report association simply is not there — which reads as "these rows link to nothing" rather
+    than "this run could not find the manifests".
+    """
+    found, missing = [], []
+    for rel, what in LINK_MANIFESTS:
+        (found if os.path.isfile(os.path.join(links_dir or "", *rel.split("/"))) else
+         missing).append((rel, what))
+    if not links_dir or not os.path.isdir(links_dir):
+        logger.warning(f"Partial report: no full report folder at {links_dir or '(none given)'}, so "
+                       f"no cross-report links can be resolved. Point --links-dir at the Reports "
+                       f"folder the selection was made in.")
+        return found
+    if missing:
+        logger.warning(f"Partial report: {len(missing)} of {len(LINK_MANIFESTS)} cross-report "
+                       f"manifest(s) are not in {links_dir}; those associations will be absent from "
+                       f"this extract rather than wrong:")
+        for rel, what in missing:
+            logger.warning(f"  missing {rel} — {what}")
+    else:
+        logger.info(f"Partial report: all {len(found)} cross-report manifest(s) found in {links_dir}")
+    return found
 
 
 class Request:
