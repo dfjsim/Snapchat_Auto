@@ -11,6 +11,12 @@ sections appear here as the feature is built.
 * [The selection file](#the-selection-file) — what the examiner saves, and how it gets back in.
 * [Source fingerprints and the version gate](#source-fingerprints-and-the-version-gate) — how a
   partial run establishes it is looking at the same evidence, read by the same build.
+* [What a partial report says about itself](#what-a-partial-report-says-about-itself) — the banner, the
+  "N of M" figures, the provenance block and `partial_manifest.json`.
+* [Links whose other end is not here](#links-whose-other-end-is-not-here) — `xref`, `narrow`, and why
+  a full report is byte-identical to one built before any of this existed.
+* [What must not be left behind](#what-must-not-be-left-behind) — pruning media the filter orphaned.
+* [Memory groups rendered in part](#memory-groups-rendered-in-part) — stating a group's real size.
 
 Related: [report_ui.md](report_ui.md) (how rows are selected in the browser, and where a `file://`
 page can keep that), [cross_report_linking.md](cross_report_linking.md) (the anchors a selection names
@@ -159,3 +165,167 @@ The version half is the important one: a newer Snapchat_Auto may extract more pa
 (`extract_zip.ios_files` grows), decrypt media an older build could not, or classify bytes
 differently. Inheriting the older output would hide exactly those improvements — which is why the
 comparison is exact, `+build.<N>` included, and why two builds of the same version count as different.
+
+---
+
+## What a partial report says about itself
+
+A subset of a report is only usable if the reader can tell that it *is* a subset, of what, and what was
+cut out. Four things carry that, and a partial run emits all four.
+
+**The banner** (`partial_report.banner_html`) sits under the header of **every** page, not only the
+index — including each conversation page and each Memory detail sub-page, because a page handed on by
+itself has to say what it is. It names the extract as partial, points at `partial_manifest.json`, and
+carries the examiner's case reference when one was given.
+
+It is also where the **mismatches** appear. If the examiner chose to proceed through a source or version
+mismatch (see above), that decision is on the face of every page — not only in a JSON file next to it.
+The same goes for the case where a selection cannot be checked at all: a file with no `sources` block
+says *"not possible to verify"*, never nothing.
+
+**The figures** (`figures_html`) are appended to each report's own `.sum` line rather than replacing it.
+The line already counts the rows that were rendered, which is the truth about the folder; what it cannot
+say on its own is how much of the extraction that is, and *a subset presented without its denominator
+reads as the whole*. So each report adds `3 of 412 conversation(s) in the extraction · 2 selected, 1
+pulled in by a relation`. A conversation page states its own denominator instead — how much of *that
+chat* is here — since that is the question a reader of one conversation has.
+
+Two rules follow, worth stating separately because both were bugs waiting to happen:
+
+* **No figure may describe rows that are not there.** `conversations_report._narrowed` recomputes every
+  message-derived count from the messages it kept (`n_messages`, `n_attachments`, `n_files`, the sender
+  and type tallies) and keeps the conversation's real size as `n_messages_full` for the "of M" figure. A
+  page listing four messages under a header saying 137 is worse than one that says nothing: the header
+  is what gets quoted.
+* **It returns a copy.** The model itself stays intact — the closure was decided from it, and the other
+  reports still read it.
+
+**The provenance block** (`provenance_html`) is a collapsed `<details>` on each report and expanded on
+`index.html`: the tool version, the selection's identity (name, SHA-256 as supplied, `selection_digest`,
+its `exported` stamp and schema), the source verification verdict with its per-artifact table, the
+per-report *selected / pulled in / total*, and every relation with a check or cross and its basis. The
+relations that were **not** followed are listed too — an omission the reader cannot see is one they will
+not account for. So is the fact that the legacy reports have no row selection and were left out whole.
+
+**`partial_manifest.json`** at the extract root is the machine-readable form, and the file to read when
+the question is *"what was left out"*, which no amount of on-page marking answers in aggregate: the
+closure with a reason per row, every cross-reference that was cut and how many places pointed at it, the
+relation policy, how each ticked row resolved, and the two verdicts.
+
+A partial run writes into `Reports_partial_<stamp>/` (`partial_report.partial_dir`), never the folder it
+is a subset of. Overwriting the reports the examiner ticked rows in would destroy the thing the extract
+is a subset of.
+
+### The `prov` mapping
+
+Every function above takes an optional `prov` mapping whose keys are listed in
+`partial_report.PROVENANCE_KEYS`. All of them are optional by design: a partial run built from an
+externally produced selection knows some and not others, and the report states which rather than
+implying it checked something it could not.
+
+---
+
+## Links whose other end is not here
+
+A partial folder is full of cross-report links whose target it does not contain. The two dishonest
+options are a link that goes nowhere and a link that was silently deleted — the first misleads the
+reader, the second hides that an association exists at all. So every cross-report link goes through one
+helper:
+
+```python
+report_ui.xref(link_html, targets, *, closure=None, label=None, brief=False, hint="")
+```
+
+It **wraps**, it does not build. Each call site keeps its own classes, target window, emoji and attribute
+order, and passes the anchor it would have emitted anyway together with the `(kind, row id)` pairs the
+link reaches. That choice is deliberate:
+
+* `closure=None` returns the argument untouched, so **a full report is byte-identical by construction**
+  rather than by inspection. Rebuilding fifteen heterogeneous chip markups from one signature would have
+  rewritten the markup of every full report for no gain, and would have destroyed the corpus byte-diff
+  that is the only thing catching a filtered code path drifting from the full one.
+* An excluded target becomes a `.xout` marker that keeps **the visible label and the identifier**: the
+  examiner can still see *what* is missing. Markup that is not a recognised anchor is stripped rather
+  than re-emitted, so a live `<a>` can never survive inside the marker.
+* `brief=True` is for a fixed-height index cell — the marker alone, the sentence in its tooltip. A
+  collapsed virtual row is exactly one row tall, so a second line of text there is not shown short, it is
+  sliced through the middle.
+* Every marked target is recorded on the closure (`note_excluded`), which is what fills the manifest's
+  `excluded_refs`.
+
+The marker glyph is U+2298 (circled division slash), not the U+20E0 combining mark: a combining
+character has nothing to combine with here and renders unpredictably on its own.
+
+A link whose target is a **set** of rows (a `#find=` fragment) is narrowed first with
+`report_ui.narrow(closure, kind, values, anchor)`, so the receiving report does not open filtered to
+nothing and the label states the true count — `cache (1)`, not `cache (3)`. When one shared token
+addresses several rows and so cannot be narrowed row by row (a CACHE_KEY that several Library/Caches rows
+carry), the count states how many of them the extract holds and the basis text says how many it does not.
+
+Some links reach rows by a token rather than by an id, so the caller cannot tell what is on the other
+end. `Closure.reaches(edge, kind, id, dst_kind)` answers that from the edges the generators already
+derived — all of them known before the first page is written. That is how the Memories report's
+`Library/Caches` pack link knows which chunk rows it addresses.
+
+### A preview is not a link
+
+Two reports show *another report's* file inline: the Library/Caches and cache_controller reports display
+the plaintext the Memories report decrypted, because those cached bytes are encrypted and the copy is
+sitting in the next folder. In a partial extract that Memory may be absent and its plaintext pruned. So
+both filter those copies to the ones actually present (`_decrypted_here`, `_absent_memory_copy`) and,
+when none is, **say so** — falling through to the "not recovered" branch would be worse than a broken
+image, because these bytes *were* recovered and the row would be denying it.
+
+---
+
+## What must not be left behind
+
+Two stages publish files **before** the filter runs, each for a reason given in its own module:
+conversation attachments (hard links out of a folder the parser already filled — deferring them would buy
+nothing) and Memory media (grouping depends on the decrypted bytes, so the decryption cannot be deferred
+at all).
+
+That means a partial run's `media/` folders start out holding files no included row references. A
+disclosure folder carrying media nothing in it points at is a defect — the file is there, an examiner can
+open it, and no page says where it came from. In the Memories case it is worse than a defect: it would
+put decrypted media of unselected Memories into a bundle, which is the one thing this feature exists to
+avoid.
+
+So both prune, and only ever inside the run's own output folder:
+`conversations_report._prune_media` to the attachments the rendered messages reference,
+`memories_media_report._prune_media` to the media files of the included Memories. These are links, so
+removing them cannot touch the extracted copy behind them. Maps need no pruning: they are rendered after
+the filter, from the included Memories only.
+
+---
+
+## Memory groups rendered in part
+
+A group exists precisely because its members share a `ZMEDIAID` and/or identical media bytes — a sibling
+is the same media under another snap row, and all members share one detail page. With the `mem_group`
+relation on, selecting one member brings the others; each is badged as included-but-not-selected
+(`partial_report.sibling_badge`) so it cannot be mistaken for something the examiner chose.
+
+With it off, the page renders only the selected members — and then it has to state the group's true size,
+because "Group of 1" would deny the relationship the grouping asserts. `render()` derives the whole
+extraction's grouping (`assign_groups` over the unfiltered model — union-find over records already in
+memory, no media touched) and hands `_render_group_detail` a `group_of` map. The page then says *"Showing
+1 of 2 memories grouped here"*, marks each omitted snap id, and — because the page is re-rendered rather
+than copied — every shared block below follows the members it was given, so the file table, the timestamp
+columns and the encryption columns describe nobody who is absent.
+
+---
+
+## Still to wire: the index pass and the cross-report manifests
+
+One ordering problem is left for the orchestrator, and it is written down here so it is not rediscovered
+later. Several `index()` steps read manifests that an **earlier report's `render()`** writes:
+`cache_media_report.index` needs `memory_pages.json`, `cache_links.json` and `memory_packs.json`;
+`cache_controller_report.index` needs `media_by_cache_key.json`. A strict index-all-then-render-all pass
+would run those reads before anything had written the files.
+
+The answer is to read them from the **full report folder the selection was made in** — same evidence,
+same build, and it is where the ticked rows live — under the same gate as every other reuse path
+(`source_fingerprint.reuse_allowed`). Interleaving index and render per report is not an option: it is
+exactly what makes a backward relation (a ticked cache entry pulling in its Memory) impossible, which is
+the whole reason the index pass exists.

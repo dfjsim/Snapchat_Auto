@@ -25,7 +25,9 @@ Memories / My Eyes Only.
 - Shared report UI: `scripts/report_ui.py` (virtualized index tables, paging, row selection,
   cross-report anchor navigation, "?" popovers, page chrome) — used by the Conversations, Contacts,
   Memories and cache_controller reports, with its `NAV_JS`/`NAV_CSS` also injected into the legacy
-  Communications report.
+  Communications report. **Every cross-report link is emitted through `report_ui.xref`** — the one place
+  that can mark a link whose target a partial report does not contain; with no closure it returns the
+  caller's markup untouched, so full reports are unaffected.
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
@@ -99,9 +101,11 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
 ## Research notes / findings
 
 - [Partial reports](docs/report_partial.md) — the selection file the examiner saves (schema, the
-  `.json`/`.js` forms and why renaming one to the other fails silently, `--install-selection`), and
-  the source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a
-  later run is looking at the same evidence and may reuse anything of it.
+  `.json`/`.js` forms and why renaming one to the other fails silently, `--install-selection`), the
+  source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a
+  later run is looking at the same evidence and may reuse anything of it, and what an extract must state
+  about itself: the banner, the "N of M" figures, the provenance block, `partial_manifest.json`, the
+  `xref` marking of links whose target is absent, and the media a partial run has to prune.
 - Per-report internals and the cross-report linking scheme:
   [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
   [report_conversations.md](docs/report_conversations.md),

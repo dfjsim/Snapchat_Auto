@@ -2384,12 +2384,20 @@ PACK_IN_CACHEMEDIA_BASIS = (
 
 def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                          src_root, manifest, userids, media_prefix="../", cc_prefix="../../",
-                         meo_owners=None):
+                         meo_owners=None, closure=None, group_of=None):
     """Return the detail body HTML for one group (thumbnail + all blocks), for a sub-page.
 
     ``media_prefix`` prefixes links to ``media/`` and ``cc_prefix`` prefixes links to the sibling
     CacheController report, since sub-pages live one level deeper (``Memories/pages/``).
     ``meo_owners`` is passed straight to `_meo_locked_html` — see there.
+
+    ``group_of`` maps a snap id to every snap id in its group **in the whole extraction**, which is
+    what lets a partial extract state the group's real size. Without it a page rendered from one
+    member of a pair says "Group of 1", and a group exists precisely because its members are the same
+    media under another snap row — so that figure would deny the relationship the grouping asserts.
+    Since the page is re-rendered rather than copied, every shared block below (the file table, the
+    timestamp columns, the encryption columns) follows the members it was given and so describes
+    nobody who is absent.
     """
     files = _dedup_media(members)
     still = _best_still(files)
@@ -2423,6 +2431,11 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                       "correctly decrypted. Each file's <i>Source cache</i> cell says exactly what "
                       "is missing.</div>")
 
+    # The group as the extraction has it, so a partial page can say how much of it is here
+    here = {m["snap_id"] for m in members}
+    full = list((group_of or {}).get(lead["snap_id"]) or here)
+    omitted = [sid for sid in full if sid not in here]
+
     # prominent MEDIA ID (shared) + snap count
     media_id = lead["ids"].get("ZMEDIAID")
     idrows = []
@@ -2430,11 +2443,23 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
         idrows.append(f"<div class='idrow'><span class='idlab'>Media ID</span> "
                       f"<span class='idval'>{html.escape(str(media_id))}</span></div>")
     idrows.append(f"<div class='idrow'><span class='idlab'>Memories</span> "
-                  f"<span class='idval'>{len(members)}</span></div>")
+                  f"<span class='idval'>{len(members)}</span>"
+                  + (f" <span class='pfig'>of {len(full)} grouped here</span>" if omitted else "")
+                  + "</div>")
     idband = f"<div class='idband'>{''.join(idrows)}</div>"
-    sharebar = ("" if single else
-                f"<div class='sharebar'>🔗 {len(members)} memories are grouped here (same ZMEDIAID "
-                "and/or identical media bytes) — media-level details are shown once below</div>")
+    if omitted:
+        marks = " ".join(f"<span class='xout'>mem-{html.escape(sid)}"
+                         f"<span class='xno'>{report_ui.XOUT_MARK}</span></span>" for sid in omitted)
+        sharebar = (f"<div class='sharebar'>🔗 Showing <b>{len(members)} of {len(full)}</b> memories "
+                    f"grouped here (same ZMEDIAID and/or identical media bytes). The other "
+                    f"{len(omitted)} {'is' if len(omitted) == 1 else 'are'} not part of this "
+                    f"extract: {marks} &mdash; every block below describes only the "
+                    f"{'memory' if len(members) == 1 else 'memories'} shown.</div>")
+    else:
+        sharebar = ("" if single else
+                    f"<div class='sharebar'>🔗 {len(members)} memories are grouped here (same "
+                    "ZMEDIAID and/or identical media bytes) — media-level details are shown once "
+                    "below</div>")
 
     meta, meta_shared = _shared_or_per(members, _meta_grid)
     loc, loc_shared = _shared_location(members, keychain_available)
@@ -2494,8 +2519,17 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             f"index; saved in this browser, and exportable from the index toolbar.'>"
             f"<input type='checkbox' class='selbox' data-kind='mem' "
             f"data-id='mem-{html.escape(m['snap_id'])}' "
-            f"data-keys='{html.escape(json.dumps(mem_keys))}'>Selected for the case</label>")
+            f"data-keys='{html.escape(json.dumps(mem_keys))}'>Selected for the case</label>"
+            + partial_report.sibling_badge(closure, "mem", f"mem-{m['snap_id']}"))
         mem_blocks.append("<div class='mem'>" + "".join(parts) + "</div>")
+
+    # the Library/Caches rows this group's media reaches, across every member: the file table merges
+    # the members' files, so the pack link on a shared row is not one member's alone
+    pack_targets = []
+    if closure is not None:
+        for member in members:
+            pack_targets += closure.reaches(partial_report.EDGE_MEMORY_CACHEMEDIA, "mem",
+                                            f"mem-{member['snap_id']}", "cm")
 
     frows = []
     for f in sorted(files, key=lambda f: (f["source"], -f["bytes"])):
@@ -2509,20 +2543,26 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
         dim = f.get("dim") or f.get("snap_dim") or ""
         source_cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
         if f.get("in_cc") and f.get("cache_key"):
-            source_cell += (f" <a class='cclink' target='scauto_cache' "
-                            f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
-                            f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>")
+            source_cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cache' "
+                f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
+                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
+                [("cc", f"ck-{f['cache_key']}")], closure=closure)
         elif f.get("source") == "caching-media" and f.get("item"):
             # cache_controller.db does not index these, so the only report that inventories the
             # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
             # several rows there — so the link filters that report to this pack's item hash and
             # opens every chunk, rather than pointing at one of them.
-            source_cell += (f" <a class='cclink' target='scauto_cachemedia' "
-                            f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
-                            f"{report_ui.find_fragment([f['item']])}\" "
-                            f"title=\"open the Library/Caches report filtered to this pack's "
-                            f"chunk file(s), all expanded\">🗂 Library/Caches</a>"
-                            + _info(PACK_IN_CACHEMEDIA_BASIS))
+            # The chunks are several rows over there and this link addresses them by the pack's item
+            # hash, not by a row id — so the rows it reaches come from the edge the Library/Caches
+            # report derived, which is known before any page is written (Closure.reaches).
+            source_cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cachemedia' "
+                f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
+                f"{report_ui.find_fragment([f['item']])}\" "
+                f"title=\"open the Library/Caches report filtered to this pack's "
+                f"chunk file(s), all expanded\">🗂 Library/Caches</a>",
+                pack_targets, closure=closure) + _info(PACK_IN_CACHEMEDIA_BASIS)
         if f.get("cross_scope"):
             source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
                             + _info(_cross_scope_note(f)))
@@ -2557,11 +2597,13 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
 
 
 def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                   src_root, manifest, userids, tz_label, run_id="default", meo_owners=None):
+                   src_root, manifest, userids, tz_label, run_id="default", meo_owners=None,
+                   closure=None, prov=None, group_of=None):
     """Write ``pages/<key>.html`` for one group and return its path relative to the Memories dir."""
     lead = members[0]
     body = _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
-                                src_root, manifest, userids, meo_owners=meo_owners)
+                                src_root, manifest, userids, meo_owners=meo_owners,
+                                closure=closure, group_of=group_of)
     back = (f'<a class="back" href="../Memories_report.html#mem-{html.escape(lead["snap_id"])}">'
             '← Back to Memories index</a>')
     # The selection controls: the same store as the index (both load ../selection.js), saved back
@@ -2580,15 +2622,17 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     # The source fingerprints this run recorded, so the examiner's saved selection carries
     # them and a later partial run can check the extraction it is handed against this one.
     sources_js = report_ui.sources_script(os.path.dirname(os.path.dirname(os.path.abspath(pages_dir))))
+    partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
-           f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}</style>'
+           f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
+           f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
-           f'{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
+           f'{banner}{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
            f'{report_ui.SELECT_TOOLBAR_JS}'
            f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
            f'scConsumeHash();</script></body></html>')
@@ -2758,7 +2802,7 @@ def _wal_summary_html(memories):
 
 def generate_report(memories, outdir, keychain_available, userids=None, tz_label="UTC",
                     src_root=None, manifest=None, run_id="default", keychain_note="",
-                    meo_owners=None):
+                    meo_owners=None, closure=None, prov=None, group_of=None):
     """Write the lightweight index (``Memories_report.html``) plus one detail sub-page per group.
 
     Also writes ``memory_pages.json`` (snap_id -> sub-page path) so the cache_controller report can
@@ -2782,7 +2826,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     pages_dir = os.path.join(outdir, "pages")
     for key, members in groups:
         render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
-                       src_root, manifest, userids, tz_label, run_id, meo_owners)
+                       src_root, manifest, userids, tz_label, run_id, meo_owners,
+                       closure=closure, prov=prov, group_of=group_of)
 
     # manifest for the cache_controller report's direct-to-detail links
     page_manifest = {m["snap_id"]: f"pages/{key}.html" for key, members in groups for m in members}
@@ -2933,6 +2978,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
           'affected on both schemas</b>: its key is stored wrapped and can only be unwrapped with '
           'the keychain item <code>com.snapchat.keyservice.persistedkey</code>.</span></div>')
 
+    partial_css, partial_banner_html, figures = partial_report.page_chrome(closure, "mem", prov)
+
     index_css = """
  .toolbar{background:#ececf4;border-bottom:1px solid #d7d7e2;padding:10px 24px;
    display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:13px}
@@ -2970,7 +3017,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}</style>'
+           f'{report_ui.SELECT_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
@@ -2980,8 +3027,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
            + (f'<b>{n_partial}</b> with incomplete media &middot; ' if n_partial else '')
            + f'times in <b>{html.escape(tz_label)}</b></div>'
+           + figures
            + _wal_summary_html(memories) + '</header>'
-           f'{banner}'
+           f'{partial_banner_html}{banner}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, user…" oninput="flt()">'
@@ -3204,10 +3252,47 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
                                 meo_owners=meo_owners)
 
 
-def render(stage, closure=None):
+def _prune_media(outdir, memories):
+    """Delete decrypted media no included Memory references. Returns how many went.
+
+    Decryption happens on the index side and cannot be deferred (see :func:`index`), so a partial run's
+    ``media/`` starts out holding every Memory's plaintext — including Memories the extract does not
+    contain. Leaving those behind would put decrypted media of unselected Memories into a disclosure
+    folder, which is the one thing a partial report exists to avoid. Maps need no pruning: they are
+    rendered after the filter, from the included Memories only.
+    """
+    media_dir = os.path.join(outdir, "media")
+    if not os.path.isdir(media_dir):
+        return 0
+    keep = {f["out"] for m in memories.values() for f in m.get("media_files") or () if f.get("out")}
+    removed = 0
+    for name in os.listdir(media_dir):
+        if name in keep:
+            continue
+        try:
+            os.remove(os.path.join(media_dir, name))
+            removed += 1
+        except OSError as error:
+            logger.warning(f"Could not remove decrypted media {name}, which no Memory in this "
+                           f"extract references: {error}")
+    return removed
+
+
+def render(stage, closure=None, prov=None):
     """Draw the maps and write the report. ``closure=None`` renders every Memory."""
     outdir, workdir = stage["outdir"], stage["workdir"]
     memories = {row_id[4:]: record for row_id, record in stage.sel.keep(closure)}
+
+    # The grouping of the *whole* extraction, so a group page rendered from part of a group can say how
+    # big the group really is. Re-derived from the unfiltered model rather than remembered from the
+    # index pass, because grouping is what `assign_groups` is for and one caller is not worth a second
+    # copy of it. No media is touched: it is union-find over records already in memory.
+    group_of = {}
+    if closure is not None:
+        for _key, members in assign_groups(stage.model)[0]:
+            sids = [m["snap_id"] for m in members]
+            for sid in sids:
+                group_of[sid] = sids
 
     render_maps(memories, outdir, stage["tile_server"])
 
@@ -3219,7 +3304,13 @@ def render(stage, closure=None):
                                               src_root=stage["src_root"],
                                               manifest=stage["manifest"], run_id=run,
                                               keychain_note=stage["keychain_note"],
-                                              meo_owners=stage["meo_owners"])
+                                              meo_owners=stage["meo_owners"],
+                                              closure=closure, prov=prov, group_of=group_of)
+    if closure is not None:
+        pruned = _prune_media(outdir, memories)
+        if pruned:
+            logger.info(f"  {pruned} decrypted media file(s) and map image(s) removed: no Memory in "
+                        f"this extract references them")
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 

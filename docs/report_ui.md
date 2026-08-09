@@ -70,6 +70,13 @@ something the target rows carry in their search text (a `CACHE_KEY`, a snap id, 
 "restore the defaults" — the Library/Caches report hides app assets by default, and a `reset` that
 re-hid them left every link to an app-asset row landing on nothing.
 
+**In a partial report the token set is narrowed first.** `report_ui.narrow(closure, kind, values,
+anchor)` drops the tokens whose row is not in the folder, so the link does not open the receiving report
+filtered to nothing, and the chip's own label states the true count. When one shared token addresses
+several rows and so cannot be narrowed row by row, the count says how many of them are there and the "?"
+text says how many are not. Every cross-report link — narrowed or not — is emitted through
+`report_ui.xref`; see [report_partial.md](report_partial.md#links-whose-other-end-is-not-here).
+
 Measured on a synthetic 101 200-row cache_controller index (Chrome, `file://`):
 
 | | |

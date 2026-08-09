@@ -619,10 +619,11 @@ def _participant(key, contact_links):
     else:
         label = display or username or raw
     return {"label": label, "display": display, "username": username, "user_id": user_id,
-            "href": found.get("href"), "is_owner": bool(found.get("is_owner")), "raw": raw}
+            "href": found.get("href"), "anchor": found.get("anchor"),
+            "is_owner": bool(found.get("is_owner")), "raw": raw}
 
 
-def _participant_html(part, root, chip=True):
+def _participant_html(part, root, chip=True, closure=None):
     """A participant as a chip: both names, the owner marked, linked to their contact row.
 
     ``root`` is this page's path back to the reports folder, since the contact link is stored
@@ -633,8 +634,9 @@ def _participant_html(part, root, chip=True):
         body += _OWNER_BADGE
     if part["href"]:
         title = f'open the contact record of {part["label"]}'
-        body = (f'<a href="{_esc(root + part["href"])}" target="scauto_contacts" '
-                f'title="{_esc(title)}">{body}</a>')
+        body = report_ui.xref(f'<a href="{_esc(root + part["href"])}" target="scauto_contacts" '
+                              f'title="{_esc(title)}">{body}</a>',
+                              [("ct", part.get("anchor"))], closure=closure, brief=True)
     return f'<span class="party">{body}</span>' if chip else body
 
 
@@ -934,16 +936,21 @@ function xall(btn){
 """
 
 
-def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix="", reports_root=""):
+def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix="", reports_root="",
+          partial_css=""):
     """The common ``<head>`` of the index and the detail pages.
 
     ``sel_prefix`` is set on a conversation page, whose message anchors are page-local: it scopes the
     selection count and the Clear button to this conversation's messages. See ``report_ui.selId``.
     ``reports_root`` is where ``sources.json`` lives, so the examiner's saved selection carries the
     source fingerprints of the run it was made in.
+
+    ``partial_css`` is inlined rather than added to ``assets/ui.css``, because that file is shared with
+    every full report and none of them has an element to style with it.
     """
     return (f'<!doctype html><html><head><meta charset="utf-8"><title>{_esc(title)}</title>'
             f'<link rel="stylesheet" href="{asset_prefix}assets/ui.css">'
+            + (f"<style>{partial_css}</style>" if partial_css else "") +
             f'<script>window.SCAUTO_RUN={json.dumps(run_id)};'
             f'window.SCAUTO_VERSION={json.dumps(app_version.get_version())};'
             f'{report_ui.sources_script(reports_root) if reports_root else ""}'
@@ -1018,7 +1025,7 @@ _CREATED_HINT = ("arroyo.db conversation_message.creation_timestamp (Unix millis
                  "cache claim and carries no message timestamp.")
 
 
-def _attachment_detail(att, prefix, index=None, total=1):
+def _attachment_detail(att, prefix, index=None, total=1, closure=None):
     """One attachment's block inside an expanded message: the file, its hashes and its cache link."""
     parts = []
     label = "Attachment" if total == 1 else f"Attachment {index} of {total}"
@@ -1058,10 +1065,12 @@ def _attachment_detail(att, prefix, index=None, total=1):
     if att["cache_key"]:
         parts.append(
             '<div class="chips">'
-            f'<a class="chip cache" target="scauto_cache" '
-            f'href="{prefix}../CacheController/CacheController_report.html'
-            f'#ck-{_esc(att["cache_key"])}">&#128451; cache_controller entry '
-            f'{_esc(att["cache_key"][:8])}…</a>'
+            + report_ui.xref(
+                f'<a class="chip cache" target="scauto_cache" '
+                f'href="{prefix}../CacheController/CacheController_report.html'
+                f'#ck-{_esc(att["cache_key"])}">&#128451; cache_controller entry '
+                f'{_esc(att["cache_key"][:8])}…</a>',
+                [("cc", f'ck-{att["cache_key"]}')], closure=closure)
             + report_ui.info_icon(att["cache_key_how"]) + '</div>')
     else:
         parts.append('<div class="muted">No cache_controller entry could be resolved for this '
@@ -1073,7 +1082,7 @@ def _attachment_detail(att, prefix, index=None, total=1):
     return "".join(parts)
 
 
-def _message_detail(msg, conv, prefix="../", contact_links=None):
+def _message_detail(msg, conv, prefix="../", contact_links=None, closure=None):
     """The expandable per-message block: full text / media, hashes, provenance."""
     parts = []
     if msg["text"]:
@@ -1093,7 +1102,7 @@ def _message_detail(msg, conv, prefix="../", contact_links=None):
                          "message they belong to and lists each file below with its own hashes.")
                      + '</div>')
     for n, att in enumerate(atts, 1):
-        parts.append(_attachment_detail(att, prefix, n, len(atts)))
+        parts.append(_attachment_detail(att, prefix, n, len(atts), closure))
     if not atts and not msg["text"] and not msg["parse_error"]:
         parts.append('<div class="muted">This row carries neither text nor a recovered '
                      'attachment.</div>')
@@ -1105,8 +1114,9 @@ def _message_detail(msg, conv, prefix="../", contact_links=None):
     sender = text_html(msg["sender"])
     link = (contact_links or {}).get(msg["sender"].lower()) if msg["sender"] else None
     if link:                                                   # from pages/<key>.html to Contacts/
-        sender = (f'<a class="detail" target="scauto_contacts" '
-                  f'href="{_esc("../../" + link["href"])}">{sender} &#9656;</a>')
+        sender = report_ui.xref(f'<a class="detail" target="scauto_contacts" '
+                                f'href="{_esc("../../" + link["href"])}">{sender} &#9656;</a>',
+                                [("ct", link.get("anchor"))], closure=closure)
     if msg["direction"] == "Sent":
         sender += _OWNER_BADGE
     parts.append(_grid([
@@ -1241,19 +1251,20 @@ _PARTY_HINT = ("Each participant is shown as \"display name (username)\" and ope
 
 
 def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Conversations_report.html",
-                             contact_links=None):
+                             contact_links=None, closure=None, prov=None):
     """Write ``pages/<key>.html`` (+ its data files) for one conversation."""
     key = _page_key(conv["id"])
     pages_dir = os.path.join(outdir, "pages")
     data_dir = os.path.join(pages_dir, "data", key)
     os.makedirs(pages_dir, exist_ok=True)
 
-    details = [(m["anchor"], _message_detail(m, conv, contact_links=contact_links))
+    details = [(m["anchor"], _message_detail(m, conv, contact_links=contact_links, closure=closure))
                for m in conv["messages"]]
     chunk_of = report_ui.write_details(data_dir, details)
     report_ui.write_rows(data_dir, _message_rows(conv, chunk_of))
 
-    parts_html = "".join(_participant_html(p, "../../") for p in conv["participants"])
+    parts_html = "".join(_participant_html(p, "../../", closure=closure)
+                         for p in conv["participants"])
     ids_html = "<br>".join(
         f'<span class="mono">{_esc(p["user_id"])}</span>'
         + (f' <span class="pname">{text_html(p["username"] or p["display"])}</span>'
@@ -1319,15 +1330,22 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
                   'friends / groups list names its conversation id.')
     type_opts = "".join(f'<option value="{html.escape(t, quote=True)}">{_esc(t)}</option>'
                         for t in sorted(conv["types"]))
+    partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
+    # this page's own denominator: how much of *this conversation* the extract holds. The report-wide
+    # message figure belongs on the index; here the question is what is missing from this chat.
+    of_conv = (f' <span class="pfig">of {conv["n_messages_full"]} in this conversation</span>'
+               if closure is not None and conv.get("n_messages_full") is not None else "")
     doc = (
         _head(f'Conversation {_short(conv["title"], 40)}', "../../", run_id, "msg", "../",
               sel_prefix=f'conv-{conv["id"]}|',
-              reports_root=os.path.dirname(os.path.abspath(outdir)))
+              reports_root=os.path.dirname(os.path.abspath(outdir)),
+              partial_css=partial_css)
         + '<body>'
         f'<header><h1>{text_html(conv["title"])} &mdash; conversation</h1>'
-        f'<div class="sum">{_kind_badge(conv["kind"])} &middot; {conv["n_messages"]} message(s) '
-        f'&middot; {conv["n_attachments"]} with an attachment &middot; times in '
+        f'<div class="sum">{_kind_badge(conv["kind"])} &middot; {conv["n_messages"]} message(s)'
+        f'{of_conv} &middot; {conv["n_attachments"]} with an attachment &middot; times in '
         f'<b>{_esc(tz_label)}</b></div></header>'
+        f'{banner}'
         f'<a class="back" href="../{index_name}#conv-{_esc(conv["id"])}">'
         f'&larr; Back to the conversations index</a>'
         f'<div class="convhead" id="conv-{_esc(conv["id"])}"><div>{left}</div>'
@@ -1419,7 +1437,7 @@ def _first_last(conv, which):
 
 # --------------------------------------------------------------------------- index page
 
-def _index_detail(conv):
+def _index_detail(conv, closure=None):
     """The expanded index row: every participant, with the permanent user id of each.
 
     The row itself can only name two participants before it overflows, so a group chat's membership
@@ -1430,7 +1448,7 @@ def _index_detail(conv):
     if parts:
         rows = "".join(
             "<tr>"
-            f'<td>{_participant_html(p, "../", chip=False)}</td>'
+            f'<td>{_participant_html(p, "../", chip=False, closure=closure)}</td>'
             f'<td class="mono">{_esc(p["user_id"]) or "<span class=muted>not recorded</span>"}</td>'
             f'<td>{_esc(p["username"])}</td>'
             f'<td>{text_html(p["display"])}</td>'
@@ -1482,10 +1500,10 @@ _CREATED_ROW_HINT = (
     "messages are older than it. Verified on the test corpus.")
 
 
-def generate_index(conversations, outdir, tz_label, run_id, stats):
+def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None, prov=None):
     """Write ``Conversations_report.html`` + ``data/index.js``; return the report path."""
     data_dir = os.path.join(outdir, "data")
-    details = [(f'conv-{c["id"]}', _index_detail(c)) for c in conversations]
+    details = [(f'conv-{c["id"]}', _index_detail(c, closure)) for c in conversations]
     chunk_of = report_ui.write_details(data_dir, details)
 
     rows = []
@@ -1493,7 +1511,8 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         parts = conv["participants"]
         # the row is one fixed height: name the first two participants and count the rest — the
         # expanded row (and the conversation's own page) lists them all with their user ids
-        shown = ", ".join(_participant_html(p, "../", chip=False) for p in parts[:2])
+        shown = ", ".join(_participant_html(p, "../", chip=False, closure=closure)
+                          for p in parts[:2])
         if len(parts) > 2:
             shown += (f' <span class="more" title="{len(parts) - 2} more participant(s) — expand '
                       f'this row to see them all">+{len(parts) - 2}</span>')
@@ -1557,9 +1576,12 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
                       "messages may have been deleted, or not captured by the extraction.")
                   + '</div>') if empty else ""
 
+    partial_css, banner, figures = partial_report.page_chrome(closure, "conv", prov)
+    msg_figures = partial_report.figures_html(closure, "msg") if closure is not None else ""
     doc = (
         _head("Snapchat conversations", "../", run_id, "conv", "",
-              reports_root=os.path.dirname(os.path.abspath(outdir)))
+              reports_root=os.path.dirname(os.path.abspath(outdir)),
+              partial_css=partial_css)
         + '<body>'
         f'<header><h1>Snapchat conversations</h1>'
         f'<div class="sum"><b>{len(conversations)}</b> conversation(s) &middot; '
@@ -1569,8 +1591,10 @@ def generate_index(conversations, outdir, tz_label, run_id, stats):
         + ' &middot; '
         f'{stats["groups"]} group / {stats["private"]} private &middot; '
         f'times in <b>{_esc(tz_label)}</b>{skipped_note}</div>'
+        f'{figures}{msg_figures}'
         f'<div class="sum">Source: arroyo.db conversation_message, joined to cache_controller.db '
         f'and the friends / groups artifacts by the iOS parser</div></header>'
+        f'{banner}'
         f'{empty_note}'
         # the "row data missing" banner fires on an empty row set, so only emit it when there is
         # something to load in the first place
@@ -1781,7 +1805,7 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
         for participant in conv.get("participants") or ():
             if participant.get("user_id"):
                 sel_conv.link(partial_report.EDGE_CONV_PARTICIPANT, conv_row, "ct",
-                              contact_anchor(participant))
+                              participant.get("anchor") or contact_anchor(participant))
         for msg in conv.get("messages") or ():
             msg_row = f'{conv_row}|{msg["anchor"]}'
             sel_msg.add(msg_row, msg, smid=msg.get("smid"))
@@ -1802,7 +1826,64 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
                                 contact_links=contact_links, drop_stats=drop_stats)
 
 
-def render(stage, closure=None):
+def _prune_media(outdir, conversations):
+    """Delete published attachments no rendered message points at. Returns how many went.
+
+    Attachment publishing happens on the index side — they are hard links out of the folder the parser
+    already filled, so deferring them would buy nothing — which means a partial run's ``media/`` starts
+    out holding every conversation's files, including those of messages it does not render. A
+    disclosure folder carrying media that nothing in it references is a defect: the file is there, an
+    examiner can open it, and no page says where it came from.
+
+    Only ever called on a partial run, and only inside that run's own output folder. These are links,
+    so removing them cannot touch the extracted copy they point at.
+    """
+    media_dir = os.path.join(outdir, "media")
+    if not os.path.isdir(media_dir):
+        return 0
+    keep = {os.path.basename(att["rel"])
+            for conv in conversations for msg in conv.get("messages") or ()
+            for att in msg.get("atts") or () if att and att.get("rel")}
+    removed = 0
+    for name in os.listdir(media_dir):
+        if name in keep:
+            continue
+        try:
+            os.remove(os.path.join(media_dir, name))
+            removed += 1
+        except OSError as error:
+            logger.warning(f"Could not remove {name} from this extract's media folder, which no "
+                           f"included message references: {error}")
+    return removed
+
+
+def _narrowed(conv, kept):
+    """One conversation with its message list cut to *kept*, and every figure recomputed from it.
+
+    A shallow copy, because the model itself must stay intact: the closure was decided from it and the
+    other reports still read it. Recomputing rather than copying the counts is the point — a page that
+    lists four messages while its own header says 137 states something untrue about the extract, and
+    the header is what a reader takes at face value. ``n_messages_full`` keeps the conversation's real
+    size, which is what the "N of M" figure needs.
+    """
+    msgs = [m for m in conv.get("messages") or () if f'conv-{conv["id"]}|{m["anchor"]}' in kept]
+    senders, types = {}, {}
+    for msg in msgs:
+        if msg["sender"]:
+            senders[msg["sender"]] = senders.get(msg["sender"], 0) + 1
+        for ctype in (msg["types"] or ["(none)"]):
+            types[ctype] = types.get(ctype, 0) + 1
+    return {**conv, "messages": msgs,
+            "n_messages_full": conv["n_messages"],
+            "n_messages": len(msgs),
+            "n_files": sum(len(m["atts"]) for m in msgs),
+            "n_attachments": sum(1 for m in msgs if m["atts"]),
+            "n_missing": sum(1 for m in msgs for a in m["atts"] if not a["rel"]),
+            "n_wal_gone": sum(1 for m in msgs if m.get("wal") == sqlite_open.MAIN_ONLY),
+            "senders": senders, "types": types}
+
+
+def render(stage, closure=None, prov=None):
     """Write the index, the per-conversation pages and the manifests.
 
     ``closure=None`` renders everything. With a closure, a conversation shows only the messages the
@@ -1813,21 +1894,14 @@ def render(stage, closure=None):
     conversations = [record for _row_id, record in stage.sel.keep(closure)]
 
     if closure is not None:
-        # a shallow copy per conversation, with its message list narrowed: the model itself must stay
-        # intact, because the closure was decided from it and other reports still read it
         kept = closure.included.get("msg", set())
-        narrowed = []
-        for conv in conversations:
-            trimmed = dict(conv)
-            trimmed["messages"] = [m for m in conv.get("messages") or ()
-                                   if f'conv-{conv["id"]}|{m["anchor"]}' in kept]
-            narrowed.append(trimmed)
-        conversations = narrowed
+        conversations = [_narrowed(conv, kept) for conv in conversations]
 
     write_assets(outdir)
     for conv in conversations:
         conv["page"] = render_conversation_page(conv, outdir, tz_label, run_id,
-                                                contact_links=contact_links)
+                                                contact_links=contact_links, closure=closure,
+                                                prov=prov)
 
     stats = {"messages": sum(c["n_messages"] for c in conversations),
              "files": sum(c["n_files"] for c in conversations),
@@ -1835,7 +1909,8 @@ def render(stage, closure=None):
              "groups": sum(1 for c in conversations if c["kind"] == "Group"),
              "private": sum(1 for c in conversations if c["kind"] == "Private"),
              **stage["drop_stats"]}
-    report = generate_index(conversations, outdir, tz_label, run_id, stats)
+    report = generate_index(conversations, outdir, tz_label, run_id, stats, closure=closure,
+                            prov=prov)
     write_page_manifest(conversations, outdir)
     write_cache_links(conversations, outdir)
 
@@ -1844,8 +1919,12 @@ def render(stage, closure=None):
         logger.info(f"  {len(conversations)} conversation(s), {stats['messages']} message(s), "
                     f"{stats['attachments']} with an attachment ({stats['files']} file(s))")
     else:
+        pruned = _prune_media(outdir, conversations)
         logger.info(f"  {len(conversations)} of {len(stage.model)} conversation(s) in this extract, "
                     f"holding {sum(len(c['messages']) for c in conversations)} selected message(s)")
+        if pruned:
+            logger.info(f"  {pruned} published attachment(s) removed: no message in this extract "
+                        f"references them")
     return report, conversation_index(conversations)
 
 

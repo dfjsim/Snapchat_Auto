@@ -8,6 +8,7 @@ from scripts import offline_maps
 from scripts import app_version
 from scripts import selection_file
 from scripts import source_fingerprint
+from scripts import partial_report
 import os
 import json
 import logging
@@ -135,9 +136,14 @@ def add_log_file(directory):
     logger.info(f"Log file: {os.path.abspath(log_path)}")
 
 
-def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path=None):
+def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path=None,
+                closure=None, prov=None):
     """Write <root_dir>/index.html linking to whichever sub-reports were produced under
-    <root_dir>/<reports_subdir>/, with the source extraction / keychain paths at the top."""
+    <root_dir>/<reports_subdir>/, with the source extraction / keychain paths at the top.
+
+    With a ``closure`` this is a **partial** extract's own index: it carries the PARTIAL banner and the
+    provenance block expanded, because this is the page a reader opens first and the one that has to
+    say what the folder is before they read anything in it."""
     # Each report opens in its own *named* tab (target), shared with the cross-report links inside
     # the reports, so navigating between reports reuses one tab per report instead of piling up new
     # ones. Ctrl/Shift/middle-click still force a new tab/window (browser default).
@@ -223,6 +229,9 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
                f'{_src_row("Extraction", zip_path)}'
                f'{_src_row("Keychain / keystore", keychain_path)}'
                f'{artifact_rows}</div>')
+    partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
+    provenance = (partial_report.provenance_html(closure, prov, open_by_default=True)
+                  if closure is not None else "")
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto v{get_version()} report</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
@@ -240,8 +249,10 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px 18px;margin-bottom:12px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
+{partial_css}
 </style></head><body>
 <header><h1>Snapchat Auto v{get_version()} &mdash; Report index</h1><div class="sub">Generated {generated}</div></header>
+{banner}{provenance}
 {sources}
 <ul>{''.join(items)}</ul>
 </body></html>"""
