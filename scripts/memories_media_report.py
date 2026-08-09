@@ -2920,9 +2920,14 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 f"<i>MD5</i> {html.escape(md5)}<br><i>SHA-256</i> {html.escape(sha)}",
                 html.escape(m["create_utc"]),
                 _geo_compact(m),
+                # The count goes on its own line rather than beside the button. Inline, it wrapped or
+                # not depending on how wide the column happened to be for that row, so the same
+                # column read differently from one row to the next.
                 f"<a class='openbtn' target='scauto_memory_page' "
-                f"title='open this memory in its own tab' href='{page_href}'>open ▸</a>"
-                f" <span class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''}</span>",
+                f"title='open this memory\\'s detail page, with every Memory grouped with it' "
+                f"href='{page_href}'>Details ▸</a>"
+                f"<div class='nsnaps'>{len(members)} snap{'s' if len(members) != 1 else ''} "
+                f"on this page</div>",
             ]
             # `urls` holds every CDN URL of the memory (media / overlay / thumbnail, download and
             # redirect), so the index is searchable by a full or partial URL — the cache tokens
@@ -3020,7 +3025,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
    font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:10px;
    padding:3px 9px;white-space:nowrap}
  a.openbtn:hover{background:#d5deff;border-color:#8f9fe0}
- .nsnaps{color:#888;font-size:10.5px;white-space:nowrap} .muted{color:#999}
+ .nsnaps{color:#888;font-size:10.5px;white-space:nowrap;margin-top:3px} .muted{color:#999}
 """
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
