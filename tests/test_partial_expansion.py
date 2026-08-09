@@ -43,7 +43,9 @@ def build_indexes():
     for cid in (CONV_A, CONV_B):
         for n in (1, 2):
             mid = f"conv-{cid}|msg-{n}.0"
-            msg.add(mid, smid=f"{n}.0")
+            # qualified with the conversation, as the real generator records it: message 3 exists in
+            # every chat, so a bare ordinal is not a key to anything
+            msg.add(mid, smid=f"{cid}|{n}.0")
             msg.contains(mid, f"conv-{cid}")
             conv.link(pr.EDGE_CONV_MESSAGE, f"conv-{cid}", "msg", mid)
 
@@ -347,3 +349,53 @@ def test_an_edge_recorded_either_way_round_is_found_from_both_ends():
             sel = {"schema": 2, "selections": {seed_kind: {seed_id: 1}}}
             closure = pr.expand(indexes, pr.resolve(indexes, sel), opts)
             assert want_id in closure.included[want_kind], (recorded_by, seed_kind)
+
+
+def test_a_message_alternate_key_never_matches_another_conversations_message():
+    """The Phase 1 collision, coming back through the alternate key rather than the id.
+
+    ``server_message_id`` is a per-conversation ordinal, so message 3 exists in nearly every chat.
+    Recording it as a bare ``smid`` alternate made one ticked message resolve to a message in *every*
+    conversation that has that number -- which a real corpus run surfaced immediately as four ambiguous
+    selections. Both alternates are qualified with the conversation, exactly as the row id is.
+    """
+    indexes = build_indexes()
+    selection = {"schema": 2,
+                 "selections": {"msg": {f"conv-{CONV_A}|msg-1.0": {"conv": CONV_A, "smid": "1.0"}}}}
+    resolution = pr.resolve(indexes, selection)
+
+    assert resolution.seeds["msg"] == {f"conv-{CONV_A}|msg-1.0"}
+    assert not resolution.ambiguous and not resolution.moved
+
+    # and the same message number in the other conversation is a different row, not a second match
+    other = {"schema": 2,
+             "selections": {"msg": {f"conv-{CONV_B}|msg-1.0": {"conv": CONV_B, "smid": "1.0"}}}}
+    assert pr.resolve(indexes, other).seeds["msg"] == {f"conv-{CONV_B}|msg-1.0"}
+
+
+def test_a_message_whose_anchor_moved_is_found_by_conversation_time_and_sender():
+    """The fallback for a positional anchor, which recovering one more message would shift."""
+    msg = Index("msg")
+    msg.add(f"conv-{CONV_A}|msg-row7", smid="")
+    msg.keys[("ts_sender", f"{CONV_A}|1700000000|u-alice")].add(f"conv-{CONV_A}|msg-row7")
+    indexes = {"msg": msg}
+
+    selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV_A}|msg-row4": {
+        "conv": CONV_A, "ts": 1700000000, "sender": "u-alice"}}}}
+    resolution = pr.resolve(indexes, selection)
+    assert resolution.seeds["msg"] == {f"conv-{CONV_A}|msg-row7"}
+    assert resolution.moved and "conversation, time and sender" in resolution.moved[0]["how"]
+
+
+def test_the_time_and_sender_fallback_is_scoped_to_one_conversation():
+    """Two people can send at the same second in two chats; that is not one message."""
+    msg = Index("msg")
+    for cid in (CONV_A, CONV_B):
+        row = f"conv-{cid}|msg-row1"
+        msg.add(row, smid="")
+        msg.keys[("ts_sender", f"{cid}|1700000000|u-alice")].add(row)
+    indexes = {"msg": msg}
+
+    selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV_A}|msg-row9": {
+        "conv": CONV_A, "ts": 1700000000, "sender": "u-alice"}}}}
+    assert pr.resolve(indexes, selection).seeds["msg"] == {f"conv-{CONV_A}|msg-row1"}

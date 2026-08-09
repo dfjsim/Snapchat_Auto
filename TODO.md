@@ -48,6 +48,15 @@ corpus these are the correct answers, not defects.
 
 # Snapchat Memories report
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
+  - The **selection and report half is done** — `--selection` builds a partial report holding only the
+    ticked Memories (and whatever related items are asked for), see docs/report_partial.md. The PDF
+    half is not: it is the last, gated phase of that work.
+- Some published media is never referenced by any page, in a **full** report as well as a partial one:
+  a Memory group's file table lists `_dedup_media(members)`, which merges identical bytes across
+  members, so the equivalent files of the other members are published and never linked. They are
+  reachable through `media_by_cache_key.json` (which is how the cache reports show them), so nothing is
+  lost — but a reader browsing the folder finds files no page mentions. Either link them from the group
+  page as the duplicates they are, or stop publishing them.
 - We need to be able to filter/search by URL.
 - ~~Fix MEO decryption that fails in some cases.~~ **Fixed in v1.5.2** — four separate causes, see
   DONE.md ("Snapchat Memories report"). Still open in this area:

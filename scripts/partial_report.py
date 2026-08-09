@@ -35,8 +35,10 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 
+from scripts import app_version
 from scripts import report_ui
 from scripts import selection_file
+from scripts import source_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -147,12 +149,32 @@ PRESETS = {
 
 
 def default_options():
-    """The default policy: the ``recommended`` relations, one hop, legacy reports left out."""
+    """The default policy: the ``recommended`` relations, one hop, legacy reports left out.
+
+    The three ``*_mismatch`` / ``unresolved`` entries default to refusing. A partial report that
+    silently drops rows, or is built from evidence that is not what the selection was made from, is a
+    disclosure error rather than an inconvenience — so proceeding is always something the examiner asks
+    for explicitly, and is then stated on every page.
+    """
     return {"relations": dict(PRESETS["recommended"]),
             "transitive": False,
             "legacy_reports": False,
             "max_rows": 5000,
-            "unresolved": "refuse"}
+            "unresolved": "refuse",
+            "sources_mismatch": "refuse",
+            "version_mismatch": "refuse",
+            "no_reuse": False}
+
+
+#: Tokens a ``--relations`` spec accepts that are **not** relations: they set the rest of the policy.
+#: Named here so the CLI, the GUI dialog and :func:`parse_relations` cannot disagree about what is a
+#: relation and what is a switch.
+POLICY_TOKENS = ("transitive", "legacy_reports")
+
+
+def relation_tokens(spec):
+    """A ``--relations`` spec as its individual tokens, whitespace and separators normalised."""
+    return [t.strip() for t in (spec or "").replace(";", ",").split(",") if t.strip()]
 
 
 def parse_relations(spec):
@@ -161,15 +183,24 @@ def parse_relations(spec):
     A bare list turns the named relations on and everything else off; a leading ``-`` on any token
     switches to "the recommended set, minus these", which is what an examiner reaches for far more
     often than naming all eleven.
+
+    :data:`POLICY_TOKENS` may appear in the same list and are skipped here — they are switches, not
+    relations, and :func:`parse_policy` reads them from the same spec.
     """
     spec = (spec or "recommended").strip()
     if spec in PRESETS:
         return dict(PRESETS[spec])
-    tokens = [t.strip() for t in spec.replace(";", ",").split(",") if t.strip()]
+    tokens = [t for t in relation_tokens(spec) if t.lstrip("-") not in POLICY_TOKENS]
     unknown = [t.lstrip("-") for t in tokens if t.lstrip("-") not in _BY_KEY]
+    presets = [name for name in unknown if name in PRESETS]
+    if presets:
+        raise ValueError(f"'{presets[0]}' is a preset and has to stand on its own, not appear in a "
+                         f"list. Write out the relations you want, or subtract from the recommended "
+                         f"set with -name.")
     if unknown:
         raise ValueError(f"unknown relation(s): {', '.join(unknown)}. "
-                         f"Known: {', '.join(RELATION_KEYS)}")
+                         f"Known: {', '.join(RELATION_KEYS)}"
+                         f" (and the switches {', '.join(POLICY_TOKENS)})")
     subtractive = any(t.startswith("-") for t in tokens)
     out = dict(PRESETS["recommended"]) if subtractive else {r.key: False for r in RELATIONS}
     for token in tokens:
@@ -177,6 +208,20 @@ def parse_relations(spec):
             out[token[1:]] = False
         else:
             out[token] = True
+    return out
+
+
+def parse_policy(spec):
+    """The :data:`POLICY_TOKENS` a ``--relations`` spec asks for, as ``{name: bool}``.
+
+    ``"all"`` implies both — "everything" would be a strange thing to mean without them. Everything
+    else is off unless named, and ``-name`` turns one off again.
+    """
+    spec = (spec or "").strip()
+    out = {name: spec == "all" for name in POLICY_TOKENS}
+    for token in relation_tokens(spec):
+        if token.lstrip("-") in POLICY_TOKENS:
+            out[token.lstrip("-")] = not token.startswith("-")
     return out
 
 
@@ -352,11 +397,22 @@ def _candidates(index, kind, ticked_id, keys):
                 for hit in sorted(index.keys.get(("raw", str(value)), ())):
                     out.append((hit, f"the raw SHA-256 of one of its copies ({str(value)[:12]}...)"))
             continue
+        if name == "smid":
+            # A server message id is a **per-conversation ordinal**: message 3 exists in every chat.
+            # So this alternate is only ever looked up together with the conversation, exactly as the
+            # row id itself is qualified. Keying it on the bare number put the same selection on a
+            # message in every conversation -- the collision that qualifying the ids fixed, coming
+            # back in through the back door.
+            conv, smid = keys.get("conv"), keys.get("smid")
+            if conv and smid:
+                for hit in sorted(index.keys.get(("smid", f"{conv}|{smid}"), ())):
+                    out.append((hit, "its conversation and server message id"))
+            continue
         if name == "ts_sender":
-            ts, sender = keys.get("ts"), keys.get("sender")
-            if ts and sender:
-                for hit in sorted(index.keys.get(("ts_sender", f"{ts}|{sender}"), ())):
-                    out.append((hit, "its time and sender"))
+            conv, ts, sender = keys.get("conv"), keys.get("ts"), keys.get("sender")
+            if conv and ts and sender:
+                for hit in sorted(index.keys.get(("ts_sender", f"{conv}|{ts}|{sender}"), ())):
+                    out.append((hit, "its conversation, time and sender"))
             continue
         value = keys.get(name)
         if not value:
@@ -836,6 +892,12 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
     body.append("<div>The legacy Communications / LocalMemories reports have no row selection, so "
                 + ("they are included whole." if closure.options.get("legacy_reports")
                    else "they are <b>left out</b> of this extract entirely.") + "</div>")
+    body.append("<div>A full report keeps staged copies of <span class='mono'>cache_controller.db</span>"
+                " (with its write-ahead log applied and without) under "
+                "<span class='mono'>CacheController/sqlite_views/</span>, so every figure can be read "
+                "back from the database it came from. Those copies are <b>not</b> in this extract: they "
+                "are the whole database, every row of it, which is what an extract of selected rows "
+                "exists not to contain.</div>")
 
     excluded = closure.excluded_ref_count()
     body.append(f"<div><b>{excluded}</b> cross-reference(s) point at "
@@ -884,6 +946,101 @@ def write_manifest(closure, report_dir, prov=None):
     return path
 
 
+class EvidenceMismatch(RuntimeError):
+    """This run is not looking at what the selection was made from, and was not told to proceed."""
+
+
+def verdict_prov(verdict):
+    """A :class:`source_fingerprint.Verdict` in the shape the pages want, or ``None``.
+
+    ``None`` means *there was nothing to compare* — a selection from an external tool, or one saved
+    before the tool recorded fingerprints — and the pages render that as "not possible to verify".
+    Collapsing it into a failed verdict would read as "we checked and it did not match", which is a
+    different and more alarming statement than the truth.
+    """
+    if verdict is None or not verdict.comparable:
+        return None
+    return {"ok": bool(verdict.ok), "text": verdict.summary,
+            "rows": [{"role": line["what"],
+                      "detail": (f'{line["expected"]} -> {line["found"]}'
+                                 if line["status"] != source_fingerprint.MATCH
+                                 else str(line["found"] or "")),
+                      "verdict": source_fingerprint.status_text(line["status"]),
+                      "ok": line["status"] == source_fingerprint.MATCH,
+                      "note": line.get("note") or ""}
+                     for line in verdict.lines]}
+
+
+def check_evidence(request, sources):
+    """Is this run looking at what the selection was made from? Fills ``request.prov``.
+
+    Two checks, in this order, because a version difference invalidates reuse whatever the hashes say:
+    the build that produced the selection against the one running, then every source artifact. Both
+    verdicts land in the provenance either way — including when the examiner chooses to proceed through
+    a mismatch, which is then stated in the banner of every page.
+
+    Raises :class:`EvidenceMismatch` unless the options say to proceed.
+    """
+    expected = (request.selection or {}).get("sources") or {}
+    version = source_fingerprint.check_version((request.selection or {}).get("tool_version"))
+    verdict = source_fingerprint.verify(expected, sources)
+    allowed, why = source_fingerprint.reuse_allowed(
+        version, verdict, no_reuse=bool(request.options.get("no_reuse")))
+
+    request.prov["version"] = verdict_prov(version)
+    request.prov["sources"] = verdict_prov(verdict)
+    request.prov["reuse"] = {"allowed": allowed, "why": why}
+    request.prov.setdefault("tool_version", app_version.get_version())
+
+    refused = []
+    if not version.ok and request.options.get("version_mismatch", "refuse") == "refuse":
+        # A missing tool_version is not a mismatch to refuse over: an externally produced selection
+        # legitimately has none, and there is then nothing to reuse anyway.
+        if version.comparable:
+            refused.append(version.summary)
+    if not verdict.ok and request.options.get("sources_mismatch", "refuse") == "refuse":
+        if verdict.comparable:
+            refused.append(verdict.summary)
+    if refused:
+        raise EvidenceMismatch(
+            "This extraction is not what the selection was made from:\n  "
+            + "\n  ".join(refused)
+            + "\n" + source_fingerprint.verdict_text(verdict)
+            + "\nPass --sources-mismatch proceed (or --version-mismatch resolve) to build it anyway; "
+              "the mismatch is then recorded in the banner of every page and in "
+              "partial_manifest.json.")
+    return version, verdict
+
+
+class Request:
+    """Everything a partial run needs, settled **before** the pipeline starts.
+
+    One object rather than eight parameters threaded through the parser, and the thing the CLI and the
+    GUI both produce so neither can wire up a subtly different run.
+
+    ``selection``  the migrated payload (:func:`load_selection`)
+    ``options``    the relation policy (:func:`default_options`)
+    ``prov``       what the pages will say about how this extract was produced
+    ``links_dir``  the **full** report folder the selection was made in, which is where the
+                   cross-report manifests are read from — see docs/report_partial.md
+    ``dry_run``    resolve and expand, print what would be built, write nothing
+    """
+
+    __slots__ = ("selection", "options", "prov", "links_dir", "dry_run", "closure")
+
+    def __init__(self, selection, options=None, prov=None, links_dir="", dry_run=False):
+        self.selection = selection or {}
+        self.options = options or default_options()
+        self.prov = prov or {}
+        self.links_dir = links_dir
+        self.dry_run = bool(dry_run)
+        self.closure = None                        # filled in once the pipeline has decided it
+
+    @property
+    def legacy_reports(self):
+        return bool(self.options.get("legacy_reports"))
+
+
 def partial_dir(run_dir, stamp=None):
     """``<run>/Reports_partial_<stamp>`` — never the folder the full reports are in.
 
@@ -917,8 +1074,13 @@ def dry_run_text(closure):
         out.append(f"  {kind:<6} {counts['selected']:>8} {counts['pulled_in']:>10} "
                    f"{counts['total']:>9}")
 
+    # Only rows that are here *because of* a relation are counted. A relation also records its reason
+    # against a row the examiner ticked anyway -- two grouped Memories are each other's sibling -- and
+    # counting those made the tally claim rows the relation did not actually bring in.
     by_relation = defaultdict(int)
-    for reasons in closure.reasons.values():
+    for (kind, row_id), reasons in closure.reasons.items():
+        if closure.is_seed(kind, row_id):
+            continue
         for reason in reasons:
             if "relation: " in reason:
                 by_relation[reason.rsplit("relation: ", 1)[1].rstrip(")")] += 1

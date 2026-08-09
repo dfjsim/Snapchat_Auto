@@ -1951,7 +1951,7 @@ scConsumeHash();
 
 # --------------------------------------------------------------------------- entry
 
-def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, links_dir=None):
     """Work out which cache entries exist and what each links to, without hashing or publishing.
 
     Reading the database and joining the claims happens here — the closure cannot be decided without
@@ -1975,10 +1975,16 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
     mem_index = load_memory_index(app)
     # report_dir defaults to the parent of outdir when the report is placed under …/Reports/CacheController
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
-    chat_links, chat_by_message = load_chat_links(rdir)
-    memory_pages = load_memory_pages(rdir)
-    memory_media = load_memory_media(rdir)
-    cache_media = load_cache_media(rdir)
+    # The manifests the Memories, Conversations and Library/Caches reports write are read from
+    # `links_dir` when one is given. A partial run decides its whole closure before rendering anything,
+    # so nothing has written them into its own folder yet — it points this at the full report folder the
+    # selection was made in instead, which the version and source gates have already proved is the same
+    # evidence read by the same build (see docs/report_partial.md).
+    ldir = links_dir or rdir
+    chat_links, chat_by_message = load_chat_links(ldir)
+    memory_pages = load_memory_pages(ldir)
+    memory_media = load_memory_media(ldir)
+    cache_media = load_cache_media(ldir)
     # the shared, examiner-owned selection file every report of this run loads
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
     # links to the sibling reports are relative to CacheController_report.html (…/Reports/CacheController/)
@@ -2025,6 +2031,22 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                 cache_media=cache_media)
 
 
+def _drop_sqlite_views(outdir):
+    """Remove the staged database copies from a partial extract. True when there were any.
+
+    ``sqlite_open`` stages the database twice — with its ``-wal`` applied and without — and this report
+    keeps both next to itself, so an examiner can open the exact state each figure was read from. In a
+    **full** report that is transparency. In an extract of selected rows it is a complete copy of
+    ``cache_controller.db``: every row, every claim, every deleted-file record, none of it filtered. The
+    provenance says the copies were left out, which is a smaller loss than the alternative.
+    """
+    views = os.path.join(outdir, "sqlite_views")
+    if not os.path.isdir(views):
+        return False
+    shutil.rmtree(views, ignore_errors=True)
+    return True
+
+
 def render(stage, closure=None, prov=None):
     """Hash, publish and render. ``closure=None`` does the whole index, exactly as before."""
     all_entries = [record for _row_id, record in stage.sel.keep(closure)]
@@ -2056,7 +2078,11 @@ def render(stage, closure=None, prov=None):
                                     closure=closure, prov=prov)
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
     if closure is not None:
+        removed = _drop_sqlite_views(outdir)
         logger.info(f"  {len(all_entries)} of {len(stage.model)} cache entry/entries in this extract")
+        if removed:
+            logger.info(f"  sqlite_views/ removed: it holds complete copies of cache_controller.db, "
+                        f"which would put every row of the database into this extract")
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "
                 f"{stats['deleted']} deleted")

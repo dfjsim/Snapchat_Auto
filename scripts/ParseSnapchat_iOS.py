@@ -20,6 +20,7 @@ from io import BytesIO
 from scripts import DecryptLocalMemories_iOS
 from scripts import report_ui
 from scripts import source_fingerprint
+from scripts import partial_report
 import math
 import logging
 import numpy as np
@@ -1837,8 +1838,79 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
             logger.warning(f"Could not find Display name for local user {row['User ID']}, {Error}")
     return friends_df
 
+def _index_stages(partial, report_dir, args):
+    """The cheap half of every report, so the closure can be decided from all of them at once.
+
+    Every relation the examiner can follow runs in **both** directions across a report order that is
+    fixed by manifest dependencies, so a ticked cache entry has to be able to pull in a Memory even
+    though Memories renders first. That is only possible if every report's rows are known before any of
+    them renders — see docs/report_partial.md.
+
+    A report whose index fails is left out with one logged line, exactly as a failing report is in a
+    full run. Its ticked rows then come back from :func:`partial_report.resolve` as *not produced by
+    this run*, which is the honest outcome: refusing to build beats an extract quietly missing them.
+    """
+    from scripts import (cache_controller_report, cache_media_report, contacts_report,
+                         conversations_report, memories_media_report)
+
+    builders = (
+        ("Conversations", lambda: conversations_report.index(**args["conv"])),
+        ("Contacts", lambda: contacts_report.index(**args["ct"])),
+        ("Memories media", lambda: memories_media_report.index(**args["mem"])),
+        ("Cached media", lambda: cache_media_report.index(links_dir=partial.links_dir, **args["cm"])),
+        ("cache_controller", lambda: cache_controller_report.index(links_dir=partial.links_dir,
+                                                                   **args["cc"])),
+    )
+    stages = {}
+    for label, build in builders:
+        try:
+            stage = build()
+        except Exception as Error:
+            logger.error(f"{label} report failed while indexing: {Error}")
+            continue
+        if stage is not None:
+            stages[label] = stage
+    return stages
+
+
+def _render_partial(partial, report_dir, args, stages):
+    """Render only what the closure includes, in the order the manifests depend on."""
+    from scripts import (cache_controller_report, cache_media_report, contacts_report,
+                         conversations_report, memories_media_report)
+
+    closure, prov = partial.closure, partial.prov
+    conv_index = {}
+    stage = stages.get("Conversations")
+    if stage is not None:
+        try:
+            _report, conv_index = conversations_report.render(stage, closure=closure, prov=prov)
+        except Exception as Error:
+            logger.error(f"Conversations report failed: {Error}")
+
+    stage = stages.get("Contacts")
+    if stage is not None:
+        try:
+            contacts_report.render(stage, args["ct"]["outdir"], conv_index=conv_index,
+                                   closure=closure, prov=prov)
+        except Exception as Error:
+            logger.error(f"Contacts report failed: {Error}")
+
+    for label, module in (("Memories media", memories_media_report),
+                          ("Cached media", cache_media_report),
+                          ("cache_controller", cache_controller_report)):
+        stage = stages.get(label)
+        if stage is None:
+            continue
+        try:
+            module.render(stage, closure=closure, prov=prov)
+        except Exception as Error:
+            logger.error(f"{label} report failed: {Error}")
+
+    partial_report.write_manifest(closure, report_dir, prov)
+
+
 def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
-         tile_server="", zip_path="", hash_zip=False):
+         tile_server="", zip_path="", hash_zip=False, partial=None):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1863,6 +1935,12 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
 
     if report_dir is None:
         report_dir = "./Report_" + datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
+
+    # A partial run leaves the two legacy reports out by default: neither has row selection, so both
+    # are all-or-nothing, and including them whole would put every conversation and every Memory into
+    # an extract meant to hold a subset. `--relations legacy_reports` (GUI: the same checkbox) opts in.
+    legacy_wanted = partial is None or partial.legacy_reports
+    arroyo = []
 
     uuid_pattern = re.compile("[a-fA-F0-9-]{36}")
     previous = ""
@@ -1988,6 +2066,16 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         if not record.get("present"):
             logger.info(f"  {role}: not present ({record.get('why') or 'not located'})")
 
+    # A partial run establishes here, before any report is built, that it is looking at what the
+    # selection was made from and reading it with the same build. Refuses unless told to proceed;
+    # either way both verdicts end up in the provenance and, on a mismatch, in every page's banner.
+    if partial is not None:
+        version_verdict, sources_verdict = partial_report.check_evidence(partial, sources)
+        for line in source_fingerprint.verdict_text(version_verdict).splitlines():
+            logger.info("  " + line)
+        for line in source_fingerprint.verdict_text(sources_verdict).splitlines():
+            logger.info("  " + line)
+
     # if os.path.exists(groupPlist) and os.path.exists(snapchatFolder):
         # pass
     # else:
@@ -2100,11 +2188,14 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
             cache_links["by_key"].setdefault(cache_key, []).append(record)
         cache_links["by_message"].setdefault(
             f"{record['conversation_id']}|{record['server_message_id']}", []).append(record)
-    try:
-        with open(outputDir + "/cache_links.json", "w", encoding="utf-8") as manifest:
-            json.dump(cache_links, manifest)
-    except Exception as Error:
-        logger.debug(f"Could not write cache_links.json: {Error}")
+    # A partial run that is not including the legacy reports must not write this: it names every
+    # message of every conversation, which is precisely what such an extract is meant not to contain.
+    if legacy_wanted:
+        try:
+            with open(outputDir + "/cache_links.json", "w", encoding="utf-8") as manifest:
+                json.dump(cache_links, manifest)
+        except Exception as Error:
+            logger.debug(f"Could not write cache_links.json: {Error}")
 
     # The Conversations report renders these same rows itself (its own attachment handling, its own
     # per-conversation pages), so it needs them while Message Content still holds the raw attachment
@@ -2114,28 +2205,33 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # Conversations report uses it, so the legacy report's table is left exactly as it was.
     final_df = final_df.drop(columns=["Message Text"], errors="ignore")
 
-    for index, row in final_df.iterrows():
-        final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
+    if legacy_wanted:
+        for index, row in final_df.iterrows():
+            final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
 
-    logger.info("Cleaning up messages")
-    for index, row in final_df.iterrows():
-        if row["Content Type"] == "Video (Unknown Source)":
-            if not row["Message Content"].startswith("<video"):
+        logger.info("Cleaning up messages")
+        for index, row in final_df.iterrows():
+            if row["Content Type"] == "Video (Unknown Source)":
+                if not row["Message Content"].startswith("<video"):
+                    final_df = final_df.drop(index)
+            elif row["Content Type"] == "Sticker":
+                if not row["Message Content"].startswith("<a href"):
+                    final_df = final_df.drop(index)
+            elif not uuid_pattern.match(row["Client Conversation ID"]):
                 final_df = final_df.drop(index)
-        elif row["Content Type"] == "Sticker":
-            if not row["Message Content"].startswith("<a href"):
-                final_df = final_df.drop(index)
-        elif not uuid_pattern.match(row["Client Conversation ID"]):
-            final_df = final_df.drop(index)
-    
-    
 
-    html = getHtml(final_df, friends_df, group_df)
-    text_file = open(outputDir + "/Communications_legacy_report.html", "w", encoding="cp1252")
-    text_file.write(html)
-    text_file.close()
-    logger.info("Success, report can be found in " + os.path.abspath(outputDir))
-    logger.info("")
+        html = getHtml(final_df, friends_df, group_df)
+        text_file = open(outputDir + "/Communications_legacy_report.html", "w", encoding="cp1252")
+        text_file.write(html)
+        text_file.close()
+        logger.info("Success, report can be found in " + os.path.abspath(outputDir))
+        logger.info("")
+    else:
+        # The legacy report has no row selection, so it is all-or-nothing and this extract is not
+        # taking it. Its folder is the parser's staging area for chat attachments as well, so it is
+        # removed further down once the Conversations report has linked out what it needs.
+        logger.info("Legacy Communications report: not part of this extract (no row selection "
+                    "exists in it, so it is all-or-nothing)")
 
     # Conversations report: an index of every conversation plus one detail page each, built from
     # the same rows as the legacy report above (msg_df was taken before its content became HTML).
@@ -2156,33 +2252,84 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     except Exception as Error:
         logger.error(f"Reading contact identifiers failed: {Error}")
 
+    def legacy_memories_report():
+        """The legacy Memories / My Eyes Only report, run from whichever path is in force.
+
+        Like the legacy Communications report it has no row selection, so an extract either takes it
+        whole or leaves it out — and the default is out, because it decrypts every Memory on the device.
+        """
+        if not legacy_wanted:
+            logger.info("Legacy Memories report: not part of this extract (it decrypts every Memory "
+                        "on the device, and has no row selection)")
+            return
+        if keychain_file != "" and scdb != "":
+            # The legacy report takes a single folder path; give it the logged-in account's, which
+            # sccontent_folders() sorts first. (The new reports index every folder — index_sccontent.)
+            DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df,
+                                          SCContentFolder[0] if SCContentFolder else "",
+                                          out_dir=report_dir + "/LocalMemories_legacy")
+
+    # The arguments both paths use, built once. A partial run calls each report's index() and then its
+    # render(); a full run calls main(), which is the two in sequence. Assembling the arguments in one
+    # place is what stops the two paths drifting on some argument nobody thought to pass twice.
+    src_root = os.path.dirname(Application)
+    args = {
+        "conv": dict(msg_df=msg_df, friends_df=friends_df, group_df=group_df,
+                     outdir=report_dir + "/Conversations", cachefiles_dir=cachefiles_dir,
+                     arroyo=arroyo[0] if arroyo else None, tz=tz, owner_user_id=uuid,
+                     owner_username=current_username, cache_key_for=cacheControllerKey,
+                     report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
+        "ct": dict(friends_df=friends_df, outdir=report_dir + "/Contacts", owner_user_id=uuid,
+                   owner_username=current_username, friends_source=friends_source, tz=tz,
+                   report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
+        "mem": dict(app_or_root=snapchatFolder, keychain=keychain_file,
+                    outdir=report_dir + "/Memories", padding=padding, tz=tz, src_root=src_root,
+                    tile_server=tile_server),
+        "cm": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheMedia", tz=tz,
+                   src_root=src_root, report_dir=report_dir),
+        "cc": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheController", tz=tz,
+                   src_root=src_root, report_dir=report_dir),
+    }
+
+    if partial is not None:
+        stages = _index_stages(partial, report_dir, args)
+        indexes = {}
+        for stage in stages.values():
+            indexes.update(stage.indexes())
+        resolution = partial_report.resolve(indexes, partial.selection,
+                                            unresolved=partial.options.get("unresolved", "refuse"))
+        partial.closure = partial_report.expand(indexes, resolution, partial.options)
+        logger.info("Partial report — what this extract would contain:")
+        for line in partial_report.dry_run_text(partial.closure).splitlines():
+            logger.info("  " + line)
+        if partial.dry_run:
+            logger.info("--dry-run: nothing was written")
+            return
+        legacy_memories_report()
+        _render_partial(partial, report_dir, args, stages)
+        if not legacy_wanted:
+            # the parser's staging folder for chat attachments, and the legacy report's own output.
+            # The Conversations report has hard-linked what it needs out of it by now, so the bytes
+            # survive in Conversations/media/ while the folder — which holds every conversation's
+            # attachments — does not become part of the extract.
+            shutil.rmtree(report_dir + "/Communications_legacy", ignore_errors=True)
+        return
+
     try:
         from scripts import conversations_report
-        _report, conv_index = conversations_report.main(
-            msg_df, friends_df, group_df, report_dir + "/Conversations", cachefiles_dir,
-            arroyo=arroyo[0], tz=tz, owner_user_id=uuid, owner_username=current_username,
-            cache_key_for=cacheControllerKey, report_dir=report_dir,
-            primary=primary_doc, identifiers=identifiers)
+        _report, conv_index = conversations_report.main(**args["conv"])
     except Exception as Error:
         logger.error(f"Conversations report failed: {Error}")
 
     # Contacts report: one table of every contact, linked to that contact's conversation page.
     try:
         from scripts import contacts_report
-        contacts_report.main(friends_df, report_dir + "/Contacts", conv_index=conv_index,
-                             owner_user_id=uuid, owner_username=current_username,
-                             friends_source=friends_source, tz=tz, report_dir=report_dir,
-                             primary=primary_doc, identifiers=identifiers)
+        contacts_report.main(conv_index=conv_index, **args["ct"])
     except Exception as Error:
         logger.error(f"Contacts report failed: {Error}")
 
     #final_df.to_excel("test.xlsx")
-    if keychain_file != "" and scdb != "":
-        # The legacy report takes a single folder path; give it the logged-in account's, which
-        # sccontent_folders() sorts first. (The new reports index every folder — see index_sccontent.)
-        df_merge = DecryptLocalMemories_iOS.main(galleryEncrypteddb, scdb, keychain_file, memories_cache_df,
-                                                 SCContentFolder[0] if SCContentFolder else "",
-                                                 out_dir=report_dir + "/LocalMemories_legacy")
+    legacy_memories_report()
 
     # Memories media report: links every Memory to all its media (SCContent + caching-media
     # .pack) and geolocation. Handles both key schemas and multiple profiles; runs even
@@ -2191,10 +2338,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         from scripts import memories_media_report
         # Application is the extracted ".../ExtractedData/Application" folder; its parent is the
         # archive root, so source paths in the report show as "/Application/<UUID>/Documents/...".
-        memories_media_report.main(snapchatFolder, keychain_file, report_dir + "/Memories",
-                                   padding=padding, tz=tz,
-                                   src_root=os.path.dirname(Application),
-                                   tile_server=tile_server)
+        memories_media_report.main(**args["mem"])
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
@@ -2204,9 +2348,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # the links between the two are two-way.
     try:
         from scripts import cache_media_report
-        cache_media_report.main(snapchatFolder, report_dir + "/CacheMedia",
-                                tz=tz, src_root=os.path.dirname(Application),
-                                report_dir=report_dir)
+        cache_media_report.main(**args["cm"])
     except Exception as Error:
         logger.error(f"Cached media report failed: {Error}")
 
@@ -2215,9 +2357,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # those so it can read the manifests they wrote.
     try:
         from scripts import cache_controller_report
-        cache_controller_report.main(snapchatFolder, report_dir + "/CacheController",
-                                     tz=tz, src_root=os.path.dirname(Application),
-                                     report_dir=report_dir)
+        cache_controller_report.main(**args["cc"])
     except Exception as Error:
         logger.error(f"cache_controller report failed: {Error}")
     #return user_scoped_id

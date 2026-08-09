@@ -272,7 +272,7 @@ def _map_timezone(tzval):
 
 
 def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
-        tile_server="", run_name=None, pause=False, hash_zip=False):
+        tile_server="", run_name=None, pause=False, hash_zip=False, partial=None):
     """Do one extraction + report run. Shared by the GUI and the command line.
 
     Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
@@ -282,6 +282,12 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
 
     ``pause`` waits for a keypress at the end — the GUI wants that so the console does not vanish;
     a scripted run must not, or it hangs forever with nobody there to press a key.
+
+    ``partial`` (a :class:`partial_report.Request`) makes this a **partial** run: the same pipeline,
+    rendering only the rows the examiner's selection names plus the related items they asked for, into
+    ``Reports_partial_<stamp>/`` — never over the reports the selection was made in. The extraction
+    itself is unchanged, and ``ExtractedData/`` from the full run is reused as it always is, so a
+    partial run into the same run folder skips unzipping entirely.
     """
     started = os.getcwd()
     # The keychain read is cached for the length of a run (the legacy and current Memories
@@ -308,15 +314,37 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
             else:
                 logger.info("Found SnapFixedVideos folder, skipping that step")
+            # A partial extract gets its own folder. Overwriting the reports the examiner ticked rows
+            # in would destroy the very thing the extract is a subset of.
+            reports_subdir = "Reports"
+            if partial is not None:
+                reports_subdir = os.path.basename(partial_report.partial_dir("."))
+                if not partial.links_dir:
+                    # where the cross-report manifests are read from: this run folder's own full
+                    # reports, which is where the selection was made unless told otherwise
+                    partial.links_dir = os.path.abspath("Reports")
+                logger.info(f"Partial report: {os.path.abspath(reports_subdir)}")
+                logger.info(f"  cross-report links resolved against {partial.links_dir}")
             ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
-                                   padding=padding, tz=tz, report_dir="./Reports",
+                                   padding=padding, tz=tz, report_dir="./" + reports_subdir,
                                    tile_server=tile_server,
                                    zip_path=os.path.abspath(zip_path) if zip_path else "",
-                                   hash_zip=hash_zip)
+                                   hash_zip=hash_zip, partial=partial)
+            if partial is not None and partial.dry_run:
+                logger.info("--dry-run: no report was written")
+                return run_folder
             # Write the report index BEFORE the pause, so index.html exists when the "press any
             # key" prompt appears (previously the pause lived inside the parser and blocked this).
-            write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
-            logger.info(f"Report index: {os.path.abspath('index.html')}")
+            if partial is None:
+                write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
+                index_path = "index.html"
+            else:
+                # inside the extract, not beside it: the folder is the deliverable, so it carries its
+                # own index, its own provenance and its own manifest and can be handed over as it is
+                write_index(reports_subdir, ".", zip_path=zip_path, keychain_path=keychain,
+                            closure=partial.closure, prov=partial.prov)
+                index_path = os.path.join(reports_subdir, "index.html")
+            logger.info(f"Report index: {os.path.abspath(index_path)}")
             if pause:
                 os.system("pause")
         else:
@@ -363,6 +391,36 @@ def print_usage():
           "  --hash-zip yes          Also record the extraction ZIP's MD5 and SHA-256. Off by\n"
           "                          default: tens of GB is a long read, and it is the database\n"
           "                          hashes that bind what the reports contain.\n\n"
+          "Build a partial report from a saved selection (only the ticked rows, plus what you\n"
+          "ask for with them). Add --selection to a normal run; it writes its own folder,\n"
+          "Reports_partial_<stamp>/, and never touches the reports the selection was made in:\n"
+          "  --selection <file>      The selection.json (or .js) an examiner saved. Required for\n"
+          "                          everything else in this section.\n"
+          "  --relations <spec>      Which related items to bring in with the ticked rows:\n"
+          "                          minimal (only what a row cannot be shown without),\n"
+          "                          recommended (default), all, or a list - 'mem_cache,msg_cache'\n"
+          "                          to name them, or '-mem_group' for the recommended set minus\n"
+          "                          one. Add 'transitive' to keep following them, and\n"
+          "                          'legacy_reports' to include the two legacy reports whole\n"
+          "                          (neither has row selection, so they are all-or-nothing).\n"
+          "  --case-ref <text>       Case / exhibit reference, stamped on every page.\n"
+          "  --dry-run yes           Resolve the selection, work out what the extract would hold,\n"
+          "                          print it, and write nothing.\n"
+          "  --unresolved refuse|drop    A ticked row this run has no match for. Default refuse:\n"
+          "                          an extract quietly missing evidence is worse than one that\n"
+          "                          will not build.\n"
+          "  --sources-mismatch refuse|proceed   The source artifacts differ from the run the\n"
+          "                          selection was made in. Default refuse; proceed builds it and\n"
+          "                          states the mismatch in the banner of every page.\n"
+          "  --version-mismatch refuse|resolve   A different build produced the selection.\n"
+          "                          Default refuse; resolve builds it, re-derives everything, and\n"
+          "                          re-resolves the ticked rows against this run.\n"
+          "  --no-reuse yes          Re-derive everything from the evidence, reusing nothing an\n"
+          "                          earlier run produced.\n"
+          "  --max-rows <n>          Warn above this many included rows (default 5000).\n"
+          "  --links-dir <dir>       The full report folder the selection was made in, which is\n"
+          "                          where the cross-report manifests are read from (default:\n"
+          "                          the Reports folder of this run folder).\n\n"
           "Selections (the rows an examiner ticked in the reports):\n"
           "  --install-selection <file>   Put a saved selection.json (or .js) where the reports\n"
           "                          load it, as <report folder>/selection.js. Browsers refuse to\n"
@@ -379,25 +437,84 @@ def print_usage():
           "A headless run never pauses for a keypress, so it is safe to call from a script.")
 
 
-# The headless options, and whether each takes a value.
+# The headless options, and whether each takes a value. Every one does, which is what `_parse_cli`'s
+# idiom requires — hence `--dry-run yes` rather than a bare `--dry-run`.
 _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz": True,
-                "padding": True, "tile-server": True, "run-name": True, "hash-zip": True}
+                "padding": True, "tile-server": True, "run-name": True, "hash-zip": True,
+                # a partial run: the same pipeline, rendering only the rows a selection names
+                "selection": True, "relations": True, "case-ref": True, "unresolved": True,
+                "sources-mismatch": True, "version-mismatch": True, "no-reuse": True,
+                "max-rows": True, "links-dir": True, "dry-run": True}
+
+
+def _yes(value):
+    return str(value or "").strip().lower() in ("yes", "y", "true", "1", "on")
+
+
+def _partial_request(values):
+    """Build the :class:`partial_report.Request` a partial run needs. Returns (request, error).
+
+    Everything is settled here, before the pipeline starts, so the CLI and the GUI hand the parser the
+    same object and neither can wire up a subtly different run.
+    """
+    path = values["selection"]
+    if not os.path.isfile(path):
+        return None, f"selection file not found: {path}"
+    try:
+        payload, unattributed = partial_report.load_selection(path)
+    except selection_file.SelectionFormatError as error:
+        return None, str(error)
+    if unattributed:
+        # A schema-1 file's bare `msg-12.0` ids name a message number with no conversation, and that
+        # number restarts in every chat. Promoting them would invent a fact; the examiner re-ticks.
+        logger.warning(f"{len(unattributed)} message selection(s) in {os.path.basename(path)} name a "
+                       f"message number with no conversation, so they cannot be attributed and are "
+                       f"left out. Re-tick those messages in this run's reports and save again.")
+
+    options = partial_report.default_options()
+    try:
+        options["relations"] = partial_report.parse_relations(values.get("relations"))
+    except ValueError as error:
+        return None, str(error)
+    options.update(partial_report.parse_policy(values.get("relations")))
+    for name, key in (("unresolved", "unresolved"), ("sources-mismatch", "sources_mismatch"),
+                      ("version-mismatch", "version_mismatch")):
+        if values.get(name):
+            options[key] = values[name].strip().lower()
+    if options["unresolved"] not in ("refuse", "drop"):
+        return None, "--unresolved must be 'refuse' or 'drop'"
+    if options["sources_mismatch"] not in ("refuse", "proceed"):
+        return None, "--sources-mismatch must be 'refuse' or 'proceed'"
+    if options["version_mismatch"] not in ("refuse", "resolve"):
+        return None, "--version-mismatch must be 'refuse' or 'resolve'"
+    options["no_reuse"] = _yes(values.get("no-reuse"))
+    if values.get("max-rows"):
+        try:
+            options["max_rows"] = int(values["max-rows"])
+        except ValueError:
+            return None, f"--max-rows must be a number, not '{values['max-rows']}'"
+
+    counts = selection_file.selection_counts(payload)
+    prov = {"selection": {"name": os.path.basename(path),
+                          "sha256": selection_file.file_sha256(path),
+                          "digest": selection_file.selection_digest(payload),
+                          "exported": payload.get("exported") or "",
+                          "schema": payload.get("schema"),
+                          "tool_version": payload.get("tool_version") or "",
+                          "counts": counts},
+            "case_ref": (values.get("case-ref") or "").strip(),
+            "tool_version": get_version()}
+    logger.info(f"Selection {os.path.basename(path)}: "
+                + (", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()) if n)
+                   or "nothing ticked"))
+    return partial_report.Request(payload, options, prov,
+                                  links_dir=(values.get("links-dir") or "").strip(),
+                                  dry_run=_yes(values.get("dry-run"))), None
 
 
 def _parse_cli(args):
     """Parse the headless options. Returns (values, error message or None)."""
-    values, index = {}, 0
-    while index < len(args):
-        token = args[index]
-        name = token.lstrip("-/").lower()
-        if name not in _CLI_OPTIONS:
-            return values, f"unknown option '{token}'"
-        index += 1
-        if index >= len(args) or args[index].startswith("-"):
-            return values, f"'{token}' requires a value"
-        values[name] = args[index]
-        index += 1
-    return values, None
+    return _parse_options(args, _CLI_OPTIONS)
 
 
 def run_cli(args):
@@ -425,6 +542,16 @@ def run_cli(args):
         return 2
 
     logger.info(f"Snapchat Auto v{get_version()}")
+    partial = None
+    if values.get("selection"):
+        if os_mode != "ios":
+            print("Snapchat Auto: --selection is iOS only for now")
+            return 2
+        partial, error = _partial_request(values)
+        if error:
+            print(f"Snapchat Auto: {error}")
+            return 2
+
     try:
         folder = run(zip_path=zip_path, keychain=keychain,
                      workdir=values.get("workdir", "."), os_mode=os_mode, padding=padding,
@@ -432,7 +559,16 @@ def run_cli(args):
                      tile_server=(values.get("tile-server") or "").strip(),
                      run_name=values.get("run-name"), pause=False,
                      hash_zip=(values.get("hash-zip") or "").lower()
-                              in ("yes", "y", "true", "1"))
+                              in ("yes", "y", "true", "1"),
+                     partial=partial)
+    except partial_report.EvidenceMismatch as error:
+        # Its own exit code: a script driving several extractions needs to tell "this is the wrong
+        # evidence for that selection" apart from "the run broke".
+        logger.error(str(error))
+        return 3
+    except (LookupError, partial_report.AmbiguousSelection) as error:
+        logger.error(f"Selection could not be resolved against this run: {error}")
+        return 4
     except Exception as error:
         logger.error(f"Run failed: {error}")
         return 1
@@ -446,7 +582,13 @@ _SELECTION_OPTIONS = {"install-selection": True, "report-dir": True, "force": Tr
 
 
 def _parse_options(args, table):
-    """`_parse_cli`, against any option table. Returns (values, error message or None)."""
+    """Parse an option table where every option takes a value. Returns (values, error or None).
+
+    A value may begin with a single ``-``: ``--relations -mem_group`` means "the recommended relations
+    minus that one", and rejecting it as a missing value made the documented form unusable. Only a
+    ``--`` prefix still reads as another option, which is what catches the real mistake of writing two
+    options in a row and forgetting the value between them.
+    """
     values, index = {}, 0
     while index < len(args):
         token = args[index]
@@ -454,7 +596,7 @@ def _parse_options(args, table):
         if name not in table:
             return values, f"unknown option '{token}'"
         index += 1
-        if index >= len(args) or args[index].startswith("-"):
+        if index >= len(args) or args[index].startswith("--"):
             return values, f"'{token}' requires a value"
         values[name] = args[index]
         index += 1
@@ -519,6 +661,166 @@ def _hint(text, width=88):
     return sg.Text(textwrap.fill(text, width), font=("", 9), text_color="#eef3fa")
 
 
+def _relations_spec(state):
+    """The dialog's checkboxes as a ``--relations`` spec, so both front ends speak one vocabulary."""
+    tokens = [key for key, on in state["relations"].items() if on]
+    if state.get("transitive"):
+        tokens.append("transitive")
+    if state.get("legacy_reports"):
+        tokens.append("legacy_reports")
+    return ",".join(tokens) if tokens else "minimal"
+
+
+def _confirm_selection(path, workdir):
+    """Check a selection against the reports it was made in, before a long extraction starts.
+
+    A cheap up-front check, and not the authoritative one: it compares the fingerprints the selection
+    carries against the ones the **full report folder** recorded, which answers "does this selection
+    belong to that run". Whether the ZIP about to be processed is that same evidence can only be
+    answered once it is unpacked, and the pipeline checks that too. Asking here means the examiner
+    settles the question before waiting rather than after.
+
+    Returns True to go ahead.
+    """
+    try:
+        payload, _unattributed = partial_report.load_selection(path)
+    except selection_file.SelectionFormatError as error:
+        sg.popup_error(str(error), keep_on_top=True)
+        return False
+
+    version = source_fingerprint.check_version(payload.get("tool_version"))
+    problems = [] if version.ok or not version.comparable else [version.summary]
+
+    # the full reports of the run folder the partial one will be written into
+    reports = os.path.join(workdir or ".", "Reports")
+    recorded = source_fingerprint.read_sources(reports)
+    verdict = None
+    if recorded:
+        verdict = source_fingerprint.verify(payload.get("sources") or {}, recorded)
+        if not verdict.ok and verdict.comparable:
+            problems.append(verdict.summary)
+    if not problems:
+        return True
+
+    detail = "\n".join(f"  - {p}" for p in problems)
+    if verdict is not None:
+        detail += "\n\n" + source_fingerprint.verdict_text(verdict)
+    answer = sg.popup_yes_no(
+        "This selection was not made from what is about to be processed:\n\n" + detail
+        + "\n\nBuild the partial report anyway? The mismatch will be stated in the banner of every "
+          "page and recorded in partial_manifest.json.",
+        title="Selection does not match this evidence", keep_on_top=True)
+    return answer == "Yes"
+
+
+def _describe_selection(window, path, values):
+    """Say what a chosen selection file holds, and offer back the paths it was made from.
+
+    The paths are the point: the examiner ticked those rows against one extraction with one keychain,
+    and finding both again months later is the tedious part of building a partial report. A recorded
+    path that no longer exists is *not* filled in — it is reported as a hint, because a pre-filled path
+    that does not resolve is worse than an empty field.
+    """
+    note = window["selection_note"]
+    if not path:
+        note.update("")
+        return
+    if not os.path.isfile(path):
+        note.update("No such file.", text_color="#ffb0b0")
+        return
+    try:
+        payload, unattributed = partial_report.load_selection(path)
+    except selection_file.SelectionFormatError as error:
+        note.update(f"Not a selection file this build can read: {error}", text_color="#ffb0b0")
+        return
+
+    counts = selection_file.selection_counts(payload)
+    bits = [", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()) if n) or "nothing ticked"]
+    if payload.get("tool_version"):
+        bits.append(f"saved by {payload['tool_version']}")
+    if unattributed:
+        bits.append(f"{len(unattributed)} message tick(s) name a message number with no "
+                    f"conversation and cannot be attributed — re-tick those in this run's reports")
+
+    sources = payload.get("sources") or {}
+    for field, key in (("zip", "zip"), ("keychain", "keychain"), ("workdir", "workdir")):
+        recorded = (sources.get(key) or {}).get("path") if isinstance(sources.get(key), dict) \
+            else sources.get(key)
+        if not recorded:
+            continue
+        exists = os.path.exists(recorded)
+        if exists and not (values.get(field) or "").strip():
+            window[field].update(recorded)
+        elif not exists:
+            bits.append(f"the {field} it was made from is not at {recorded}")
+    note.update(" · ".join(bits), text_color="#eef3fa")
+
+
+def _relations_dialog(state):
+    """Which related items to bring in with the ticked rows. Edits *state* in place.
+
+    Each checkbox carries the basis of its association, because an examiner deciding whether to
+    include something needs to know what the association rests on, not only its name.
+    """
+    by_src = {}
+    for relation in partial_report.RELATIONS:
+        by_src.setdefault(relation.src, []).append(relation)
+    label = {"conv": "From a selected conversation", "msg": "From an included message",
+             "ct": "From a selected contact", "mem": "From a selected Memory",
+             "cc": "From a selected cache_controller entry",
+             "cm": "From a selected Library/Caches file"}
+
+    rows = [[sg.Text("Always included, and not optional:")]]
+    for line in partial_report.CONTAINMENT:
+        rows.append([sg.Text(f"   • {line}", font=("", 9))])
+    for src, relations in by_src.items():
+        rows.append([sg.Text(label.get(src, src), font=("", 10, "bold"), pad=((0, 0), (10, 0)))])
+        for relation in relations:
+            rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
+                                     key=f"rel_{relation.key}")])
+            rows.append([_hint("      " + relation.basis, width=100)])
+    rows.append([sg.Checkbox("Keep following these until nothing new is added (transitive)",
+                             default=state["transitive"], key="transitive",
+                             pad=((0, 0), (12, 0)))])
+    rows.append([_hint('      Off by default, and worth leaving off: with everything on, one message '
+                       'reaches its cache entry, then that entry\'s Memory, then that Memory\'s other '
+                       'entries, then their messages — which is most of a case. One hop from each '
+                       'ticked row is predictable and explainable.', width=100)])
+    rows.append([sg.Checkbox("Include the two legacy reports whole (Communications, Local Memories)",
+                             default=state["legacy_reports"], key="legacy_reports")])
+    rows.append([_hint('      Neither has row selection, so they are all-or-nothing. Left out by '
+                       'default: the legacy Memories report decrypts every Memory on the device.',
+                       width=100)])
+    rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
+                 sg.Button("Ok"), sg.Button("Cancel")])
+
+    window = sg.Window("Related items to include", [[sg.Column(rows, scrollable=True,
+                                                               vertical_scroll_only=True,
+                                                               size=(760, 560))]],
+                       modal=True, keep_on_top=True)
+    try:
+        while True:
+            event, values = window.read()
+            if event in (sg.WIN_CLOSED, "Cancel"):
+                return
+            if event in ("Minimal", "Recommended", "Everything"):
+                preset = {"Minimal": "minimal", "Recommended": "recommended",
+                          "Everything": "all"}[event]
+                for relation in partial_report.RELATIONS:
+                    window[f"rel_{relation.key}"].update(
+                        bool(partial_report.PRESETS[preset].get(relation.key)))
+                window["transitive"].update(preset == "all")
+                continue
+            if event == "Ok":
+                state["relations"] = {r.key: bool(values[f"rel_{r.key}"])
+                                     for r in partial_report.RELATIONS}
+                state["transitive"] = bool(values["transitive"])
+                state["legacy_reports"] = bool(values["legacy_reports"])
+                return
+    finally:
+        window.close()
+
+
 def main(args):
     flag = args[0].lstrip("-/").lower() if args else ""
     # Re-entry as the poster-frame worker. A packaged build has no interpreter to run
@@ -558,6 +860,12 @@ def main(args):
         return "."
 
     has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
+    # The relation policy for a partial run, remembered between runs (the selection file and the case
+    # reference are not — see the hints below the fields).
+    relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
+                                        or partial_report.PRESETS["recommended"]),
+                      "transitive": bool(cfg.get("partial", {}).get("transitive")),
+                      "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
     layout = [
         [sg.Text("Select Settings")],
         [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
@@ -583,6 +891,19 @@ def main(args):
         [_hint('Your own XYZ tile server, e.g. http://localhost:8080 or '
                'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
                'map on its detail page. Nothing is downloaded when this is empty.')],
+        [sg.Text('Selection file — build a partial report (optional, iOS)')],
+        [sg.In("", key="selection", enable_events=True),
+         sg.Button('Browse', key="selection_browse"),
+         sg.Button('Related items…', key="relations_edit")],
+        [_hint('A selection.json an examiner saved from the reports. With one, this run renders only '
+               'the rows it names plus the related items you choose, into its own '
+               'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
+               'for a normal, complete run.')],
+        [sg.Text('', key="selection_note", font=("", 9), text_color="#eef3fa")],
+        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
+        [sg.In("", key="case_ref")],
+        [_hint('Not remembered between runs: carrying one case reference onto another case is a real '
+               'error, and a saved default is how that happens.')],
         [sg.Text('Folder with newer builds, for update checks (optional)')],
         [sg.In(cfg.get("installer_dir", ""), key="installer_dir"),
          sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
@@ -627,6 +948,18 @@ def main(args):
             # at the field, instead of silently never offering an update.
             ok, message = check_installer_dir(values["installer_dir"])
             (sg.popup if ok else sg.popup_error)(message, title="Update checks", keep_on_top=True)
+        elif event == "selection_browse":
+            picked = sg.popup_get_file("Select a saved selection", no_window=True, keep_on_top=True,
+                                       file_types=(("Selection", "*.json *.js"), ("All", "*.*")),
+                                       initial_folder=_browse_start(values["selection"],
+                                                                   values["zip"], "workdir"))
+            if picked:
+                window["selection"].update(picked)
+                _describe_selection(window, picked, values)
+        elif event == "selection":
+            _describe_selection(window, values["selection"], values)
+        elif event == "relations_edit":
+            _relations_dialog(relation_state)
         elif event == "Ok":
             if not values["zip"] or not os.path.isfile(values["zip"]):
                 sg.popup_error("Please select a valid extraction ZIP file.")
@@ -645,6 +978,12 @@ def main(args):
                     continue
                 if not ok:
                     values["tile_server"] = ""
+            if values["selection"].strip():
+                if not os.path.isfile(values["selection"].strip()):
+                    sg.popup_error("That selection file does not exist.", keep_on_top=True)
+                    continue
+                if not _confirm_selection(values["selection"].strip(), values["workdir"]):
+                    continue
             break
     window.close()
 
@@ -653,6 +992,9 @@ def main(args):
                 "padding": values.get("padding", PADDING_OPTIONS[0]),
                 "timezone": values.get("timezone", "Local time"),
                 "tile_server": values.get("tile_server", "").strip(),
+                # The relation policy is a working preference and is remembered. The selection file and
+                # the case reference deliberately are not: both belong to one case.
+                "partial": relation_state,
                 # Never committed and never bundled: this repository is public, so an internal
                 # share path may only live in this examiner's own settings file.
                 "installer_dir": values.get("installer_dir", "").strip()})
@@ -663,12 +1005,27 @@ def main(args):
     if not (values[0] or values[1]):
         logger.error("Choose iOS or Android")
         return
+
+    partial = None
+    if values["selection"].strip():
+        # The same options table the CLI fills in, so the GUI cannot wire up a different run. The two
+        # mismatch answers were settled in the confirmation dialog above.
+        cli_values = {"selection": values["selection"].strip(),
+                      "relations": _relations_spec(relation_state),
+                      "case-ref": values.get("case_ref", "").strip(),
+                      "sources-mismatch": "proceed", "version-mismatch": "resolve"}
+        partial, error = _partial_request(cli_values)
+        if error:
+            logger.error(error)
+            sg.popup_error(error, keep_on_top=True)
+            return
+
     run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
         os_mode="ios" if values[0] else "android",
         padding=PADDING_MAP.get(values.get("padding"), "both"),
         tz=_map_timezone(values.get("timezone")),
         tile_server=values.get("tile_server", "").strip(),
-        pause=True)
+        pause=True, partial=partial)
 
 
 if __name__ == '__main__':
