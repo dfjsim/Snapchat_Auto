@@ -206,6 +206,20 @@ class Index:
                 self.keys[(name, str(value))].add(row_id)
         return row_id
 
+    def has(self, row_id):
+        return row_id in self.rows
+
+    def keep(self, closure):
+        """The subset of ``rows`` a closure includes, in this index's own order.
+
+        ``closure`` of ``None`` means a full run: everything, unchanged. That is the path every
+        existing caller takes, and it must stay indistinguishable from not having asked.
+        """
+        if closure is None:
+            return list(self.rows.items())
+        wanted = closure.included.get(self.kind, ())
+        return [(row_id, record) for row_id, record in self.rows.items() if row_id in wanted]
+
     def link(self, edge, src_id, dst_kind, dst_id):
         """Record one edge, from :data:`EDGES`. Direction does not matter — see :func:`_edge_map`.
 
@@ -219,6 +233,35 @@ class Index:
 
     def __len__(self):
         return len(self.rows)
+
+
+class Stage:
+    """What a generator's ``index()`` hands back, and what its ``render()`` takes.
+
+    One shape for all five generators, so ``ParseSnapchat_iOS.main`` can collect every index, decide
+    the closure once, and then render — without knowing what any particular report's model looks like.
+
+    * ``model`` is the generator's own structure (its conversations list, memories dict, entry list).
+      Nothing here interprets it.
+    * ``sel`` is the :class:`Index` — the closure's view: which rows exist, what else they can be found
+      by, and the edges this generator derived on the way.
+    * ``meta`` is whatever else its ``render()`` needs and its ``index()`` already worked out (the run
+      id, a timezone label, statistics), so the expensive half is not repeated.
+    """
+
+    __slots__ = ("kind", "model", "sel", "meta")
+
+    def __init__(self, kind, model, sel=None, **meta):
+        self.kind = kind
+        self.model = model
+        self.sel = sel if sel is not None else Index(kind)
+        self.meta = meta
+
+    def __getitem__(self, name):
+        return self.meta[name]
+
+    def get(self, name, default=None):
+        return self.meta.get(name, default)
 
 
 # --------------------------------------------------------------------------- resolution
