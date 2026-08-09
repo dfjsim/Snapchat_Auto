@@ -399,3 +399,47 @@ def test_the_time_and_sender_fallback_is_scoped_to_one_conversation():
     selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV_A}|msg-row9": {
         "conv": CONV_A, "ts": 1700000000, "sender": "u-alice"}}}}
     assert pr.resolve(indexes, selection).seeds["msg"] == {f"conv-{CONV_A}|msg-row1"}
+
+
+def test_a_grouped_memory_resolves_on_its_own_id_and_is_not_called_ambiguous():
+    """A real corpus run refused a selection that was never ambiguous.
+
+    ``ZMEDIAID`` identifies a *media object*, and grouped Memories share one by design — that is the
+    basis of Memory grouping. Collecting every candidate and refusing on more than one therefore made
+    every grouped Memory unresolvable, because its ``mediaid`` alternate matched both members. An exact
+    id match is the answer; the alternates exist only for an id that moved.
+    """
+    indexes = build_indexes()
+    sel = selection(mem=[("mem-SNAP-0001", {"snap": "SNAP-0001", "mediaid": "MEDIA-1"})])
+    res = pr.resolve(indexes, sel)
+
+    assert res.seeds["mem"] == {"mem-SNAP-0001"}
+    assert res.how[("mem", "mem-SNAP-0001")] == "its own id"
+    assert res.ok and not res.ambiguous and not res.moved
+
+
+def test_a_non_discriminating_alternate_is_skipped_for_one_that_names_a_single_row():
+    """`mediaid` matches both members of a group, so it decides nothing; `entry` here decides."""
+    indexes = build_indexes()
+    indexes["mem"].keys[("entry", "ENTRY-2")].add("mem-SNAP-0002")
+    sel = selection(mem=[("mem-SNAP-GONE", {"mediaid": "MEDIA-1", "entry": "ENTRY-2"})])
+    res = pr.resolve(indexes, sel)
+
+    assert res.seeds["mem"] == {"mem-SNAP-0002"}
+    assert "entry" in res.how[("mem", "mem-SNAP-0002")]
+    assert res.moved and res.moved[0]["was"] == "mem-SNAP-GONE"
+
+
+def test_an_id_with_only_non_discriminating_alternates_is_named_ambiguous_with_what_was_tried():
+    indexes = build_indexes()
+    sel = selection(mem=[("mem-SNAP-GONE", {"mediaid": "MEDIA-1"})])
+    with pytest.raises(pr.AmbiguousSelection, match="ambiguous"):
+        pr.resolve(indexes, sel)
+
+    res = pr.Resolution()
+    row_id, _how, weak = pr._resolve_one(indexes["mem"], "mem", "mem-SNAP-GONE",
+                                         {"mediaid": "MEDIA-1"})
+    assert row_id is None
+    assert weak and weak[0]["matches"] == ["mem-SNAP-0001", "mem-SNAP-0002"]
+    assert "mediaid" in weak[0]["by"]
+    assert res.ok                              # a fresh Resolution is unaffected by the probe
