@@ -48,6 +48,7 @@ from urllib.parse import unquote, urlparse
 
 from scripts import report_ui
 from scripts import app_version
+from scripts import partial_report
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -1734,14 +1735,15 @@ def collect_documents(app, ms_fmt, src_root=None, manifest=None):
 
 # --------------------------------------------------------------------------- entry
 
-def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
-    """Build the Library/Caches media + documents report.
+def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+    """Work out which cached files exist and what each links to, without publishing or rendering.
 
-    app_or_root : Snapchat app-container path, or any extraction root containing it.
-    outdir      : output directory (default: ./Snapchat_CacheMedia_report_<timestamp>).
-    tz          : timezone for displayed timestamps.
-    src_root    : extraction root, for archive-relative source paths.
-    report_dir  : the sibling reports root (…/Reports), for cross-report links.
+    The walk that hashes every file under ``Library/Caches`` happens here, because the closure cannot
+    be decided without knowing the rows. What it defers is the expensive-per-row half — copying the
+    decoded payloads out and extracting poster frames — so a partial run does that only for the files
+    it is going to show. See :func:`main` for the arguments.
+
+    Returns a :class:`partial_report.Stage`, or ``None`` when there is no ``Library/Caches`` at all.
     """
     app = find_app_container(app_or_root)
     if not os.path.isdir(os.path.join(app, "Library", "Caches")):
@@ -1776,6 +1778,40 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                    mem_index, memory_pages, chat_by_key, chat_by_message,
                                    packs=memory_packs)
 
+    # The closure's view. Rows keep their build order, which `render` preserves: the sort below
+    # happens after publishing today, and poster extraction runs under a budget, so re-ordering the
+    # publish could change which frames get extracted.
+    sel = partial_report.Index("cm")
+    for entry in entries:
+        row_id = f"cm-{entry['sha256'] or entry['rel']}"
+        # `raw` is the one alternate that is a list: this row's id is the hash of its *recovered*
+        # content and rows are merged by that content, so a build that decodes differently moves the
+        # id. Every copy's raw hash is what finds the row again.
+        sel.add(row_id, entry, sha=entry.get("sha256"), rel=entry.get("rel"))
+        for copy in entry.get("copies") or ():
+            if copy.get("raw_sha256"):
+                sel.keys[("raw", copy["raw_sha256"])].add(row_id)
+        for link in entry.get("links") or ():
+            if link.get("key"):
+                sel.link(partial_report.EDGE_CACHE_CACHEMEDIA, row_id, "cc", f"ck-{link['key']}")
+            if link.get("snap_id"):
+                sel.link(partial_report.EDGE_MEMORY_CACHEMEDIA, row_id, "mem",
+                         f"mem-{link['snap_id']}")
+            rec = link.get("rec") or {}
+            if rec.get("conversation_id") and rec.get("server_message_id"):
+                sel.link(partial_report.EDGE_CACHEMEDIA_MESSAGE, row_id, "msg",
+                         f"conv-{rec['conversation_id']}|msg-{rec['server_message_id']}")
+
+    return partial_report.Stage("cm", entries, sel, app=app, outdir=outdir, tz_label=tz_label,
+                                rdir=rdir, key_info=key_info, stats=stats, manifest=manifest,
+                                src_root=src_root, ms_fmt=ms_fmt)
+
+
+def render(stage, closure=None):
+    """Publish the files and write the report. ``closure=None`` publishes and renders everything."""
+    entries = [record for _row_id, record in stage.sel.keep(closure)]
+    outdir, app, rdir = stage["outdir"], stage["app"], stage["rdir"]
+
     publish_entries(entries, os.path.join(outdir, "files"))
     posters, no_poster, not_tried = publish_posters(entries, os.path.join(outdir, "files"))
     if posters or no_poster or not_tried:
@@ -1786,20 +1822,41 @@ def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                     + (f"; {not_tried} never attempted — listed without one, and not reported as "
                        f"undecodable" if not_tried else ""))
     entries.sort(key=lambda e: (e["category"], e["rel"]))
-    docs = collect_documents(app, ms_fmt, src_root, manifest)
+    docs = collect_documents(app, stage["ms_fmt"], stage["src_root"], stage["manifest"])
 
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
-    report, done = generate_report(entries, docs, outdir, tz_label, "../", key_info, stats,
-                                   device_path(app, src_root, manifest),
+    report, done = generate_report(entries, docs, outdir, stage["tz_label"], "../",
+                                   stage["key_info"], stage["stats"],
+                                   device_path(app, stage["src_root"], stage["manifest"]),
                                    report_ui.run_id(rdir))
     _write_manifest(entries, outdir)
     logger.info(f"Cached media report: {os.path.abspath(report)}")
+    if closure is not None:
+        logger.info(f"  {len(entries)} of {len(stage.model)} distinct file(s) in this extract")
     logger.info(f"  {done['total']} distinct file(s), {done['media']} evidentiary media, "
                 f"{done['linked']} linked to another report")
     logger.info(f"  {done['unrecovered']} not recovered; excluded from that count: "
                 f"{done['elsewhere']} decoded by the report that owns them (caching-media packs, "
                 f"SCPersistentMedia) and {done['assets']} app assets")
     return report
+
+
+def main(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
+    """Build the Library/Caches media + documents report.
+
+    app_or_root : Snapchat app-container path, or any extraction root containing it.
+    outdir      : output directory (default: ./Snapchat_CacheMedia_report_<timestamp>).
+    tz          : timezone for displayed timestamps.
+    src_root    : extraction root, for archive-relative source paths.
+    report_dir  : the sibling reports root (…/Reports), for cross-report links.
+
+    A full run in one call: :func:`index` then :func:`render`. A partial run calls the two halves
+    separately, so the closure is decided before anything is published.
+    """
+    stage = index(app_or_root, outdir=outdir, tz=tz, src_root=src_root, report_dir=report_dir)
+    if stage is None:
+        return None
+    return render(stage)
 
 
 def _ms_formatter(tz):

@@ -56,9 +56,11 @@ EDGE_MEMORY_CACHE = "memory_cache"                 # mem <-> cc
 EDGE_MESSAGE_CACHE = "message_cache"               # cc  <-> msg
 EDGE_CACHE_CACHEMEDIA = "cache_cachemedia"         # cc  <-> cm
 EDGE_MEMORY_CACHEMEDIA = "memory_cachemedia"       # mem <-> cm
+EDGE_CACHEMEDIA_MESSAGE = "cachemedia_message"     # cm  <-> msg
 
 EDGES = (EDGE_CONV_MESSAGE, EDGE_CONV_PARTICIPANT, EDGE_MEMORY_GROUP, EDGE_MEMORY_CACHE,
-         EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA)
+         EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA,
+         EDGE_CACHEMEDIA_MESSAGE)
 
 
 class Relation:
@@ -188,19 +190,29 @@ class Index:
     record it in whichever direction you derived it and both relations over it will find it.
     """
 
-    __slots__ = ("kind", "rows", "keys", "edges", "groups", "parents")
+    __slots__ = ("kind", "rows", "order", "keys", "edges", "groups", "parents")
 
     def __init__(self, kind):
         self.kind = kind
-        self.rows = {}
+        self.rows = {}                        # id -> record, for membership tests
+        self.order = []                       # (id, record) in the generator's own order
         self.keys = defaultdict(set)          # (key name, value) -> {id, …}
         self.edges = []
         self.groups = {}                      # id -> group id (Memories sharing a detail page)
         self.parents = {}                     # id -> the id that contains it (a message's conversation)
 
     def add(self, row_id, record=None, **alternates):
-        """Record a row and the identifiers it can also be found by."""
+        """Record a row and the identifiers it can also be found by.
+
+        ``order`` is the list, ``rows`` only the membership map — because **a row id is not
+        guaranteed unique**. ``contact_anchor`` falls back username -> conversation id ->
+        "ct-unknown", so two contacts can share one id. Rebuilding a report's rows from the map alone
+        silently dropped every duplicate, which the corpus byte-diff caught as a Contacts report
+        missing rows on all four devices. Two rows sharing an id do share one selection, which is a
+        real limitation of that fallback chain — but neither may vanish from the report.
+        """
         self.rows[row_id] = record
+        self.order.append((row_id, record))
         for name, value in alternates.items():
             if value:
                 self.keys[(name, str(value))].add(row_id)
@@ -210,15 +222,16 @@ class Index:
         return row_id in self.rows
 
     def keep(self, closure):
-        """The subset of ``rows`` a closure includes, in this index's own order.
+        """The rows a closure includes, in this index's own order, duplicates and all.
 
         ``closure`` of ``None`` means a full run: everything, unchanged. That is the path every
-        existing caller takes, and it must stay indistinguishable from not having asked.
+        existing caller takes, and it must stay indistinguishable from not having asked — which is
+        what the corpus byte-diff and ``tests/test_index_render_split.py`` both check.
         """
         if closure is None:
-            return list(self.rows.items())
+            return list(self.order)
         wanted = closure.included.get(self.kind, ())
-        return [(row_id, record) for row_id, record in self.rows.items() if row_id in wanted]
+        return [(row_id, record) for row_id, record in self.order if row_id in wanted]
 
     def link(self, edge, src_id, dst_kind, dst_id):
         """Record one edge, from :data:`EDGES`. Direction does not matter — see :func:`_edge_map`.
@@ -232,7 +245,9 @@ class Index:
         self.parents[child_id] = parent_id
 
     def __len__(self):
-        return len(self.rows)
+        # the row count, not the id count: two rows can share an id (see `add`), and the report's
+        # "N of M" has to state how many rows there are
+        return len(self.order)
 
 
 class Stage:
@@ -262,6 +277,15 @@ class Stage:
 
     def get(self, name, default=None):
         return self.meta.get(name, default)
+
+    def indexes(self):
+        """Every index this stage contributes, keyed by kind.
+
+        Usually one. The Conversations report contributes two — conversations and the messages inside
+        them are separately selectable — so it puts both here and the orchestrator does not need to
+        know which report is the exception.
+        """
+        return self.meta.get("indexes") or {self.kind: self.sel}
 
 
 # --------------------------------------------------------------------------- resolution
