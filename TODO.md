@@ -47,24 +47,57 @@ corpus these are the correct answers, not defects.
   report shows it; the legacy report still shows only the attachment.
 
 # Snapchat Memories report
-- **One index row per group, not per Memory**, expandable to show the members, with a single Details
-  link to the group's sub-page. Requested, and right: today a group of three Memories is three rows
-  each linking to the same sub-page, which reads as three findings.
-  What makes this more than a loop change — and the reason it is not folded into a UI pass:
-  - **Cross-report links target a specific snap.** Both cache reports link to
-    `Memories_report.html#mem-<ZSNAPID>`, and `SCV.goTo` resolves an anchor through the row index. With
-    one row per group anchored on the lead snap, every link naming a non-lead member lands on nothing.
-    The virtual table needs an **alias map** (member anchor -> group row) in `report_ui.VTABLE_JS`, which
-    is shared with four other reports.
-  - **Selection semantics.** The store holds `mem-<ZSNAPID>` per Memory, which is what a partial report
-    resolves and must not change. A group row's checkbox therefore has to tick every member
-    (`setMany`), read as mixed when only some are ticked, and the expanded row needs a checkbox per
-    member so part of a group can still be selected.
-  - **Every per-member column, filter and sort key has to aggregate**: user, MEO, thumbnail, media
-    state and the `-wal` badges are per-row today, and "any member matches" is the only honest rule for
-    a filter. The search text must carry every member's ids or searching a member's ZSNAPID stops
-    finding it.
-  Worth doing, with the corpus byte-diff around it, as its own change.
+
+## Fold a group behind its lead row, and filter by time  [designed, not started]
+
+Two requests that share one implementation. Today a group of three Memories is three index rows each
+linking to the same sub-page, which reads as three findings; and there is no way to find a Memory by
+time except sorting, which does not help when the time you have is one of the columns only the Details
+page shows.
+
+**Shape (decided): keep a row per Memory, display only the lead, render the members inside the lead's
+expanded area.** Every Memory keeps its own row, so its anchor, its `mem-<ZSNAPID>` selection id and
+every cross-report link into it keep working untouched — that is what makes this cheap where
+one-row-per-group was not. Members are rendered in the lead's detail block, each with its ZSNAPID, its
+times, its own checkbox and its own Details button (`pages/<key>.html#mem-<ZSNAPID>`, which already
+resolves — the sub-page emits a `<div id='mem-…'>` per member). Rendering them there rather than as
+revealed rows is deliberate: as real rows they would sort to their own positions and a group's members
+would scatter across the table under any non-default sort.
+
+**The Memories index has no expansion at all today** — 9 columns, no expander control, `detailBase:null`
+— so this adds it:
+- an expander control, which means one more column and shifting every `.vcells>.vc.cN` rule in that
+  report's CSS by one. Fiddly, invisible in a diff, and the reason this wants the corpus byte-diff
+  around it;
+- detail chunks via `report_ui.write_details` + `detailBase` + `chunk_of` in `rows[4]`, exactly as the
+  other four reports already do.
+
+**Timestamp filtering — a data-model change first.** `load_memories` stores `times` and `entry_times` as
+**formatted display strings** (`timefmt(er[c])`) and throws the raw value away. Filtering on them in the
+browser would mean parsing localized strings, so keep the epochs: parallel `times_utc` /
+`entry_times_utc` maps of raw unix seconds, used only for filtering. Do **not** change the values
+`_ts_table` renders — the displayed tables stay exactly as they are.
+
+Then the filter, over **every** timestamp a Memory has (capture time plus every ZGALLERYSNAP and
+ZGALLERYENTRY time column, including the ones only the Details page shows):
+- two modes: a **range** (from / to) and **relative** (within ± N minutes/hours/days of a given
+  date-time). `<input type="date">` / `datetime-local` work natively on `file://`;
+- a row matches when **any** of its timestamps falls in the window. The row's filter dict carries its
+  own epochs as a compact list.
+
+**Matching a non-lead, with auto-expansion.** A folded member that matches must still be findable: the
+lead is shown when the lead **or any member** matches, and when the match came from a member the lead is
+auto-expanded with the matching member highlighted. The predicate gets one row at a time, so give the
+lead its members' row ids and expose a small `SCV.filterOf(id)` so it can read their filter dicts —
+rather than duplicating every member's epochs onto the lead. The predicate must stay side-effect free;
+record which leads matched via a member in the report's own map, and after `SCV.refilter()` open those
+rows (a targeted `SCV.openRow(id)`, not `expandAll`).
+
+**Already true, do not re-solve:** `goTo('mem-<non-lead>')` from a cache report works, because `goTo`
+calls `C.reset()` when the target row is filtered out, and reset means "stop hiding anything" — so it
+un-folds the table and lands on the member.
+
+- Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
   - The **selection and report half is done** — `--selection` builds a partial report holding only the
     ticked Memories (and whatever related items are asked for), see docs/report_partial.md. The PDF
