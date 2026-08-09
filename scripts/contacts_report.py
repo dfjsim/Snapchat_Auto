@@ -30,6 +30,7 @@ import logging
 
 from scripts import report_ui
 from scripts import app_version
+from scripts import partial_report
 from scripts.data import sqlite_open
 
 logger = logging.getLogger(__name__)
@@ -775,6 +776,55 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
     return report
 
 
+def index(friends_df, outdir, owner_user_id="", owner_username="", friends_source="", tz="local",
+          report_dir=None, primary=None, identifiers=None):
+    """Work out which contacts exist, without writing anything. See :func:`main` for the arguments.
+
+    This is the half a partial run needs before it can decide what to render: reading the friends
+    artifact is cheap, and the closure has to know every contact (and every identifier each can be
+    found by) before any report is written. :func:`render` does the writing.
+    """
+    try:
+        from scripts.memories_media_report import make_time_formatter
+        tz_label = make_time_formatter(tz)[1]
+    except Exception as error:                                 # label only — never fail on it
+        logger.debug(f"Could not resolve the timezone label for {tz!r}: {error}")
+        tz_label = ""
+    rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
+    run_id = report_ui.run_id(rdir)
+    report_ui.write_selection_stub(rdir, run_id)
+    identifiers = load_identifiers(primary) if identifiers is None else identifiers
+    contacts = apply_identifiers(
+        normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)
+
+    sel = partial_report.Index("ct")
+    for contact in contacts:
+        # every identifier this contact has, because `contact_anchor`'s fallback chain (username ->
+        # conversation id -> "ct-unknown") is not guaranteed to survive a build that resolves one more
+        sel.add(contact_anchor(contact), contact,
+                uid=contact.get("user_id"), user=contact.get("username"),
+                conv=contact.get("conv_id"))
+
+    return partial_report.Stage("ct", contacts, sel, tz_label=tz_label, run_id=run_id,
+                                friends_source=friends_source,
+                                identifiers_read=bool(identifiers))
+
+
+def render(stage, outdir, conv_index=None, closure=None):
+    """Write the report from what :func:`index` worked out. ``closure=None`` renders every contact."""
+    contacts = [record for _row_id, record in stage.sel.keep(closure)]
+    report = generate_report(contacts, outdir, conv_index=conv_index,
+                             friends_source=stage["friends_source"], tz_label=stage["tz_label"],
+                             run_id=stage["run_id"], identifiers_read=stage["identifiers_read"])
+    logger.info(f"Contacts report: {os.path.abspath(report)}")
+    if closure is None:
+        logger.info(f"  {len(contacts)} contact(s) from "
+                    f"{stage['friends_source'] or 'an unrecorded source'}")
+    else:
+        logger.info(f"  {len(contacts)} of {len(stage.model)} contact(s) in this extract")
+    return report
+
+
 def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="",
          friends_source="", tz="local", report_dir=None, primary=None, identifiers=None):
     """Build the contacts report from the friends DataFrame ``ParseSnapchat_iOS`` recovered.
@@ -789,22 +839,11 @@ def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="
     identifiers  : an already-loaded ``load_identifiers(primary)``. The caller reads that file once
                    and gives the same result to both chat reports; passing None re-reads it from
                    ``primary``, which keeps this report usable on its own.
+
+    A full run in one call: :func:`index` then :func:`render`. A partial run calls the two halves
+    separately, because the closure has to be decided from every report's index at once.
     """
-    try:
-        from scripts.memories_media_report import make_time_formatter
-        tz_label = make_time_formatter(tz)[1]
-    except Exception as error:                                 # label only — never fail on it
-        logger.debug(f"Could not resolve the timezone label for {tz!r}: {error}")
-        tz_label = ""
-    rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
-    run_id = report_ui.run_id(rdir)
-    report_ui.write_selection_stub(rdir, run_id)
-    identifiers = load_identifiers(primary) if identifiers is None else identifiers
-    contacts = apply_identifiers(
-        normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)
-    report = generate_report(contacts, outdir, conv_index=conv_index,
-                             friends_source=friends_source, tz_label=tz_label, run_id=run_id,
-                             identifiers_read=bool(identifiers))
-    logger.info(f"Contacts report: {os.path.abspath(report)}")
-    logger.info(f"  {len(contacts)} contact(s) from {friends_source or 'an unrecorded source'}")
-    return report
+    stage = index(friends_df, outdir, owner_user_id=owner_user_id, owner_username=owner_username,
+                  friends_source=friends_source, tz=tz, report_dir=report_dir, primary=primary,
+                  identifiers=identifiers)
+    return render(stage, outdir, conv_index=conv_index)
