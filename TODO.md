@@ -90,6 +90,29 @@ corpus these are the correct answers, not defects.
     (imported as `_memkeys`). Optionally delete `scripts/parseSnapvideos_PREFETCH.py` (unused after).
   - Benefit: faster runs and no longer writing into `ExtractedData`.
 
+# Evidence hygiene: something still opens a database in place
+
+`sqlite_open` stages **copies** specifically so SQLite never creates or updates a `-shm` beside the
+original and never checkpoints it (see that module's docstring, and
+[sqlite_wal_handling.md](docs/sqlite_wal_handling.md)). But two runs of the same build over the same
+already-extracted folder leave the **Memories databases' `-shm` with a new mtime** — so something on
+that path still opens the original read-write, or read-only in a way that lets SQLite rebuild the
+shared-memory index. Found while establishing the run-to-run noise floor for the partial-report work.
+
+- The `-shm` **content** is unchanged (identical SHA-256 both runs), and no `-wal` or main database
+  file is touched, so nothing recovered is affected. It is the *writing into the evidence copy* that
+  should not be happening.
+- Likely candidates: the SQLCipher path (`memories_media_report.decrypt_gallery_db` stages a copy, but
+  `scdb-27.sqlite3` is also read on that path), or the bundled `sqlcipher3.exe` invocation. Compare
+  each database's `-shm` mtime before and after a run to narrow it down.
+- Related goal already recorded below: stop writing into `ExtractedData` at all (see the legacy
+  Memories / SnapFixedVideos cleanup).
+- Why it matters beyond tidiness: `scripts/source_fingerprint.py` deliberately does **not**
+  fingerprint the `-shm` because of this. If the tool stopped touching it, the `-shm` could be
+  fingerprinted like the `-wal` — but as long as our own run moves it, hashing it would make the tool
+  fail its own source verification over a file it modified itself, which is exactly the false alarm
+  that teaches an examiner to wave a sidecar difference through.
+
 # Code cleanup, performance and optimization
 - Fix Pylance/Pyright/Ruff warnings/errors.
 - Consider giving the user an option to make the report dependent on the device extraction ZIP archive for unencrypted media files.
