@@ -55,8 +55,14 @@ corpus these are the correct answers, not defects.
   a Memory group's file table lists `_dedup_media(members)`, which merges identical bytes across
   members, so the equivalent files of the other members are published and never linked. They are
   reachable through `media_by_cache_key.json` (which is how the cache reports show them), so nothing is
-  lost — but a reader browsing the folder finds files no page mentions. Either link them from the group
-  page as the duplicates they are, or stop publishing them.
+  lost — but a reader browsing the folder finds files no page mentions.
+  **Decided approach:** publish **one copy** of any given content and have every member that
+  references it link to that same file, rather than publishing a per-snap copy of identical bytes. The
+  group's file table then lists the file once and names every Memory that references it — which is what
+  the app data actually says (one media object under several snap rows) — while the report folder stops
+  carrying the same bytes two or three times. Note this changes published filenames and
+  `media_by_cache_key.json`, so it needs a fresh corpus byte-diff baseline; it is its own change, not
+  something to fold into another commit.
 - We need to be able to filter/search by URL.
 - ~~Fix MEO decryption that fails in some cases.~~ **Fixed in v1.5.2** — four separate causes, see
   DONE.md ("Snapchat Memories report"). Still open in this area:

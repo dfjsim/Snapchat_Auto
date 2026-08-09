@@ -429,6 +429,18 @@ def print_usage():
           "                          the conversion. Any existing file is backed up.\n"
           "  --report-dir <dir>      Which report folder to install into (default: ./Reports).\n"
           "  --force yes             Install even when the selection names a different run.\n\n"
+          "For another tool producing a selection (see docs/selection_format.md, and the\n"
+          "dependency-free 'snapchat-auto-selection' package if it can import Python):\n"
+          "  --describe-selection-api     What this build supports, as JSON: the schema range it\n"
+          "                          reads and writes, every kind and the identifiers it takes, and\n"
+          "                          the relation vocabulary. Ask this BEFORE writing a file -\n"
+          "                          pinning a package version does not prevent a mismatch with the\n"
+          "                          build an examiner has installed.\n"
+          "  --validate-selection <file>  Report every problem with a selection file, or confirm it\n"
+          "                          is valid. Exit code 0 when there are none.\n"
+          "  --make-selection <out.json> --items <items.json> [--relations <spec>] [--note <text>]\n"
+          "                          Build a selection from identifiers, without importing anything:\n"
+          "                          items.json is a list of {\"kind\": ..., <identifiers>} objects.\n\n"
           "Other:\n"
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
@@ -601,6 +613,131 @@ def _parse_options(args, table):
         values[name] = args[index]
         index += 1
     return values, None
+
+
+def describe_selection_api():
+    """`--describe-selection-api`: what this installed build supports, as JSON on stdout.
+
+    The handshake an external tool runs **before** writing a selection. Pinning a version of the
+    ``snapchat_auto_selection`` package does not remove version mismatch — the examiner's installed
+    build may read an older schema than the pinned one writes — it only relocates it, so the question
+    has to be asked of the executable that will consume the file.
+
+    The format half comes from the package (schemas, kinds, the identifiers each accepts). The rest is
+    what only this build knows: its own version, and the relation vocabulary a partial run understands.
+    """
+    from snapchat_auto_selection import api as selection_api
+
+    payload = dict(selection_api.describe())
+    payload["tool_version"] = get_version()
+    payload["relations"] = {
+        relation.key: {"label": relation.label, "from": relation.src, "to": relation.dst,
+                       "default": relation.default, "basis": relation.basis}
+        for relation in partial_report.RELATIONS}
+    payload["relation_presets"] = {name: sorted(k for k, on in preset.items() if on)
+                                   for name, preset in partial_report.PRESETS.items()}
+    payload["relation_switches"] = list(partial_report.POLICY_TOKENS)
+    payload["containment"] = list(partial_report.CONTAINMENT)
+    print(json.dumps(payload, indent=1, sort_keys=True))
+    return 0
+
+
+def run_validate_selection(args):
+    """`--validate-selection <file>`: report every problem with a selection file, or say it is valid."""
+    from snapchat_auto_selection import api as selection_api
+
+    path = args[0] if args else ""
+    if not path or not os.path.isfile(path):
+        print("--validate-selection needs a file: Snapchat_Auto --validate-selection <selection.json>")
+        return 2
+    try:
+        payload = selection_file.read_selection(path)
+    except selection_file.SelectionFormatError as error:
+        print(f"{os.path.basename(path)}: not a selection file this build can read\n  {error}")
+        return 1
+    problems = selection_api.validate(payload)
+    counts = selection_file.selection_counts(payload)
+    print(f"{os.path.basename(path)}: schema {payload.get('schema')}, "
+          + (", ".join(f"{n} {kind}" for kind, n in sorted(counts.items())) or "nothing selected"))
+    if payload.get("sources"):
+        print("  carries source fingerprints, so a partial run can verify the evidence")
+    else:
+        print("  no source fingerprints — a partial run will report that verification was not "
+              "possible, which is not an error")
+    for problem in problems:
+        print(f"  PROBLEM: {problem}")
+    return 1 if problems else 0
+
+
+_MAKE_OPTIONS = {"make-selection": True, "items": True, "relations": True, "note": True}
+
+
+def run_make_selection(args):
+    """`--make-selection <out.json> --items <items.json>`: build a selection from identifiers.
+
+    The two-process route for an integrator that cannot import Python: describe the items in a flat
+    JSON list, get a selection file back, then run it with ``--selection``. ``items.json`` is a list of
+    objects, each naming a ``kind`` and the identifiers that kind takes — the same names
+    :class:`snapchat_auto_selection.api.SelectionBuilder` accepts, and the ones
+    ``--describe-selection-api`` reports.
+    """
+    from snapchat_auto_selection import api as selection_api
+
+    values, error = _parse_options(args, _MAKE_OPTIONS)
+    if error:
+        print(f"Snapchat Auto: {error}\n")
+        print_usage()
+        return 2
+    out_path, items_path = values["make-selection"], values.get("items")
+    if not items_path or not os.path.isfile(items_path):
+        print("--make-selection needs --items <items.json>: a list of {\"kind\": …, identifiers…}")
+        return 2
+    try:
+        with open(items_path, encoding="utf-8-sig") as fh:
+            items = json.load(fh)
+    except (OSError, ValueError) as error:
+        print(f"Could not read {items_path}: {error}")
+        return 2
+    if isinstance(items, dict):                      # tolerate {"items": [...]}
+        items = items.get("items")
+    if not isinstance(items, list):
+        print(f"{items_path} should hold a list of items (or an object with an 'items' list)")
+        return 2
+
+    adders = {"conv": "add_conversation", "msg": "add_message", "ct": "add_contact",
+              "mem": "add_memory", "cc": "add_cache_entry", "cm": "add_cached_file"}
+    builder = selection_api.SelectionBuilder(note=values.get("note", ""))
+    for n, item in enumerate(items, 1):
+        if not isinstance(item, dict) or item.get("kind") not in adders:
+            print(f"item {n}: needs a 'kind' of {', '.join(sorted(adders))}")
+            return 2
+        fields = {k: v for k, v in item.items() if k != "kind"}
+        try:
+            getattr(builder, adders[item["kind"]])(**fields)
+        except TypeError as error:
+            print(f"item {n} ({item['kind']}): {error}")
+            return 2
+        except ValueError as error:
+            print(f"item {n}: {error}")
+            return 2
+    if values.get("relations"):
+        try:
+            partial_report.parse_relations(values["relations"])       # reject a typo now, not later
+        except ValueError as error:
+            print(f"Snapchat Auto: {error}")
+            return 2
+        builder.set_relations(values["relations"])
+
+    problems = selection_api.validate(builder.to_payload())
+    for problem in problems:
+        print(f"PROBLEM: {problem}")
+    if problems:
+        return 1
+    builder.write_json(out_path)
+    counts = builder.count()
+    print(f"{out_path}: " + (", ".join(f"{n} {kind}" for kind, n in sorted(counts.items()))
+                             or "nothing selected"))
+    return 0
 
 
 def run_install_selection(args):
@@ -837,6 +974,12 @@ def main(args):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
     if flag in ("install-selection", "installselection"):
         sys.exit(run_install_selection(args))
+    if flag in ("describe-selection-api", "describeselectionapi"):
+        sys.exit(describe_selection_api())
+    if flag in ("validate-selection", "validateselection"):
+        sys.exit(run_validate_selection(args[1:]))
+    if flag in ("make-selection", "makeselection"):
+        sys.exit(run_make_selection(args))
     if flag in _CLI_OPTIONS:                                  # a headless run
         sys.exit(run_cli(args))
     if flag:                                                  # an argument was given but not

@@ -892,6 +892,12 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
     body.append("<div>The legacy Communications / LocalMemories reports have no row selection, so "
                 + ("they are included whole." if closure.options.get("legacy_reports")
                    else "they are <b>left out</b> of this extract entirely.") + "</div>")
+    body.append("<div>The files in this folder are the media the included rows display, and nothing "
+                "else. <b>Encrypted cached bytes are never copied into a report</b> — not into a full "
+                "one either: they are hashed as stored, and the hashes are on the row. Nor are the "
+                "byte-range shards of a split file; what is published is the reconstructed whole. "
+                "Without the databases and the keychain, ciphertext sitting in this folder could not "
+                "be decrypted by anyone reading it anyway.</div>")
     body.append("<div>A full report keeps staged copies of <span class='mono'>cache_controller.db</span>"
                 " (with its write-ahead log applied and without) under "
                 "<span class='mono'>CacheController/sqlite_views/</span>, so every figure can be read "

@@ -37,6 +37,11 @@ Memories / My Eyes Only.
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
   encrypted").
+- Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
+  member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
+  API, so another tool can produce a selection without taking on this project's dependencies. The app
+  imports the same module (`scripts/selection_file.py` re-exports it) — one implementation. Its
+  dependency list must stay empty; a test walks its ASTs to enforce that.
 - Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd` (portable onefile
   EXE), MSI via `uv run build` (`dfjsim_shared_tools`). `[project].version` carries a
   `+build.<N>` tag because the optional update check compares it against installer filenames —
@@ -105,6 +110,10 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
 
 ## Research notes / findings
 
+- [The selection file format](docs/selection_format.md) — the **normative** spec another tool writes a
+  selection against, plus the `snapchat_auto_selection` API and the
+  `--describe-selection-api` handshake to run before writing one. Written for "an external tool"
+  generally; no specific product is named.
 - [Partial reports](docs/report_partial.md) — the selection file the examiner saves (schema, the
   `.json`/`.js` forms and why renaming one to the other fails silently, `--install-selection`), the
   source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a
