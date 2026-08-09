@@ -232,10 +232,13 @@ def contact_link_index(contacts):
     holds all of that contact's identifiers.
 
     ``href`` is relative to the **reports root**; the caller prefixes it with its own depth.
+    ``anchor`` is the same row's id on its own, so a caller that has to decide whether that row is in
+    a partial report does not re-derive it through :func:`contact_anchor` and risk disagreeing.
     """
     index = {}
     for contact in contacts:
         entry = {"href": f"Contacts/Contacts_report.html#{contact_anchor(contact)}",
+                 "anchor": contact_anchor(contact),
                  "display": contact["display"], "username": contact["username"],
                  "user_id": contact["user_id"], "is_owner": contact["is_owner"]}
         for key in (contact["user_id"], contact["username"], contact["display"]):
@@ -479,15 +482,17 @@ _WHY_LABEL = {
 }
 
 
-def _contact_detail(contact, convs, rel_prefix):
+def _contact_detail(contact, convs, rel_prefix, closure=None):
     """The expanded contact row: every conversation they are in, with its conversation id."""
     if convs:
         rows = "".join(
             "<tr>"
-            + (f'<td><a class="openbtn" target="scauto_conv_page" '
-               f'href="{rel_prefix}Conversations/{_esc(c["page"])}#conv-{_esc(c["id"])}" '
-               f'title="open this conversation in its own tab">'
-               f'{text_html(c.get("title") or c["id"])} &#9656;</a></td>'
+            + (f'<td>' + report_ui.xref(
+                f'<a class="openbtn" target="scauto_conv_page" '
+                f'href="{rel_prefix}Conversations/{_esc(c["page"])}#conv-{_esc(c["id"])}" '
+                f'title="open this conversation in its own tab">'
+                f'{text_html(c.get("title") or c["id"])} &#9656;</a>',
+                [("conv", f'conv-{c["id"]}')], closure=closure) + "</td>"
                if c.get("page") else
                f'<td>{text_html(c.get("title") or c["id"])}</td>')
             + f'<td class="mono">{_esc(c["id"])}</td>'
@@ -521,7 +526,8 @@ def _contact_detail(contact, convs, rel_prefix):
 
 
 def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_label="",
-                    run_id="default", rel_prefix="../", identifiers_read=False):
+                    run_id="default", rel_prefix="../", identifiers_read=False,
+                    closure=None, prov=None):
     """Write ``Contacts_report.html`` (+ ``data/index.js``) and return its path.
 
     ``conv_index`` maps a conversation id to what the Conversations report knows about it
@@ -537,7 +543,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
 
     data_dir = os.path.join(outdir, "data")
     all_convs = {contact_anchor(c): contact_conversations(c, conv_index) for c in contacts}
-    details = [(contact_anchor(c), _contact_detail(c, all_convs[contact_anchor(c)], rel_prefix))
+    details = [(contact_anchor(c),
+                _contact_detail(c, all_convs[contact_anchor(c)], rel_prefix, closure))
                for c in contacts]
     chunk_of = report_ui.write_details(data_dir, details)
 
@@ -576,11 +583,14 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
             more = (f' <span class="more" title="in {len(convs) - 1} more conversation(s) — expand '
                     f'this row to see them all">+{len(convs) - 1}</span>') if len(convs) > 1 else ""
             if lead.get("page"):
-                conv_cell = (f'<a class="openbtn" target="scauto_conv_page" '
-                             f'href="{rel_prefix}Conversations/{_esc(lead["page"])}'
-                             f'#conv-{_esc(lead["id"])}" title="open this conversation in its own '
-                             f'tab">{text_html(lead.get("title") or lead["id"])} &#9656;</a>{more}'
-                             f'<div class="cid">{_esc(lead["id"])}</div>')
+                conv_cell = (report_ui.xref(
+                                 f'<a class="openbtn" target="scauto_conv_page" '
+                                 f'href="{rel_prefix}Conversations/{_esc(lead["page"])}'
+                                 f'#conv-{_esc(lead["id"])}" title="open this conversation in its '
+                                 f'own tab">{text_html(lead.get("title") or lead["id"])} '
+                                 f'&#9656;</a>',
+                                 [("conv", f'conv-{lead["id"]}')], closure=closure, brief=True)
+                             + f'{more}<div class="cid">{_esc(lead["id"])}</div>')
             else:
                 conv_cell = (f'{text_html(lead.get("title") or lead["id"])}{more}'
                              f'<div class="cid">{_esc(lead["id"])}</div>')
@@ -656,6 +666,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
  .foot{padding:14px 24px;color:#777;font-size:11.5px}
 """
 
+    partial_css, banner, figures = partial_report.page_chrome(closure, "ct", prov)
+
     counts_hint = ("Message and time counts are the total across EVERY conversation this contact "
                    "takes part in (see the Conversations column), taken from the Conversations "
                    "report — not just the conversation the friends list names. First / last are the "
@@ -666,7 +678,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Snapchat contacts</title>'
            f'<style>{report_ui.PAGE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}</style>'
+           f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="ct";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="{rel_prefix}selection.js"></script>'
@@ -687,7 +699,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
               f' &middot; <span title="the username index tables were not available">no username '
               f'history available</span>'
               f'{report_ui.info_icon(PRIMARY_SOURCE_NOTE)}') +
-           f'</div></header>'
+           f'{figures}</div></header>'
+           f'{banner}'
            f'{_source_block(friends_source)}'
            # the "row data missing" banner fires on an empty row set, so only emit it when there
            # are contacts to load in the first place
@@ -810,12 +823,13 @@ def index(friends_df, outdir, owner_user_id="", owner_username="", friends_sourc
                                 identifiers_read=bool(identifiers))
 
 
-def render(stage, outdir, conv_index=None, closure=None):
+def render(stage, outdir, conv_index=None, closure=None, prov=None):
     """Write the report from what :func:`index` worked out. ``closure=None`` renders every contact."""
     contacts = [record for _row_id, record in stage.sel.keep(closure)]
     report = generate_report(contacts, outdir, conv_index=conv_index,
                              friends_source=stage["friends_source"], tz_label=stage["tz_label"],
-                             run_id=stage["run_id"], identifiers_read=stage["identifiers_read"])
+                             run_id=stage["run_id"], identifiers_read=stage["identifiers_read"],
+                             closure=closure, prov=prov)
     logger.info(f"Contacts report: {os.path.abspath(report)}")
     if closure is None:
         logger.info(f"  {len(contacts)} contact(s) from "

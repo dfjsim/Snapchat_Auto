@@ -31,6 +31,19 @@ and exactly how each cross-link is derived**. Each per-report page documents its
 > matched, whether it was a primary or fallback method, how the bytes were located/decrypted). The
 > text below is what those icons summarise.
 
+Two things follow from this page being the single reference, and both are load-bearing:
+
+* **The link scheme is also the relation graph.** A partial report grows the examiner's selection along
+  exactly the associations described below — a ticked cache entry pulling in its Memory is this page's
+  `cache_controller → Memory` link, read as a relation. So the generators hand those associations to
+  `partial_report.expand` as *edges* rather than deriving them a second time; an edge is recorded in
+  whichever direction its owner works it out, and both relations over it find it. See
+  [report_partial.md](report_partial.md).
+* **Every cross-report link is emitted through `report_ui.xref`.** That is the one place that can mark a
+  link whose target is not in the folder, which a partial report needs and a full report never triggers
+  (with no closure `xref` returns the caller's markup untouched). A new link that does not go through it
+  will silently point at nothing in a partial extract.
+
 ## Anchor scheme (stable IDs)
 
 | Report | Anchor id | On what element | Written by |

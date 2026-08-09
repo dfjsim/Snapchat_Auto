@@ -19,6 +19,10 @@ This module provides the pieces both reports now share:
   sticky toolbar, highlight it, and — crucially — keep working when the link is clicked again into
   an already-open tab (see "Re-entrant anchors" below).
 * :data:`HINT_JS` / :data:`HINT_CSS` / :func:`info_icon` — the "?" popover used by all reports.
+* :func:`xref` / :func:`narrow` / :data:`PARTIAL_CSS` — every cross-report link goes through
+  ``xref``, which is what lets a **partial** report mark a link whose target it does not contain
+  instead of leaving one that goes nowhere. With no closure it returns the caller's markup unchanged,
+  so a full report is unaffected.
 * :data:`PAGE_CSS` — the page chrome (header, toolbar, sections, key/value grids, media buttons)
   the Conversations and Contacts reports share.
 
@@ -37,6 +41,7 @@ browser fires **no** event at all, so the target row would never be expanded/scr
 """
 
 import os
+import re
 import sys
 import json
 import html
@@ -187,6 +192,96 @@ def info_icon(text):
         return ""
     return ('<span class="hint"><span class="qm" onclick="hint(event,this)">?</span>'
             f'<span class="tip">{html.escape(str(text))}</span></span>')
+
+
+# --------------------------------------------------------------------------- links out of a partial
+
+#: What a link to an excluded row says. The plan wrote this marker as U+20E0 (COMBINING ENCLOSING
+#: CIRCLE BACKSLASH), which is a combining mark and renders unpredictably with no base character, so
+#: the reports use U+2298 (CIRCLED DIVISION SLASH) instead — same reading, one standalone glyph.
+XOUT_MARK = "&#8856;"
+XOUT_LABEL = "not in this partial report"
+
+_ANCHOR_INNER = re.compile(r"^<a\b[^>]*>(.*)</a>$", re.S)
+_ANY_TAG = re.compile(r"<[^>]+>")
+
+
+def xref(link_html, targets, *, closure=None, label=None, brief=False, hint=""):
+    """One cross-report link, either live or marked absent — the single place that decision is made.
+
+    A link between two reports is only meaningful when both ends are in the folder. In a partial
+    report they often are not, and the two dishonest options are a link that goes nowhere and a link
+    that was silently deleted: the first misleads, the second hides that an association exists at all.
+    So an excluded target keeps **its label and its identifier as visible text** and gains the
+    :data:`XOUT_LABEL` marker. The examiner can still see *what* is not here, and
+    ``partial_manifest.json`` lists every one.
+
+    ``link_html``  the anchor the report would emit anyway, built by the caller. This helper *wraps*,
+                   it does not build: every call site has its own classes, target window, emoji and
+                   attribute order, and rebuilding all of them here would rewrite the markup of every
+                   full report for no gain. With ``closure=None`` the argument is returned untouched,
+                   so a full run is byte-identical by construction rather than by inspection.
+    ``targets``    the ``(kind, row id)`` pairs this link reaches. Live when **any** of them is
+                   included; a link to a set of rows should be narrowed with :func:`narrow` first, so
+                   its label states how many it really reaches.
+    ``label``      overrides the visible text; by default the anchor's own inner HTML is kept.
+    ``brief``      for a fixed-height index cell: the marker alone, with the sentence in the tooltip.
+    """
+    if closure is None:
+        return link_html
+    targets = [(kind, row_id) for kind, row_id in targets if kind and row_id]
+    if not targets or any(closure.has(kind, row_id) for kind, row_id in targets):
+        return link_html
+    if label is None:
+        match = _ANCHOR_INNER.match(link_html.strip())
+        # not an anchor we recognise: strip the markup rather than emit it, so a live <a> can never
+        # survive inside the marker
+        label = match.group(1) if match else _ANY_TAG.sub("", link_html)
+    for kind, row_id in targets:
+        closure.note_excluded(kind, row_id)
+    reaches = ", ".join(dict.fromkeys(row_id for _kind, row_id in targets))
+    title = hint or f"{XOUT_LABEL}. In the full report this link reaches {reaches}."
+    text = XOUT_MARK if brief else f"{XOUT_MARK} {XOUT_LABEL}"
+    return (f'<span class="xout" title="{html.escape(title)}">{label}'
+            f'<span class="xno">{text}</span></span>')
+
+
+def narrow(closure, kind, values, anchor):
+    """The subset of *values* whose row is in this partial report, and how many were dropped.
+
+    For a link whose target is a **set** of rows (a ``#find=`` fragment, see :func:`find_fragment`):
+    the fragment is narrowed to the rows that are actually there, so the receiving report does not
+    open filtered to nothing, and the caller can state the true count in its own label.
+    """
+    if closure is None:
+        return list(values), 0
+    kept = [value for value in values if closure.has(kind, anchor(value))]
+    return kept, len(values) - len(kept)
+
+
+# The partial report's own furniture: the banner, the "N of M" figures, the excluded-link marker, the
+# grouped-sibling note and the provenance block. Rendered by `partial_report`; styled here so all five
+# reports look the same, and harmless in a full report, which emits none of it.
+PARTIAL_CSS = """
+ .pbanner{background:#fff3cd;border-top:3px solid #b8860b;border-bottom:1px solid #e0c060;
+   color:#5c4400;padding:10px 24px;font-size:13px;line-height:1.5}
+ .pbanner b{color:#3d2d00} .pbanner .pttl{font-size:14px;letter-spacing:.3px}
+ .pbanner .pmis{color:#7a1f1f} .pbanner ul{margin:6px 0 0 18px;padding:0}
+ .pfig{opacity:.85;font-size:12px}
+ .xout{color:#7a6000;background:#fff8e0;border:1px dashed #d0b060;border-radius:4px;
+   padding:1px 5px;font-size:11.5px;white-space:nowrap;display:inline-block;max-width:100%;
+   overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+ .xout .xno{margin-left:5px;opacity:.8;font-weight:600}
+ .psib{background:#eef0ff;border:1px solid #c4c8ee;color:#2d2d71;border-radius:4px;
+   padding:1px 5px;font-size:11.5px;margin-left:6px}
+ .prov{margin:0;background:#fff;border-bottom:1px solid #dcdce8;font-size:12.5px}
+ .prov>summary{cursor:pointer;padding:8px 24px;font-weight:600;color:#2d2d71}
+ .prov .provbody{padding:2px 24px 14px}
+ .prov table{border-collapse:collapse;margin:6px 0;font-size:12px}
+ .prov th,.prov td{border:1px solid #dcdce8;padding:3px 7px;text-align:left;vertical-align:top}
+ .prov th{background:#f4f4f8} .prov .mono{font-family:ui-monospace,Consolas,monospace}
+ .prov .no{color:#7a1f1f} .prov .yes{color:#1f6a3a}
+"""
 
 # --------------------------------------------------------------------------- anchor navigation
 

@@ -7,8 +7,11 @@ drift from the full one, and the drift would show up as a report quietly missing
 Two properties are pinned here, per generator:
 
 * **The identity element.** Rendering with a closure that includes *everything* must produce byte-for-
-  byte what rendering with no closure produces. If those two ever differ, the filtered path is not the
-  same path.
+  byte the same **rows** as rendering with no closure. If those two ever differ, the filtered path is
+  not the same path. The *documents* are deliberately not identical: a partial report says on its face
+  that it is one, so it carries a banner, the "N of M" figures and its own stylesheet even when the
+  selection happened to include every row. Strip that furniture and the documents match too, which is
+  what the second assertion below checks.
 * **The filter.** Rendering with a closure over a subset must produce exactly that subset.
 
 The corpus byte-diff is the other half of this gate (a full run before and after the split, differing
@@ -19,7 +22,7 @@ Every input is synthetic.
 import os
 import re
 
-from scripts import contacts_report, partial_report
+from scripts import contacts_report, partial_report, report_ui
 
 
 def _contact(user_id, username, display, conv_id=""):
@@ -101,17 +104,41 @@ def test_contacts_index_finds_every_contact_and_its_identifiers(tmp_path):
     assert stage.sel.keys[("user", "bob-test")] == {"ct-u-0002"}
 
 
+def _without_partial_furniture(doc, closure, kind):
+    """The document as a full run would have written it: banner, figures and partial CSS removed.
+
+    Removed by exact string, not by pattern: the point of the assertion is that nothing *else* in the
+    document changed, and a pattern loose enough to find the banner would be loose enough to swallow a
+    real difference with it.
+    """
+    css, banner, figures = partial_report.page_chrome(closure, kind)
+    for furniture in (css, banner, figures):
+        assert furniture and furniture in doc
+        doc = doc.replace(furniture, "", 1)
+    return doc
+
+
 def test_contacts_render_with_an_all_inclusive_closure_matches_no_closure(tmp_path):
-    """The identity element: the filtered path and the full path must be the same path."""
+    """The identity element: the filtered path and the full path must be the same path.
+
+    Same rows, byte for byte. The document differs only by the furniture that says "this is a partial
+    report" — which a partial report must carry even when it happens to hold everything, since the
+    reader cannot otherwise tell a complete extract from a coincidentally complete one.
+    """
     stage_a, out_a = _contacts_stage(tmp_path, "A")
     full = contacts_report.render(stage_a, out_a)
 
     stage_b, out_b = _contacts_stage(tmp_path, "B")
-    filtered = contacts_report.render(stage_b, out_b, closure=_everything(stage_b))
+    closure = _everything(stage_b)
+    filtered = contacts_report.render(stage_b, out_b, closure=closure)
 
-    assert open(full, encoding="utf-8").read() == open(filtered, encoding="utf-8").read()
     assert (open(os.path.join(out_a, "data", "index.js"), encoding="utf-8").read()
             == open(os.path.join(out_b, "data", "index.js"), encoding="utf-8").read())
+
+    full_doc = open(full, encoding="utf-8").read()
+    filtered_doc = open(filtered, encoding="utf-8").read()
+    assert "PARTIAL REPORT" in filtered_doc and "PARTIAL REPORT" not in full_doc
+    assert _without_partial_furniture(filtered_doc, closure, "ct") == full_doc
 
 
 def test_contacts_render_with_a_closure_writes_only_the_included_rows(tmp_path):

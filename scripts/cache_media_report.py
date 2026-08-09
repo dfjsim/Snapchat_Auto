@@ -1202,7 +1202,22 @@ def _decrypted_elsewhere(entry):
     return best
 
 
-def _file_cell(entry, rel_prefix="../"):
+def _absent_memory_copy(dec, closure):
+    """True when the plaintext this row would show belongs to a Memory the extract leaves out.
+
+    The preview in that case is a file the Memories report published and a partial run then pruned, so
+    linking to it would be a broken image. Falling through to the "not recovered" branch instead would
+    be worse than broken: these bytes *were* recovered, and the row would deny it.
+    """
+    return bool(dec) and closure is not None and not closure.has("mem", f'mem-{dec["snap_id"]}')
+
+
+_NOT_IN_EXTRACT = ('<span class="filenone" title="These bytes were decrypted by the Memories report, '
+                   'from a Memory that is not part of this partial report — so its plaintext is not '
+                   'in this folder either.">&#128275; decrypted elsewhere &#8856;</span>')
+
+
+def _file_cell(entry, rel_prefix="../", closure=None):
     if entry.get("view") and entry.get("view_is_image"):
         return (f'<a class="filebtn img" href="{_esc(entry["view"])}" target="_blank">'
                 f'<img src="{_esc(entry["view"])}" loading="lazy">'
@@ -1228,6 +1243,8 @@ def _file_cell(entry, rel_prefix="../"):
     # report" next to no image at all, which an examiner reads as a failure — while the plaintext
     # was sitting in the next report the whole time. The copy is clearly marked as that report's.
     dec = _decrypted_elsewhere(entry)
+    if _absent_memory_copy(dec, closure):
+        return _NOT_IN_EXTRACT
     if dec:
         url = f'{rel_prefix}Memories/{dec["media_path"]}'
         ext = (dec.get("media_ext") or "").lower()
@@ -1252,6 +1269,17 @@ def _file_cell(entry, rel_prefix="../"):
     return f'<span class="filenone">{_esc(entry["ext"] or entry["kind"])}</span>'
 
 
+def _msg_row_id(rec):
+    """The Conversations report's selection id for one chat record, or "" when it cannot be named.
+
+    Must match what ``conversations_report.index`` records: a message number restarts in every chat,
+    so the id is qualified with the conversation. Derived from the shared ``cache_links.json`` record
+    rather than re-parsed, per docs/cross_report_linking.md.
+    """
+    conv, smid = (rec or {}).get("conversation_id"), (rec or {}).get("server_message_id")
+    return f"conv-{conv}|msg-{smid}" if conv and smid else ""
+
+
 MULTI_TARGET_BASIS = (
     "This file corresponds to SEVERAL rows in the linked report, so the link opens that report "
     "filtered to this file's identifiers with every matching row expanded, rather than jumping to "
@@ -1259,7 +1287,7 @@ MULTI_TARGET_BASIS = (
     "that produced it, and clearing it restores the full report.")
 
 
-def _links_cell(entry, rel_prefix, compact=True):
+def _links_cell(entry, rel_prefix, compact=True, closure=None):
     """Cross-report link chips (cache / Memory / chat).
 
     ``compact`` is the index-row form, and until it was actually implemented the index rendered the
@@ -1282,16 +1310,25 @@ def _links_cell(entry, rel_prefix, compact=True):
             cache_basis = cache_basis or link["basis"]
     if len(cache_keys) == 1:
         href = f'{rel_prefix}CacheController/CacheController_report.html#ck-{cache_keys[0]}'
-        chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache">cache</a>'
-                     + why(cache_basis))
+        chips.append(report_ui.xref(
+            f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache">cache</a>',
+            [("cc", f"ck-{cache_keys[0]}")], closure=closure, brief=compact) + why(cache_basis))
     elif cache_keys:
+        # narrowed first: a link that opens the other report filtered to entries it does not contain
+        # lands on an empty table, and its count would claim more than is there
+        keys, dropped = report_ui.narrow(closure, "cc", cache_keys, lambda key: f"ck-{key}")
+        keys = keys or cache_keys
         href = (f'{rel_prefix}CacheController/CacheController_report.html'
-                + report_ui.find_fragment(cache_keys))
-        chips.append(f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache" '
-                     f'title="open the cache_controller report filtered to this file\'s '
-                     f'{len(cache_keys)} cache entries, all expanded">'
-                     f'cache ({len(cache_keys)})</a>'
-                     + why(MULTI_TARGET_BASIS + " " + cache_basis))
+                + report_ui.find_fragment(keys))
+        chips.append(report_ui.xref(
+            f'<a class="chip cc" href="{_esc(href)}" target="scauto_cache" '
+            f'title="open the cache_controller report filtered to this file\'s '
+            f'{len(keys)} cache entries, all expanded">'
+            f'cache ({len(keys)})</a>',
+            [("cc", f"ck-{key}") for key in keys], closure=closure, brief=compact)
+            + why(MULTI_TARGET_BASIS + " " + cache_basis
+                  + (f" {dropped} further cache entry/entries this file is claimed under are not "
+                     f"part of this partial report." if dropped else "")))
     seen_mem = set()
     for link in entry["links"]:
         if link["kind"] == "memory":
@@ -1300,22 +1337,27 @@ def _links_cell(entry, rel_prefix, compact=True):
                 continue
             seen_mem.add(sid)
             href = f'{rel_prefix}Memories/Memories_report.html#mem-{sid}'
-            chips.append(f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories" '
-                         f'title="open this Memory\'s row in the Memories index">'
-                         f'Memory {_esc(sid[:8])}…</a>' + why(link["basis"]))
+            chips.append(report_ui.xref(
+                f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories" '
+                f'title="open this Memory\'s row in the Memories index">'
+                f'Memory {_esc(sid[:8])}…</a>',
+                [("mem", f"mem-{sid}")], closure=closure, brief=compact) + why(link["basis"]))
             # ...and the Memory's own detail page, as the cache_controller report does: the index
             # row is a summary, the detail page is where that Memory's media and metadata are.
             if link.get("page"):
-                chips.append(f'<a class="chip mem" target="scauto_memories" '
-                             f'title="open this Memory\'s own detail page" '
-                             f'href="{_esc(rel_prefix)}Memories/{_esc(link["page"])}#mem-'
-                             f'{_esc(sid)}">detail</a>')
+                chips.append(report_ui.xref(
+                    f'<a class="chip mem" target="scauto_memories" '
+                    f'title="open this Memory\'s own detail page" '
+                    f'href="{_esc(rel_prefix)}Memories/{_esc(link["page"])}#mem-'
+                    f'{_esc(sid)}">detail</a>',
+                    [("mem", f"mem-{sid}")], closure=closure, brief=compact))
         elif link["kind"] == "chat":
             rec = link["rec"]
             href = rel_prefix + (rec.get("href") or "")
-            chips.append(f'<a class="chip chat" href="{_esc(href)}" target="scauto_convs">'
-                         f'message {_esc(rec.get("server_message_id") or "")}</a>'
-                         + why(link["basis"]))
+            chips.append(report_ui.xref(
+                f'<a class="chip chat" href="{_esc(href)}" target="scauto_convs">'
+                f'message {_esc(rec.get("server_message_id") or "")}</a>',
+                [("msg", _msg_row_id(rec))], closure=closure, brief=compact) + why(link["basis"]))
     if not chips:
         return '<span class="muted">—</span>'
     if not compact:
@@ -1323,7 +1365,7 @@ def _links_cell(entry, rel_prefix, compact=True):
     return '<div class="chiprow">' + "".join(chips) + "</div>"
 
 
-def _detail_html(entry, rel_prefix):
+def _detail_html(entry, rel_prefix, closure=None):
     parts = []
     warn = _root_uuid_warning(entry)
     if warn:
@@ -1337,7 +1379,12 @@ def _detail_html(entry, rel_prefix):
                      f'<div class="muted">poster frame extracted by this tool from the video — a '
                      f'derived image, not a cached file{_info(POSTER_BASIS)}</div>')
     dec = _decrypted_elsewhere(entry)
-    if dec:
+    if _absent_memory_copy(dec, closure):
+        parts.append(f'<div class="note-inline">🔓 These bytes WERE recovered — the Memories report '
+                     f'decrypted them from Memory {_esc(dec["snap_id"])}, which is <b>not part of '
+                     f'this partial report</b>, so the plaintext is not in this folder either. This '
+                     f'report does not decode them a second time.{_info(dec["basis"])}</div>')
+    elif dec:
         url = f'{rel_prefix}Memories/{dec["media_path"]}'
         if (dec.get("media_ext") or "").lower() in _IMAGE_EXTS:
             parts.append(f'<a href="{_esc(url)}" target="scauto_memories">'
@@ -1413,7 +1460,7 @@ def _detail_html(entry, rel_prefix):
         parts.append(f"<div class='sect'>Published file</div><div class='note-inline'>"
                      f"{_esc(entry['view_note'])}</div>")
 
-    links = _links_cell(entry, rel_prefix, compact=False)
+    links = _links_cell(entry, rel_prefix, compact=False, closure=closure)
     parts.append("<div class='sect'>Links</div><div class='chips'>" + links + "</div>")
     return "".join(parts)
 
@@ -1436,7 +1483,7 @@ def _documents_html(docs):
 
 
 def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats, app_display,
-                    run_id="default"):
+                    run_id="default", closure=None, prov=None):
     # The source fingerprints this run recorded, so the examiner's saved selection carries
     # them and a later partial run can check the extraction it is handed against this one.
     sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
@@ -1457,7 +1504,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
     locations = sorted({e["rel"].split("/")[0] if "/" in e["rel"] else "(root)" for e in entries})
 
     data_dir = os.path.join(outdir, "data")
-    details = [(f"cm-{e['sha256'] or e['rel']}", _detail_html(e, rel_prefix)) for e in entries]
+    details = [(f"cm-{e['sha256'] or e['rel']}", _detail_html(e, rel_prefix, closure))
+               for e in entries]
     chunk_of = report_ui.write_details(data_dir, details)
 
     rows = []
@@ -1472,8 +1520,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
             f'{len(e["copies"])} cop{"y" if len(e["copies"]) == 1 else "ies"}',
             _esc(e["ext"] or e["kind"]),
             _fmt_bytes(e["bytes"]),
-            _file_cell(e, rel_prefix),
-            _links_cell(e, rel_prefix),
+            _file_cell(e, rel_prefix, closure),
+            _links_cell(e, rel_prefix, closure=closure),
         ]
         searchable = [e["rel"], e["name"], e["category"], e["ext"], e["kind"], e["sha256"],
                       e["md5"], e.get("url") or "", e.get("inner_url") or "",
@@ -1506,6 +1554,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
     for row in rows:
         rec_counts[row[5]["rec"]] = rec_counts.get(row[5]["rec"], 0) + 1
     rec_opts = report_ui.counted_options(RECOVERED_STATES, rec_counts)
+    partial_css, banner, figures = partial_report.page_chrome(closure, "cm", prov)
+
     key_line = (f"Story-cache key: {html.escape(key_info.get('note') or 'not looked for')}"
                 + (_info(CLIENT_KEY_BASIS) if key_info.get("key") else ""))
 
@@ -1566,7 +1616,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
  table.vtab{{border-collapse:collapse;width:100%;font-size:12px}}
  table.vtab td{{border-bottom:1px solid #e2e2ea;padding:5px 24px}}
  table.vtab th{{background:#1f1f52;color:#fff;text-align:left;padding:6px 24px}}
-{report_ui.HINT_CSS}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}
+{report_ui.HINT_CSS}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{partial_css}
  .vcells>.vc{{font-size:12.5px}}
 </style>
 <script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="cm";</script>
@@ -1583,8 +1633,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
  {assets} app assets not decoded</div>
  <div class="sum">{key_line}</div>
  <div class="sum">Scope: {html.escape(SCOPE_NOTE)}</div>
- <div class="sum">Source: {html.escape(app_display)}</div></header>
-{report_ui.missing_data_banner('CacheMedia_report.html')}
+ <div class="sum">Source: {html.escape(app_display)}</div>{figures}</header>
+{banner}{report_ui.missing_data_banner('CacheMedia_report.html')}
 <div class="stickytop">
 <div class="toolbar">
  <input type="search" id="q" placeholder="Search path, filename, hash, URL, snap id…" oninput="flt()">
@@ -1807,7 +1857,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None):
                                 src_root=src_root, ms_fmt=ms_fmt)
 
 
-def render(stage, closure=None):
+def render(stage, closure=None, prov=None):
     """Publish the files and write the report. ``closure=None`` publishes and renders everything."""
     entries = [record for _row_id, record in stage.sel.keep(closure)]
     outdir, app, rdir = stage["outdir"], stage["app"], stage["rdir"]
@@ -1828,7 +1878,7 @@ def render(stage, closure=None):
     report, done = generate_report(entries, docs, outdir, stage["tz_label"], "../",
                                    stage["key_info"], stage["stats"],
                                    device_path(app, stage["src_root"], stage["manifest"]),
-                                   report_ui.run_id(rdir))
+                                   report_ui.run_id(rdir), closure=closure, prov=prov)
     _write_manifest(entries, outdir)
     logger.info(f"Cached media report: {os.path.abspath(report)}")
     if closure is not None:
