@@ -97,7 +97,20 @@ rows (a targeted `SCV.openRow(id)`, not `expandAll`).
 calls `C.reset()` when the target row is filtered out, and reset means "stop hiding anything" — so it
 un-folds the table and lands on the member.
 
-- Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
+**The same filter is wanted in the Conversations report**, with one addition: a Memory has one set of
+timestamps, but a conversation has two kinds — the conversation's own first/last activity, and the
+timestamps of the messages inside it. So that filter needs a scope control: apply it to the
+**conversation** times, the **message** times, or **both**. Build the time-window control as a shared
+piece in `report_ui` rather than twice, since only the scope and which epochs a row carries differ.
+
+Two things to get right there, both already true of the report and easy to break:
+- the conversation index's first/last activity can come from the **feed** rather than from a message
+  (`report_ui.activity_cell` / `FEED_DATE_TITLE` mark those, because they say when the conversation was
+  active and *not* that a message existed then). A time filter must not quietly present a feed date as
+  a message time — scope "message times" has to mean message times only;
+- a conversation page filters its own message rows, so the same control belongs there too, where the
+  scope question does not arise.
+
 - Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
   - The **selection and report half is done** — `--selection` builds a partial report holding only the
     ticked Memories (and whatever related items are asked for), see docs/report_partial.md. The PDF
