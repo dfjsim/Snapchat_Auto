@@ -2053,6 +2053,106 @@ def _ts_table(members, cols, attr, labels, single):
             f"{''.join(body)}</table>{legend}</div>")
 
 
+def _memory_times(m):
+    """``[(label, displayed value)]`` — every timestamp this Memory has, in one flat list.
+
+    The same values the detail sub-page shows in its two timestamp tables, plus the capture time the
+    index column already carries, gathered so one place can both render them and derive the keys the
+    time filter matches on. Empty columns are dropped: a label with no value tells the examiner
+    nothing and would only make the list longer than the row it sits in.
+    """
+    out = []
+    if m.get("create_utc"):
+        out.append(("Created (index column)", m["create_utc"]))
+    for attr, labels in (("times", SNAP_TIME_LABELS), ("entry_times", ENTRY_TIME_LABELS)):
+        for col, value in (m.get(attr) or {}).items():
+            if value:
+                out.append((labels.get(col, col), value))
+    return out
+
+
+FOLD_BASIS = (
+    "These Memories are grouped because they are the same media object (a shared ZMEDIAID) and/or "
+    "because their recovered media is byte-identical — one media object under several snap rows. "
+    "Each still has its own row in this table with its own id, selection state and cross-report "
+    "links; the rows are shown here, behind the earliest of them, so that one piece of media reads "
+    "as one finding instead of as three. Untick «Fold groups» in the toolbar (or use Clear all "
+    "filters) to get a row of its own back for every Memory — and note that sorting then scatters a "
+    "group's members to wherever their own values put them, which is why the fold is the default. "
+    "Every member below is selectable and openable from here exactly as from its own row.")
+
+
+FOLD_CONTROL_HINT = (
+    "Show a group of Memories as ONE row — its earliest member — with the rest inside that row's "
+    "expanded area, each with its own selection box and Details button. A group is the same media "
+    "object under several snap rows, so three rows for it read as three findings. Every Memory keeps "
+    "its own row, id, selection and cross-report links either way; unticking this gives each one a "
+    "row of its own again, at the cost of a group's members scattering to wherever the current sort "
+    "puts them. «Select all shown» ticks a folded member only when the filters match that member, "
+    "not merely because its lead is on screen. Clear all filters — and any link sent to a folded "
+    "Memory — unfolds the table.")
+
+
+TIME_FILTER_HINT = (
+    "Every timestamp a Memory carries is searched, not only the Created column: the ZGALLERYSNAP "
+    "capture and placeholder times and every ZGALLERYENTRY album time, which are otherwise only on "
+    "the detail page. Expand a row to see them all, and which one matched. A Memory inside a folded "
+    "group is found by its own times too — the group opens with the member that matched pointed out.")
+
+
+def _index_detail(members, key, this_sid, group=(), lead_sid=""):
+    """The expanded area of an index row: this Memory's timestamps, and its group's other members.
+
+    Two things live here for one reason each. The timestamps, because the time filter matches on
+    columns the index has no room for — a row found by one of them would otherwise give no clue
+    which value matched. The members, because a group's rows are folded behind this one (see
+    `FOLD_BASIS`) and they have to stay reachable, selectable and openable from where they are shown.
+
+    ``group``/``lead_sid`` are given when this is a **non-lead** member rendered on its own, which is
+    what the row looks like once the examiner unfolds the table: it still belongs to a group, and the
+    block says so and links to the row it folds behind rather than leaving the relationship implicit.
+    """
+    blocks = []
+    for m in members:
+        sid = m["snap_id"]
+        times = _memory_times(m)
+        grid = "".join(f"<div class='k'>{html.escape(label)}</div>"
+                       f"<div class='v'>{html.escape(value)}</div>" for label, value in times)
+        if not grid:
+            grid = ("<div class='k'>Timestamps</div><div class='v muted'>none — no ZGALLERYSNAP row "
+                    "survives for this Memory, so it has no time of its own to filter on</div>")
+        # The same box, id and keys as this Memory's own row and its detail sub-page: one selection,
+        # wherever it is ticked. `data-keys` is inline because these are hand-written boxes.
+        mem_keys = {"snap": sid}
+        if m["ids"].get("ZMEDIAID"):
+            mem_keys["mediaid"] = str(m["ids"]["ZMEDIAID"])
+        if m["ids"].get("ZENTRYID"):
+            mem_keys["entry"] = str(m["ids"]["ZENTRYID"])
+        here = " <span class='thisrow'>this row</span>" if sid == this_sid else ""
+        blocks.append(
+            f"<div class='memfold' data-mem='mem-{html.escape(sid)}'>"
+            f"<div class='memfoldhd'><span class='snaplab'>ZSNAPID</span>"
+            f"<span class='snapid'>{html.escape(sid)}</span>{here}"
+            f"<label class='selrow' title='Mark this Memory as relevant. The same selection as its "
+            f"own row and its detail page.'><input type='checkbox' class='selbox' data-kind='mem' "
+            f"data-id='mem-{html.escape(sid)}' "
+            f"data-keys='{html.escape(json.dumps(mem_keys))}'>Selected</label>"
+            f"<a class='openbtn' target='scauto_memory_page' "
+            f"href='pages/{key}.html#mem-{html.escape(sid)}' "
+            f"title='open this Memory on the group&#39;s detail page'>Details ▸</a></div>"
+            f"<div class='grid tsgrid'>{grid}</div></div>")
+    head = ""
+    if len(members) > 1:
+        head = (f"<div class='foldhd'>🔗 <b>{len(members)}</b> Memories are grouped here"
+                f"{report_ui.info_icon(FOLD_BASIS)}</div>")
+    elif len(group) > 1:
+        head = (f"<div class='foldhd'>🔗 One of <b>{len(group)}</b> Memories grouped together — "
+                f"folded behind <a href='#mem-{html.escape(lead_sid)}'>"
+                f"{html.escape(lead_sid[:8])}…</a> when «Fold groups» is on"
+                f"{report_ui.info_icon(FOLD_BASIS)}</div>")
+    return f"<div class='folddet'>{head}{''.join(blocks)}</div>"
+
+
 def _field_label(col, desc):
     """Display key: the raw DB column name with our short description in parentheses."""
     return f"{col} ({desc})" if desc and desc != col else col
@@ -2300,7 +2400,7 @@ _MAP_CSS = """
 
 # Index-table geometry (the virtual table uses one fixed row height and one column track list for
 # the header and every row; the thumbnail column sets the height).
-MEM_COLS = "86px 78px 118px 236px 152px 288px 128px 144px 116px"
+MEM_COLS = "24px 86px 78px 118px 236px 152px 288px 128px 144px 116px"
 MEM_ROW_H = 130
 
 # Styling shared by the detail sub-pages (single-braced: inserted as a value into the f-string).
@@ -2970,9 +3070,26 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 
     # One row per memory, ordered by group then creation. Rows live in data/index.js and are drawn
     # by the virtual table (scripts/report_ui.py), so the index opens instantly whatever its size.
+    #
+    # A group's rows are folded behind its earliest member (see FOLD_BASIS): every Memory keeps its
+    # own row — its anchor, its selection id and every cross-report link into it are untouched — and
+    # the table shows the lead, which carries the whole group in its expanded area. The expansion
+    # exists for singletons too, because it is where the timestamps the time filter matches on are
+    # listed, and a row found by one of them has to be able to say which value that was.
+    details = []
+    for key, members in groups:
+        lead = members[0]
+        details.append((f"mem-{lead['snap_id']}", _index_detail(members, key, lead["snap_id"])))
+        for m in members[1:]:
+            details.append((f"mem-{m['snap_id']}",
+                            _index_detail([m], key, m["snap_id"], group=members,
+                                          lead_sid=lead["snap_id"])))
+    chunk_of = report_ui.write_details(os.path.join(outdir, "data"), details)
+
     rows = []
     n_users = len({m["user_hash"] for m in memories.values()})
     for key, members in groups:
+        lead_id = f"mem-{members[0]['snap_id']}"
         for m in members:
             uid = userids.get(m["user_hash"]) or ("userHash " + m["user_hash"][:10] + "…")
             own = m["media_files"] or _dedup_media(members)
@@ -3030,6 +3147,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
             # since every byte here is multiplied by the number of memories in data/index.js
             cells = [
+                "&#9656;",                                 # the expander
                 thumb,
                 kind,
                 html.escape(str(uid)),
@@ -3067,25 +3185,37 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 searchable.append("edited changed rewritten since checkpoint wal")
             if m["latitude"] is not None:
                 searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
+            anchor = f"mem-{zsnap}"
             rows.append([
-                f"mem-{zsnap}", cells,
+                anchor, cells,
                 " ".join(s for s in searchable if s).lower(),
-                {"1": ("video" if is_video else "image") + ("+meo" if is_meo else ""),
-                 "2": str(uid), "3": f"{zmedia}|{zsnap}", "6": m["created_sort"]},
-                None,
+                {"2": ("video" if is_video else "image") + ("+meo" if is_meo else ""),
+                 "3": str(uid), "4": f"{zmedia}|{zsnap}", "7": m["created_sort"]},
+                chunk_of.get(anchor),
                 {"user": str(uid), "img": "y" if has_img else "n",
                  "meo": "y" if is_meo else "n", "part": _media_state(own, n_part),
                  "wal": ("carved" if carved else
-                         "gone" if gone else ("changed" if changed else ""))},
+                         "gone" if gone else ("changed" if changed else "")),
+                 # Every timestamp this Memory has, as the wall clock the report displays (see
+                 # report_ui.ts_key) — including the columns only the detail shows, which is the
+                 # point: a capture time is findable without knowing which column holds it.
+                 "ts": report_ui.ts_keys(*(value for _label, value in _memory_times(m))),
+                 # The row this one is folded behind — on the lead too, pointing at itself, so one
+                 # field answers "which group is this row in". Omitted for a Memory that is a group
+                 # of one: there is nothing to fold, and every byte here is paid per row.
+                 **({"lead": lead_id} if len(members) > 1 else {})},
             ])
     report_ui.write_rows(os.path.join(outdir, "data"), rows)
 
     # Every state filter on this bar states its count and greys out when it is empty. The Media one
     # is why (see _MEDIA_STATE_HINT), but Thumbnail and My Eyes Only had the same problem: on a
     # device with no MEO album, "only MEO" is a control that can do nothing, and looked broken.
+    # Named rather than "every key in the row's metadata": that metadata also carries the timestamp
+    # list and the fold's lead id, which are not states and have nothing to count.
     counts = {}
     for row in rows:
-        for key, value in row[5].items():
+        for key in ("img", "meo", "part"):
+            value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
     part_opts = _media_filter_options(counts.get("part", {}))
     img_opts = report_ui.counted_options((("y", "with a thumbnail"), ("n", "no thumbnail")),
@@ -3122,35 +3252,52 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .vc img{max-width:74px;max-height:118px;border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.25)}
  .nothumb{color:#bbb} .mono{font-family:ui-monospace,Consolas,monospace;font-size:11px}
  /* per-column styling for the index rows (keeps the row data in data/index.js markup-free) */
- .vcells>.vc.c1{font-size:16px;line-height:1.1}
- .vcells>.vc.c1 .meo{background:#8a1f1f;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
+ .vcells>.vc.c2{font-size:16px;line-height:1.1}
+ .vcells>.vc.c2 .meo{background:#8a1f1f;color:#fff;border-radius:3px;font-size:9px;font-weight:700;
    letter-spacing:.04em;padding:1px 4px;margin-top:3px;display:inline-block}
- .vcells>.vc.c1 .part{background:#fde3e3;color:#8a1f1f;border:1px solid #eeacac;border-radius:3px;
+ .vcells>.vc.c2 .part{background:#fde3e3;color:#8a1f1f;border:1px solid #eeacac;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
- .vcells>.vc.c1 .walgone{background:#ffe9e0;color:#8a3a1c;border:1px solid #e8bfae;border-radius:3px;
+ .vcells>.vc.c2 .walgone{background:#ffe9e0;color:#8a3a1c;border:1px solid #e8bfae;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
- .vcells>.vc.c1 .walchg{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:3px;
+ .vcells>.vc.c2 .walchg{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
- .vcells>.vc.c1 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
+ .vcells>.vc.c2 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
- .vcells>.vc.c2,.vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5{
+ .vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5,.vcells>.vc.c6{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
- .vcells>.vc.c3{color:#33367a} .vcells>.vc.c3 div{margin:1px 0}
- .vcells>.vc.c3 i{color:#8a8aa0;font-weight:700;font-size:9px;letter-spacing:.03em;
+ .vcells>.vc.c4{color:#33367a} .vcells>.vc.c4 div{margin:1px 0}
+ .vcells>.vc.c4 i{color:#8a8aa0;font-weight:700;font-size:9px;letter-spacing:.03em;
    margin-right:5px;font-style:normal}
- .vcells>.vc.c4,.vcells>.vc.c5{color:#555}
- .vcells>.vc.c5 i{color:#2d2d71;font-weight:700;font-style:normal}
+ .vcells>.vc.c5,.vcells>.vc.c6{color:#555}
+ .vcells>.vc.c6 i{color:#2d2d71;font-weight:700;font-style:normal}
  a.detail{color:#2d2d71;font-weight:600;text-decoration:none;white-space:nowrap} a.detail:hover{text-decoration:underline}
  a.openbtn{display:inline-flex;align-items:center;gap:4px;text-decoration:none;font-weight:700;
    font-size:11px;color:#25348a;background:#e7ecff;border:1px solid #b9c3f0;border-radius:10px;
    padding:3px 9px;white-space:nowrap}
  a.openbtn:hover{background:#d5deff;border-color:#8f9fe0}
  .nsnaps{color:#888;font-size:10.5px;white-space:nowrap;margin-top:3px} .muted{color:#999}
+ /* the expanded area of an index row: this Memory's timestamps, and its group's other members */
+ .folddet{padding:8px 10px 10px}
+ .foldhd{font-size:12.5px;color:#2d2d71;background:#eef0ff;border:1px solid #c9cdf0;
+   border-radius:5px;padding:5px 9px;margin-bottom:8px}
+ .memfold{border-left:2px solid #e2e2ee;padding:4px 0 4px 10px;margin-top:6px}
+ .memfold+.memfold{border-top:1px dashed #cfcfe0;margin-top:8px;padding-top:8px}
+ .memfoldhd{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ .memfold .snaplab{color:#666;font-weight:700;text-transform:uppercase;font-size:9.5px;
+   letter-spacing:.04em}
+ .memfold .snapid{font-family:ui-monospace,Consolas,monospace;font-size:12px;font-weight:700;
+   color:#1b1b1f;overflow-wrap:anywhere}
+ .thisrow{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0;border-radius:9px;
+   font-size:9.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;text-transform:uppercase}
+ .memfold .selrow{font-size:11px;color:#444;display:inline-flex;align-items:center;gap:4px}
+ .tsgrid{display:grid;grid-template-columns:max-content 1fr;gap:1px 12px;margin-top:5px;
+   font-size:11.5px;max-width:620px}
+ .tsgrid .k{color:#666} .tsgrid .v{color:#1b1b1f;font-family:ui-monospace,Consolas,monospace}
 """
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}{partial_css}</style>'
+           f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
@@ -3184,6 +3331,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<option value="gone">deleted since the checkpoint</option>'
            f'<option value="changed">rewritten since the checkpoint</option>'
            f'<option value="carved">deleted outright (key carved)</option></select></label>'
+           + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
+           + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
+           f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
+           f'{report_ui.info_icon(FOLD_CONTROL_HINT)}</label>'
            f'{report_ui.clear_filters_button("memory")}'
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
@@ -3192,44 +3343,59 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="vc sel"><input type="checkbox" class="selall"'
            f' title="Select / unselect every memory matching the current filters"'
            f' onclick="SCV.selectShown(this.checked)"></div>'
+           f'<div class="vc nosort"></div>'
            f'<div class="vc nosort">Thumb</div>'
-           f'<div class="vc" onclick="SCV.setSort(1)">Kind <span class="ar">↕</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(2)">User <span class="ar">↕</span></div>'
-           f'<div class="vc" onclick="SCV.setSort(3)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(2)">Kind <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(3)">User <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(4)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></div>'
            f'<div class="vc nosort">Cache tokens</div>'
            f'<div class="vc nosort">Media MD5 / SHA-256</div>'
-           f'<div class="vc" onclick="SCV.setSort(6)">Created <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(7)">Created <span class="ar">↕</span></div>'
            f'<div class="vc nosort">Geolocation</div><div class="vc nosort">Detail</div></div></div>'
            f'<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div>'
            f'<div class="vwin" id="vwin"></div></div>'
            f'<div class="vempty" id="vempty" style="display:none">No memory matches the current filters.</div>'
            f'<script src="data/index.js"></script>'
            f'<script>{_HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
+           f'{report_ui.TIME_JS}'
            'var flt_t=0;'
-           'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
+           # A lead reached only through a folded member is opened on the member that matched, so
+           # the row does not look like one the filters should not have returned. See openFoldHits.
+           'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){'
+           'SCV.refilter();SCV.openFoldHits();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
            f'empty:"vempty",pager:"pager",pageSize:500,selKind:"mem",'
            # ZSNAPID is a device-assigned UUID, so the anchor is stable; the media id is recorded
            # as a fallback for a Memory whose row is only reachable through its media object.
-           'selKeys:function(r){var k={snap:r[0].slice(4)},s=(r[3]["3"]||"").split("|");'
+           'selKeys:function(r){var k={snap:r[0].slice(4)},s=(r[3]["4"]||"").split("|");'
            'if(s[0])k.mediaid=s[0];return k;},'
-           f'rowHeight:{MEM_ROW_H},cols:"{MEM_COLS}",detailBase:null,'
+           f'rowHeight:{MEM_ROW_H},estDetail:180,cols:"{MEM_COLS}",'
+           'detailBase:"data/detail-",'
+           'folded:function(){return document.getElementById("fold").checked;},'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)'
+           '&&(!wa||m.wal===wa)&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&(!document.getElementById("selonly").checked||SCSel.get("mem",SCV.selId(r[0])));},'
            'selectedOnly:function(){return document.getElementById("selonly").checked;},'
            'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
            'scSelNote();},'
-           'count:function(n,t){document.getElementById("count").textContent='
-           'n===t?(n+" memories"):(n+" of "+t+" shown");},'
+           # n rows on screen, t memories in the report, k memories the filters match. n and k differ
+           # only while a fold is in effect, and reporting one as the other would count a group of
+           # three as one memory.
+           'count:function(n,t,k){document.getElementById("count").textContent='
+           '(k===t?(t+" memories"):(k+" of "+t+" memories"))'
+           '+(n===k?"":" in "+n+" row"+(n===1?"":"s"));},'
            'reset:function(){document.getElementById("q").value="";'
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
-           'document.getElementById("wal").value="";'
+           'document.getElementById("wal").value="";scTimeReset("t");'
+           # The fold hides rows, so "show me everything again" has to include unfolding — and it is
+           # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
+           # reset() when its target is not in the view).
+           'document.getElementById("fold").checked=false;'
            'document.getElementById("selonly").checked=false;}});'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')

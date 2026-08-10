@@ -159,6 +159,45 @@ To keep the report usable with many Memories, it is split (`generate_report`):
   shown prominently. Each member also carries an `id="mem-<ZSNAPID>"` anchor, and the page links
   back to the index.
 
+### A group is one row, with its members inside it
+
+A group of Memories is shown as **one row** — its earliest member — with the rest rendered in that
+row's expanded area, each with its own `ZSNAPID`, timestamps, selection box and Details button
+(`pages/<key>.html#mem-<ZSNAPID>`, which the sub-page already answers). A group exists precisely
+because its members are the same media object under several snap rows, so three rows for it read as
+three findings.
+
+Every Memory still has **its own row** in `data/index.js`, with its own anchor, its own
+`mem-<ZSNAPID>` selection id and every cross-report link into it untouched — that is what makes this
+cheap. The fold is a way of *drawing* those rows, implemented in the shared table
+(`report_ui`: `C.folded`, `foldHit`, `openFoldHits`); see
+[report_ui.md](report_ui.md#folded-rows-cfolded-scvfoldhits-openfoldhits) for the four rules that keep
+it honest — a group is found by any member's values, a lead reached through a member is opened on that
+member, "Select all shown" ticks the members the filters match and no others, and Clear all filters
+unfolds. **Fold groups** in the toolbar turns it off, giving every Memory a row of its own again; the
+cost, and the reason the fold is the default, is that sorting then scatters a group's members to
+wherever their own values put them.
+
+The expansion is not only for groups: **every** row's expanded area lists that Memory's timestamps,
+which is where the time filter's matches can be seen (the index has room for one time column, and the
+filter searches them all).
+
+### Finding a Memory by time
+
+The toolbar's **Time** control (shared — see
+[report_ui.md](report_ui.md#the-datetime-window-report_uitime_filter-time_js)) filters on **every**
+timestamp a Memory carries: the capture time in the index column plus every `ZGALLERYSNAP` and
+`ZGALLERYENTRY` time column, which are otherwise only on the detail sub-page. Either a range
+(*between*) or a tolerance (*within ± N minutes/hours/days of*); a Memory matches when any one of its
+times falls in the window, and expanding the row shows which. A Memory inside a folded group is found
+by its own times too, and the group opens with the matching member highlighted.
+
+Two consequences to know. The keys come from the displayed strings, so the window means the time **as
+the report shows it**, in the run's timezone. And a Memory with no readable timestamp — a **carved**
+Memory has no `ZGALLERYSNAP` row at all, so no times — is hidden while a window is set: it cannot be
+shown to fall inside one. Its detail says so in place of the timestamps, and clearing the filter brings
+it back.
+
 ### My Eyes Only
 A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the
 index's Kind column (`m["is_meo"]`, set from `IS_ENCRYPTED` / the MEO key path — see

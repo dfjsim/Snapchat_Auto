@@ -315,6 +315,54 @@ The four are referred to by the properties that matter (see "Referring to test d
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
 # Snapchat Memories report
+- **A Memory group is one index row, and both chat and Memory rows can be filtered by time.** Two
+  requests with one implementation. A group of three Memories was three rows all linking to the same
+  sub-page, which reads as three findings; and the only way to find a Memory by time was to sort, which
+  does not help when the time you hold is one of the columns only the detail page shows.
+  - **The fold.** A group is drawn as its earliest member's row, with every member rendered in that
+    row's expanded area — each with its own `ZSNAPID`, timestamps, selection box and Details button.
+    Every Memory keeps its own row in the data, so its anchor, its `mem-<ZSNAPID>` selection id and
+    every cross-report link into it are untouched; the fold is a way of *drawing* rows, in the shared
+    table (`C.folded`, `foldHit`, `openFoldHits`). Four rules keep it honest: a group is found by **any**
+    member's values; a lead reached only through a member is opened with that member highlighted, since
+    a row whose visible cells do not match otherwise has no apparent reason to be there; **"Select all
+    shown" ticks the members the filters match and no others** — not every member of a shown lead, which
+    would put rows the examiner did not ask for into a disclosure selection, and not only the leads,
+    which would leave out rows that did match; and `C.reset()` unfolds, which is what lets a
+    cross-report link aimed at a folded Memory land on it. The **Fold groups** control turns it off at
+    the cost of a group's members scattering under any sort.
+  - **The time window** (`report_ui.time_filter` / `TIME_JS`) — *between* two points, or *within ± N
+    minutes/hours/days of* one — on the Memories index, the Conversations index and every conversation
+    page. It matches **every** timestamp a row carries, including the ones only its detail shows: for a
+    Memory that is the capture time plus every `ZGALLERYSNAP` and `ZGALLERYENTRY` time column, which is
+    why every row is expandable and lists them.
+  - **The keys come from the displayed strings, not a second conversion.** `report_ui.ts_key` reads the
+    `YYYY-MM-DD HH:MM:SS` prefix every report already renders back into a naive epoch, and the entered
+    value is read the same way — so the comparison is wall clock against wall clock, the number a row is
+    filtered on cannot disagree with the string the examiner is reading, and no timezone (or DST)
+    arithmetic happens in the browser. The plan had called for a parallel `times_utc` data model; this is
+    both less code and more correct.
+  - **A row with no readable timestamp is hidden while a window is set, never included by it.** A carved
+    Memory has no `ZGALLERYSNAP` row at all and so no time; a message can have no recovered
+    `creation_timestamp`. Such a row cannot be shown to fall inside the window asked for, so it is left
+    out rather than admitted on the strength of nothing — stated in each control's "?" along with the
+    fact that clearing the filter brings it back, and in the row's own detail in place of its timestamps.
+  - **A conversation's two kinds of time are kept apart** by a scope control: its own first/last
+    activity, its messages' times, or the union (the default, because a filter that under-includes hides
+    evidence). *Message times only* never falls back to a feed date — for a conversation holding no
+    message the activity range comes from the app's chat feed, which says it was active then and not
+    that a message existed then, and answering a question about messages with that would be a claim the
+    evidence does not make.
+  - **Two selection bugs the folded members exposed**, both fixed in the shared code: the delegated
+    `change` handler read the *row's* key record for a hand-written checkbox sitting inside a virtual
+    row, which would have filed one Memory's tick under another Memory's identifiers (an inline
+    `data-keys` now wins, since it is always a statement about the box carrying it); and `scSyncBoxes`
+    skipped every box inside a `.vr`, so a box in static detail HTML rendered unticked however the
+    selection stood — it now skips only a row's own box, which `rowHtml` rebuilds from the store, and
+    `render()` calls it after each redraw.
+  - Tested by executing the JavaScript rather than pattern-matching it: `tests/test_fold_and_time_js.py`
+    runs `VTABLE_JS` + `TIME_JS` under node with a small DOM stub and asserts what the table actually
+    put in the view. Verified against a deliberately broken fold, which it catches.
 - **"Some published media is never referenced by any page" — identical content is now published once
   and every Memory that recovered it links to that one copy.** A group exists precisely because its
   members are the same media under another snap row, so two snaps of a group routinely recovered the

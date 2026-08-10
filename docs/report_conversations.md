@@ -94,6 +94,29 @@ possible outcome is an empty table is not a choice, it is a trap; the same rule 
 options in the Memories media filter. No device in the test corpus has a WAL-deleted chat message,
 so `tests/test_report_filters.py` is what holds this behaviour in place.
 
+### The time filter, and its scope control
+
+The shared date/time window (see
+[report_ui.md](report_ui.md#the-datetime-window-report_uitime_filter-time_js)) is on both tables, but
+only the index needs a **scope**, because only there does a row have two kinds of time:
+
+| scope | matches against | |
+|---|---|---|
+| *either kind of time* (default) | the union | can only ever return more than either alone |
+| *message times only* | every message's own creation time | never falls back to a feed date |
+| *first / last activity only* | the conversation's own range | which may itself be a feed date |
+
+The distinction is the one the section above is about. A conversation holding no message still has a
+first/last activity, taken from the app's chat feed, and that says the conversation was active then —
+**not** that a message existed then. So *message times only* must return nothing for such a
+conversation rather than answer with its feed date, which is what `scConvTimes` in `_REPORT_JS`
+enforces and `tests/test_fold_and_time_js.py` executes. The union is the default because a filter that
+under-includes hides evidence, while one that over-includes only shows more.
+
+On a conversation page every row is a message, so the scope question does not arise and the control
+appears without it. A message whose creation time could not be recovered is hidden while a window is
+set — it cannot be shown to fall inside one.
+
 ## A conversation's detail page
 
 A metadata block (conversation id, type, how the conversation was named, participants and their
