@@ -406,6 +406,23 @@ The GUI converts its dialog into the CLI's own `--relations` spec and parses it 
 code (`partial_report.parse_relations` / `parse_policy`). That round trip is a test: two front ends that
 can drift are two different tools.
 
+### Where the relation policy comes from
+
+Three sources, most specific first: **the run's own settings** (`--relations`, or the GUI dialog, which
+always supplies one), then **the spec the selection file records**, then **the built-in defaults**
+(`recommended`). A tool that builds selections can therefore record the policy its selection is meant to
+be read with, and the report is built with one flag instead of two — while the examiner running the report
+keeps the last word, which is the right way round.
+
+Whichever it was is named in the run log, in the provenance (*"Policy taken from the selection file"*) and
+in `partial_manifest.json` as `relations_from`. That attribution is not decoration: the provenance lists
+which relations were followed, and a reader cannot check a choice they cannot trace to whoever made it.
+
+A spec in the file that this build cannot read is **refused**, naming the file and pointing at
+`--relations` as the way to say what to follow instead. Falling back to the defaults would build the
+extract under a policy nobody asked for, and the provenance would then attribute it to the defaults —
+true, but not what was requested.
+
 ### Where the mismatch questions get asked
 
 `partial_report.check_evidence` runs inside the pipeline, immediately after the run records its source

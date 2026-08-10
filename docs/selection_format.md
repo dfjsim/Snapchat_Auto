@@ -110,9 +110,22 @@ Readers tolerate a UTF-8 BOM, CRLF, a leading comment block, and the `SCSel.prel
 | `run_id` | no | which report folder it was made in. Absent for an external tool. |
 | `sources` | no | the source fingerprints of that run. Absent for an external tool. |
 | `exported` | no | when it was saved, ISO 8601 |
-| `relations` | no | a `--relations` spec recorded for the reader; the command line still wins |
+| `relations` | no | a `--relations` spec. **Used as the default** when the run gives none — see below |
 | `note` | no | free text |
 | `api_version` | no | informational |
+
+**`relations` is the run's default, not a request the run must honour.** The policy comes from the most
+specific of three, in this order: the run's own `--relations`, then the spec this field records, then the
+built-in defaults (`recommended`). So a tool that knows which related items its selection is meant to be
+read with can record that, and the report is then built with one flag instead of two — while the examiner
+running it keeps the last word, which is the right way round. Whichever of the three it was is named in
+the run log, in the report's provenance (*"Policy taken from the selection file"*) and in
+`partial_manifest.json` as `relations_from`: a reader cannot check a policy they cannot attribute.
+
+A spec in this field that the build cannot read is **refused**, naming the file and pointing at
+`--relations`. Falling back to the defaults would build the extract under a policy nobody asked for, and
+the provenance would then attribute it to the defaults — true, but not what was requested. Validate with
+`--validate-selection`, and take the vocabulary from `--describe-selection-api` rather than assuming it.
 
 **Absent provenance is not an error.** An external tool has no access to Snapchat Auto's fingerprints, so
 a partial run built from such a file reports *"source verification not possible"* — never *"verified"* —

@@ -429,11 +429,14 @@ def print_usage():
           "                          everything else in this section.\n"
           "  --relations <spec>      Which related items to bring in with the ticked rows:\n"
           "                          minimal (only what a row cannot be shown without),\n"
-          "                          recommended (default), all, or a list - 'mem_cache,msg_cache'\n"
+          "                          recommended, all, or a list - 'mem_cache,msg_cache'\n"
           "                          to name them, or '-mem_group' for the recommended set minus\n"
           "                          one. Add 'transitive' to keep following them, and\n"
           "                          'legacy_reports' to include the two legacy reports whole\n"
           "                          (neither has row selection, so they are all-or-nothing).\n"
+          "                          Omit it and the spec the selection file records is used; with\n"
+          "                          neither, 'recommended'. Whichever it was is named in the log\n"
+          "                          and in the report's provenance.\n"
           "  --case-ref <text>       Case / exhibit reference, stamped on every page.\n"
           "  --dry-run yes           Resolve the selection, work out what the extract would hold,\n"
           "                          print it, and write nothing.\n"
@@ -514,12 +517,29 @@ def _partial_request(values):
                        f"message number with no conversation, so they cannot be attributed and are "
                        f"left out. Re-tick those messages in this run's reports and save again.")
 
+    # Where the relation policy comes from, most specific first: this run's --relations, then the spec
+    # the selection file recorded, then the built-in defaults. A selection built by another tool can
+    # therefore carry the policy it was made for and be run with one flag — but the examiner running
+    # the report can always overrule it, which is why the command line wins. Whichever it was is
+    # named in the log and in the provenance: a reader cannot check a policy they cannot attribute.
     options = partial_report.default_options()
+    spec, source = values.get("relations"), "the run's own settings"
+    if not spec and payload.get("relations"):
+        spec, source = str(payload["relations"]), "the selection file"
+    elif not spec:
+        source = "the built-in defaults"
     try:
-        options["relations"] = partial_report.parse_relations(values.get("relations"))
+        options["relations"] = partial_report.parse_relations(spec)
     except ValueError as error:
+        if source == "the selection file":
+            return None, (f"{os.path.basename(path)} asks for a relation policy this build cannot "
+                          f"read ({error}). Pass --relations to say what to follow instead.")
         return None, str(error)
-    options.update(partial_report.parse_policy(values.get("relations")))
+    options.update(partial_report.parse_policy(spec))
+    options["relations_from"] = source
+    if source == "the selection file":
+        logger.info(f"Related items: following the policy {os.path.basename(path)} was built for "
+                    f"({spec}). Pass --relations to overrule it.")
     for name, key in (("unresolved", "unresolved"), ("sources-mismatch", "sources_mismatch"),
                       ("version-mismatch", "version_mismatch")):
         if values.get(name):

@@ -92,6 +92,55 @@ def test_the_relation_spec_reaches_the_options(tmp_path):
     assert request.options["transitive"] and request.options["legacy_reports"]
 
 
+def test_the_selection_files_own_spec_is_used_when_the_run_gives_none(tmp_path):
+    """A selection built by another tool carries the policy it was made for, so running it needs one
+    flag instead of two — and the report has to say where the policy came from, because a reader
+    cannot check a choice they cannot attribute."""
+    path, _ = _selection(tmp_path, relations="mem_cache,transitive")
+    request, error = app._partial_request({"selection": path})
+
+    assert error is None
+    assert [k for k, on in request.options["relations"].items() if on] == ["mem_cache"]
+    assert request.options["transitive"] is True
+    assert request.options["relations_from"] == "the selection file"
+
+
+def test_the_run_overrules_the_selection_files_spec(tmp_path):
+    """The examiner building the report decides. Theirs is the more specific instruction."""
+    path, _ = _selection(tmp_path, relations="minimal")
+    request, error = app._partial_request({"selection": path, "relations": "mem_group"})
+
+    assert error is None
+    assert [k for k, on in request.options["relations"].items() if on] == ["mem_group"]
+    assert request.options["relations_from"] == "the run's own settings"
+
+
+def test_a_file_with_no_spec_falls_back_to_the_defaults_and_says_so(tmp_path):
+    path, _ = _selection(tmp_path)
+    request, error = app._partial_request({"selection": path})
+
+    assert error is None
+    assert request.options["relations"] == partial_report.default_options()["relations"]
+    assert request.options["relations_from"] == "the built-in defaults"
+
+
+def test_a_spec_in_the_file_this_build_cannot_read_is_refused_not_ignored(tmp_path):
+    """Falling back to the defaults would build an extract under a policy nobody asked for, and the
+    provenance would then attribute it to the defaults — true, but not what was requested."""
+    path, _ = _selection(tmp_path, relations="no_such_relation")
+    request, error = app._partial_request({"selection": path})
+
+    assert request is None
+    assert "selection.json" in error and "--relations" in error
+
+
+def test_the_run_can_still_build_a_file_whose_own_spec_is_unreadable(tmp_path):
+    path, _ = _selection(tmp_path, relations="no_such_relation")
+    request, error = app._partial_request({"selection": path, "relations": "minimal"})
+
+    assert error is None and request.options["relations_from"] == "the run's own settings"
+
+
 def test_a_bad_option_value_is_reported_rather_than_silently_defaulted(tmp_path):
     path, _ = _selection(tmp_path)
     for bad in ({"unresolved": "maybe"}, {"sources-mismatch": "ignore"},
