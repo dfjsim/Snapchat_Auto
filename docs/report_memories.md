@@ -221,6 +221,37 @@ coordinates. Implementation: [`scripts/offline_maps.py`](../scripts/offline_maps
 Both relations are unioned (connected components), so "same bytes, different ZMEDIAID" — even on two
 different accounts — land on one sub-page. Group key = a short stable hash of the member snap ids.
 
+### One copy per distinct content in `media/`
+
+A group exists precisely because its members are the same media under another snap row, so two snaps
+of a group routinely recover the very same bytes from the very same cache file. Those bytes are
+published **once**: `_save_media` keeps a per-run `{md5: file}` map and returns the file already
+written instead of writing a second copy, so every Memory that recovered the content links to one
+file. The same applies to poster frames — one poster per distinct video, not per Memory, so a shared
+video is decoded once rather than once per snap.
+
+Consequences worth knowing before reading a folder listing or a `media_by_cache_key.json`:
+
+* The published name embeds the snap id of the Memory the file was written for **first**. That is a
+  name, not a statement of ownership. What says which Memories a file belongs to is the group page's
+  file table, which now names every Memory that recovered each row (with that Memory's own role, when
+  it differs from the row's — the same bytes can be one snap's full media and another's thumbnail).
+* Only the copy on disk is shared. Each Memory keeps its own entry with its own role, cache key,
+  source paths and basis, so `media_by_cache_key.json` still holds one record per cache key per snap;
+  several of them simply name the same `path`.
+* The first writer's name wins, so the name depends on the order Memories are walked in — which is
+  `sqlite_open.read_table`'s over `ZGALLERYSNAP`, fixed for a given database. Group keys and index
+  row order already depend on that same order.
+* **Zero-byte files are never de-duplicated**, matching `assign_groups`' own exclusion: every empty
+  file has the same MD5, so collapsing them would point one group's page at a file first published
+  for a Memory in another group. Excluding them keeps the invariant that a shared file is always
+  shared *within* one group — which holds because byte-identity is itself one of the two grouping
+  relations, so content-identical Memories are in the same group by construction.
+
+This is also what removed the last unreferenced files from the folder: the file table lists one row
+per distinct content, so before this the equivalent copies belonging to the group's other members
+were published and linked by no page at all.
+
 ### Manifests for cross-report links
 `generate_report` writes two files the cache_controller report reads (it runs after Memories):
 

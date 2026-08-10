@@ -315,6 +315,32 @@ The four are referred to by the properties that matter (see "Referring to test d
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
 # Snapchat Memories report
+- **"Some published media is never referenced by any page" — identical content is now published once
+  and every Memory that recovered it links to that one copy.** A group exists precisely because its
+  members are the same media under another snap row, so two snaps of a group routinely recovered the
+  same bytes from the same cache file — and the group's file table lists one row per distinct content,
+  so the equivalent copies belonging to the other members were written to `media/` and linked by no
+  page at all. `_save_media` now keeps a per-run `{md5: file}` map and returns the file already written
+  instead of writing a second copy, which is what the app data says: one media object under several
+  snap rows. Poster frames go the same way — one poster per distinct video rather than per Memory, so a
+  shared video is decoded once instead of once per snap, and a poster the worker had already written
+  under the second snap's name is removed rather than left behind unreferenced.
+  - **Only the copy on disk is shared, never the provenance.** Each Memory keeps its own entry with its
+    own role, cache key, source paths and basis, so `media_by_cache_key.json` still holds a record per
+    cache key per snap; several simply name the same `path`.
+  - **The group's file table now names which Memories recovered each row** (`_media_refs`), with that
+    Memory's own role when it differs from the row's — the same bytes can be one snap's full media and
+    another's thumbnail. Two things needed saying: the published name embeds the snap id of whichever
+    Memory the file was written for *first*, which is a name and not a statement of ownership; and
+    without the list a file the whole group recovered looked identical to one a single snap of it did.
+  - **Zero-byte files are excluded from de-duplication**, matching `assign_groups`' own exclusion —
+    every empty file has the same MD5, so collapsing them would point one group's page at a file first
+    published for a Memory in another group. That keeps the invariant that a shared file is always
+    shared *within* one group, which holds because byte-identity is itself one of the two grouping
+    relations: content-identical Memories are in the same group by construction.
+  - The first writer's name wins, so the name depends on the order Memories are walked in —
+    `sqlite_open.read_table`'s over `ZGALLERYSNAP`, fixed for a given database, and the same order the
+    group keys and index row order already depend on. Tests in `tests/test_memories_media_dedup.py`.
 - [DONE-v1.5.2] **"Fix MEO decryption that fails in some cases" — four separate causes, found by
   working back from a My Eyes Only Memory reported as undecryptable that another tool decrypted.**
   - **The locked-MEO notice named the account by its `userHash` alone**, an identifier that appears

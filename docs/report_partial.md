@@ -321,6 +321,25 @@ memory, no media touched) and hands `_render_group_detail` a `group_of` map. The
 than copied — every shared block below follows the members it was given, so the file table, the timestamp
 columns and the encryption columns describe nobody who is absent.
 
+### A kept media file can be named after a Memory that is not here
+
+Identical content is published once, under the name of whichever Memory it was written for **first**
+(see [report_memories.md](report_memories.md#one-copy-per-distinct-content-in-media)). In a partial
+extract that first writer may be one of the group's omitted members, so the surviving file in `media/`
+can carry a snap id the report does not contain. Three things make that sound rather than a leak:
+
+* the name is a **name**, not an attribution. The file table's per-file line
+  (`memories_media_report._media_refs`) is built from the members actually rendered, so it names only
+  Memories the extract contains — an absent snap is never listed as having recovered anything;
+* the omitted snap ids are **already on the page** by design: the sharebar names every one of them, and
+  `_render_group_detail` marks each with `xout`. A group page is required to state its real size, so a
+  filename cannot disclose an id the page does not;
+* the alternative — renaming a shared file per partial run — would make two reports built from the same
+  evidence disagree about what the same bytes are called, for no gain over the sentence above.
+
+Pruning is unaffected: the keep-set is built from each included Memory's own `f["out"]`, which is the
+shared name, so a file an included Memory recovered is kept however it is named.
+
 ---
 
 ## Running one

@@ -1355,12 +1355,47 @@ def _hashes(data):
     return hashlib.md5(data).hexdigest(), hashlib.sha256(data).hexdigest()
 
 
-def _save_media(outdir, name, data):
-    """Write media bytes and return a media_files entry stub with size and dims."""
+def _save_media(outdir, name, data, published=None):
+    """Write media bytes and return a media_files entry stub with size and dims.
+
+    ``published`` maps ``md5 -> the stub already returned for those exact bytes``. Given one, content
+    that has already been written is **not written again**: the stub returned names the file already
+    on disk, so the folder holds one copy of any given media and every Memory that recovered it links
+    to that copy. That is what the app data says — grouped Memories are the same media object under
+    several snap rows — and it stops a report carrying the same bytes two or three times.
+
+    The first writer's name wins, which makes the name depend on the order Memories are walked in.
+    That order is `sqlite_open.read_table`'s over ``ZGALLERYSNAP``, which is fixed for a given
+    database, so two runs of one build over one extraction publish the same names. Several other
+    things already depend on that same order (group keys, index row order), so it is stated here
+    rather than defended with machinery.
+
+    Zero-length files are never de-duplicated, deliberately: every empty file has the same MD5, and
+    `assign_groups` excludes zero-byte media from its own byte-identity merge for exactly that
+    reason. De-duplicating them would point one group's page at a file first published for a Memory
+    in another group — the one case where "these are the same bytes" would not mean "this is the same
+    media". Excluding them keeps the invariant that a shared file is always shared *within* a group.
+    """
+    md5 = hashlib.md5(data).hexdigest() if published is not None and data else None
+    if md5 is not None:
+        first = published.get(md5)
+        if first is not None:
+            if first["out"] != name:
+                # A caller whose bytes are already on disk under `name` (the poster worker writes its
+                # own output) would otherwise leave that copy behind, unreferenced by any page — the
+                # very defect this de-duplication exists to remove.
+                try:
+                    os.remove(os.path.join(outdir, name))
+                except OSError:
+                    pass
+            return dict(first)
     out = os.path.join(outdir, name)
     with open(out, "wb") as o:
         o.write(data)
-    return {"out": name, "bytes": len(data), "dim": _dims(out)}
+    stub = {"out": name, "bytes": len(data), "dim": _dims(out)}
+    if md5 is not None:
+        published[md5] = dict(stub)
+    return stub
 
 
 def _sccontent_completeness(coverage, tail_ok):
@@ -1429,6 +1464,9 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
         ccindex = index_cache_controller(app)
     cc_keys = all_cache_keys(app)              # for two-way links to the cache_controller report
     userids = map_userids(app)                 # userHash -> userId, to spot cross-scope on-disk copies
+    # md5 -> the file already published for those bytes, so identical media is written once and every
+    # Memory that recovered it points at the one copy. See _save_media.
+    published = {}
     keyed = [(sid, m) for sid, m in memories.items() if m["key"] and m["iv"]]
     # Locating a cache file needs no key — only reading an *encrypted* one does. A Memory with no
     # usable key (My Eyes Only without the persistedkey) can still have its media on disk in the
@@ -1515,7 +1553,8 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                 write_bytes = stripped
                 hashes = ([("no padding", *_hashes(stripped)), ("with padding", *_hashes(padded))]
                           if has_pad else [("", *_hashes(stripped))])
-            entry = _save_media(outdir, f"{sid}_{role}_{cache_key[:8]}.{ext}", write_bytes)
+            entry = _save_media(outdir, f"{sid}_{role}_{cache_key[:8]}.{ext}", write_bytes,
+                                published)
             source = (f"SCContent (rebuilt from {len(pparts)} parts)"
                       if pparts and not fulls else "SCContent")
             if pparts and not fulls:
@@ -1568,7 +1607,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
             if not payload:
                 continue
             complete, why_incomplete = _pack_completeness(payload, declared)
-            entry = _save_media(outdir, f"{sid}_pack_{item_hash[:12]}.{ext}", payload)
+            entry = _save_media(outdir, f"{sid}_pack_{item_hash[:12]}.{ext}", payload, published)
             how = ("Linked by decrypt-and-match: caching-media pack names are opaque, so this "
                    "folder was tried against every Memory's AES key/IV and only this Memory's key "
                    "decrypts it to valid media (magic bytes after the 8-byte header). Not indexed "
@@ -1601,23 +1640,34 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                       key=lambda f: (f.get("complete") is False, -f["bytes"]))
         if vids:
             todo.append((sid, m, vids[0]))
-    logger.info(f"Media: extracting poster frames from {len(todo)} video(s) with no cached still")
+    # One poster per distinct video, not per Memory: grouped Memories share one published video file,
+    # so decoding it once per Memory would spend the time twice to produce two identical stills. The
+    # first Memory that needs it names the poster, and every Memory sharing that video links to it.
+    # A video only counts as complete for the frame if it is complete for every Memory referencing it.
+    posters = {}                                           # video path -> [poster name, complete]
+    for sid, m, vid in todo:
+        src = os.path.join(outdir, vid["out"])
+        shared = posters.setdefault(src, [f"{sid}_poster.jpg", True])
+        shared[1] = shared[1] and vid.get("complete") is not False
+    logger.info(f"Media: extracting poster frames from {len(posters)} video(s) with no cached still"
+                + (f" ({len(todo)} memories — some share a video)" if len(todo) != len(posters) else ""))
     # Run in a killable subprocess, one video at a time. A video that cannot be decoded does not
     # fail — it blocks the decoder for good — and these are decrypted from a cache, so some of them
     # are truncated. See scripts/data/poster_worker.py.
-    jobs = [(os.path.join(outdir, vid["out"]), os.path.join(outdir, f"{sid}_poster.jpg"),
-             vid.get("complete") is not False)
-            for sid, m, vid in todo if has_video_track(os.path.join(outdir, vid["out"]))]
+    jobs = [(src, os.path.join(outdir, name), complete)
+            for src, (name, complete) in posters.items() if has_video_track(src)]
     done_by_src, stderr_chunks = poster_worker.run_jobs(jobs)
     made = 0
     for sid, m, vid in todo:
         video_out = os.path.join(outdir, vid["out"])
-        poster_name = f"{sid}_poster.jpg"
         if not done_by_src.get(video_out):
             continue
         made += 1
+        poster_name = posters[video_out][0]
         data = open(os.path.join(outdir, poster_name), "rb").read()
-        entry = _save_media(outdir, poster_name, data)      # already written; recompute size/dim
+        # Already written by the worker; this recomputes size/dim and, for a shared video, returns the
+        # one poster already published rather than a second copy of the same frame.
+        entry = _save_media(outdir, poster_name, data, published)
         partial = (" The video it came from is only partially cached, so the frame is from the "
                    "part that is present." if vid.get("complete") is False else "")
         entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
@@ -1638,6 +1688,12 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     if partial:
         logger.info(f"Media: {partial} of {len(files)} recovered file(s) are only partially "
                     f"cached — flagged as incomplete in the report")
+    shared = len(files) - len({f["out"] for f in files})
+    if shared:
+        logger.info(f"Media: {len(files)} recovered file(s) are {len({f['out'] for f in files})} "
+                    f"file(s) on disk — {shared} reference(s) are to media already published for "
+                    f"another Memory of the same group, which is what the app data says (one media "
+                    f"object under several snap rows)")
 
 
 # --------------------------------------------------------------------------- report
@@ -2080,19 +2136,44 @@ def _map_html(members, media_prefix="../"):
             f"server</a></div></div>")
 
 
+def _media_key(f):
+    """What makes two media entries the same content: the MD5 of the bytes written, falling back to
+    the published file name. The same key `_save_media` de-duplicates the folder by, so one row in a
+    group's file table is exactly one file on disk."""
+    hs = f.get("hashes") or [("", f.get("out", ""), "")]
+    return hs[0][1] or f.get("out")
+
+
 def _dedup_media(members):
     """Union of all members' media files, de-duplicated by content hash. Members of a group share
     the same ZMEDIAID, so the same media recovered under two snaps is the same bytes."""
     files, seen = [], set()
     for m in members:
         for f in m["media_files"]:
-            hs = f.get("hashes") or [("", f.get("out", ""), "")]
-            keyid = hs[0][1] or f.get("out")
+            keyid = _media_key(f)
             if keyid in seen:
                 continue
             seen.add(keyid)
             files.append(f)
     return files
+
+
+def _media_refs(members):
+    """``{content key: [(snap id, role), ...]}`` — which of these Memories recovered each file.
+
+    The file table lists one row per distinct content, and one file on disk backs that row however
+    many Memories recovered it (see `_save_media`). Without this the table said nothing about which
+    member each row came from, so a file recovered under only one snap of a group looked identical to
+    one recovered under all of them — and after de-duplication the file's *name* carries the first
+    writer's snap id, which is not a statement about ownership and must not be read as one.
+    """
+    refs = {}
+    for m in members:
+        for f in m["media_files"]:
+            seen = refs.setdefault(_media_key(f), [])
+            if not any(sid == m["snap_id"] for sid, _role in seen):
+                seen.append((m["snap_id"], f.get("role", "")))
+    return refs
 
 
 def _account_label(user_hash, userids=None):
@@ -2254,6 +2335,10 @@ _BASE_CSS = """
  table.files td.hash .hl{color:#2d2d71;font-weight:700} table.files td.hash .pl{color:#8a1f5a}
  table.files td.hash .hgap{height:5px}
  table.files td.path{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#555;max-width:460px;overflow-wrap:anywhere}
+ /* which Memories of the group recovered this one file (see SHARED_MEDIA_BASIS) */
+ .mrefs{margin-top:3px;font-size:10.5px;color:#555;line-height:1.45}
+ .mrefs a{color:#2d2d71;text-decoration:none;font-family:ui-monospace,Consolas,monospace}
+ .mrefs a:hover{text-decoration:underline}
  .muted{color:#999} .meo{background:#8a1f1f;color:#fff;padding:1px 6px;border-radius:4px;font-size:11px}
  a.cclink{color:#2d2d71;text-decoration:none;font-size:10.5px;white-space:nowrap} a.cclink:hover{text-decoration:underline}
  .xscope{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;font-size:10px;white-space:nowrap}
@@ -2377,6 +2462,21 @@ def _primary_media(m):
     """The largest non-zero recovered media file for a memory (for hash/thumbnail columns)."""
     cands = [f for f in m["media_files"] if f.get("bytes", 0) > 0]
     return max(cands, key=lambda f: f["bytes"]) if cands else None
+
+
+SHARED_MEDIA_BASIS = (
+    "Memories are grouped here because they are the same media object (shared ZMEDIAID) and/or "
+    "because their recovered media is byte-identical, so two snaps of a group commonly recover the "
+    "very same file. This report publishes those bytes ONCE and links every Memory that recovered "
+    "them to that one copy, which is what the app data says: one media object under several snap "
+    "rows. Two consequences worth knowing. First, the published file's name embeds the snap id of "
+    "the Memory it was written for first — that is a name, not a statement of ownership, and the "
+    "list here is what says which Memories the file belongs to. Second, this line is the difference "
+    "between a file the whole group recovered and one only a single snap of it did: both look "
+    "identical in a table that lists each file once. The role in brackets is that Memory's own role "
+    "for these bytes, shown when it differs from the row's — the same media can be one snap's full "
+    "media and another's thumbnail. Each Memory's own source paths and cache keys stay in its "
+    "media_by_cache_key.json records; nothing about provenance is merged, only the copy on disk.")
 
 
 PACK_IN_CACHEMEDIA_BASIS = (
@@ -2539,9 +2639,25 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             pack_targets += closure.reaches(partial_report.EDGE_MEMORY_CACHEMEDIA, "mem",
                                             f"mem-{member['snap_id']}", "cm")
 
+    refs = _media_refs(members)
     frows = []
     for f in sorted(files, key=lambda f: (f["source"], -f["bytes"])):
         srcs = _render_src_paths(f, src_root, manifest)
+        role_cell = html.escape(f["role"])
+        # Which of the memories shown recovered this file. Silent on a single-memory page — there is
+        # only one answer — but on a group page it is the only thing that says whether a file came
+        # from one snap of the group or from all of them, and under which role each one recovered it.
+        under = refs.get(_media_key(f)) or []
+        if not single and under:
+            who = ", ".join(
+                f"<a href='#mem-{html.escape(sid)}' title='{html.escape(sid)}'>"
+                f"{html.escape(sid[:8])}…</a>"
+                + (f" <span class='muted'>as {html.escape(role)}</span>" if role != f["role"] else "")
+                for sid, role in under)
+            lead = f"recovered under {len(under)} of the {len(members)} memories shown"
+            if len(under) > 1:
+                lead = "one file on disk, " + lead
+            role_cell += f"<div class='mrefs'>{lead}: {who}</div>"
         blocks = []
         for label, md5, sha256 in f.get("hashes", []):
             tag = f" <span class='pl'>({html.escape(label)})</span>" if label else ""
@@ -2576,13 +2692,17 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                             + _info(_cross_scope_note(f)))
         frows.append(
             f"<tr{' class=partialrow' if f.get('complete') is False else ''}>"
-            f"<td>{html.escape(f['role'])}</td><td>{source_cell}</td>"
+            f"<td>{role_cell}</td><td>{source_cell}</td>"
             f"<td>{f['ext']}</td><td>{html.escape(dim)}</td>"
             f"<td>{f['bytes']//1024} KB</td>"
             f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
             f"<td class='hash'>{hashes}</td>"
             f"<td class='path'>{srcs}</td></tr>")
-    files_table = ("<table class='files'><tr><th>Role</th><th>Source cache</th><th>Type</th>"
+    # The sharing explanation sits on the column header, once, rather than on each row it applies to:
+    # every row would carry the same paragraph, and it explains what the column says rather than
+    # anything about one file.
+    role_header = "Role" + ("" if single else _info(SHARED_MEDIA_BASIS))
+    files_table = (f"<table class='files'><tr><th>{role_header}</th><th>Source cache</th><th>Type</th>"
                    "<th>Dimensions</th><th>Size</th><th>File</th><th>Hashes (MD5 / SHA-256)</th>"
                    "<th>Source path(s) in extraction</th></tr>"
                    + "".join(frows) + "</table>") if frows else "<div class='muted'>no cached media recovered</div>"
