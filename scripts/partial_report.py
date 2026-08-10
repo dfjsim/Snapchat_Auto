@@ -919,10 +919,15 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
     reach = ("following every included row's own links until nothing new is added (transitive)"
              if closure.options.get("transitive")
              else "one hop from each selected row, plus what a row cannot be shown without")
+    # Where the policy came from. A selection file may carry the policy it was built for, and the run
+    # may overrule it — so a reader checking which relations were followed has to be able to attribute
+    # the choice, not just read its result.
+    came_from = closure.options.get("relations_from")
     body.append(_prov_section(
         "<b>Related items</b>",
         f"{followed} of {len(RELATIONS)} relation(s) followed &mdash; {reach}",
-        f"<div>{reach[0].upper()}{reach[1:]}.</div>"
+        (f"<div>Policy taken from <b>{_esc(came_from)}</b>.</div>" if came_from else "")
+        + f"<div>{reach[0].upper()}{reach[1:]}.</div>"
         '<table><tr><th></th><th>Relation</th><th>Basis</th></tr>'
         + "".join(f'<tr><td class="{"yes" if relations.get(r.key) else "no"}">'
                   f'{"&#10004;" if relations.get(r.key) else "&#10008;"}</td>'
@@ -986,6 +991,9 @@ def write_manifest(closure, report_dir, prov=None):
                "relations": [{"key": r.key, "label": r.label, "basis": r.basis,
                               "followed": bool((closure.options.get("relations") or {}).get(r.key))}
                              for r in RELATIONS],
+               # Which of the three the policy above came from — the run's own --relations, the spec
+               # the selection file recorded, or the built-in defaults.
+               "relations_from": closure.options.get("relations_from") or "",
                "containment": list(CONTAINMENT),
                **closure.as_dict()}
     path = os.path.join(report_dir or ".", "partial_manifest.json")
@@ -1202,9 +1210,14 @@ def dry_run_text(closure):
         for key, n in sorted(by_relation.items(), key=lambda kv: -kv[1]):
             out.append(f"  {key:<22} {n}")
 
+    came_from = closure.options.get("relations_from")
+    if came_from:
+        out.append("")
+        out.append(f"Relation policy taken from {came_from}")
     off = [r.key for r in RELATIONS if not (closure.options.get("relations") or {}).get(r.key)]
     if off:
-        out.append("")
+        if not came_from:
+            out.append("")
         out.append("Relations NOT followed: " + ", ".join(off))
     for warning in closure.warnings:
         out.append(f"WARNING: {warning}")
