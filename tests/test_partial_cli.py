@@ -12,6 +12,7 @@ default; proceeding is something the examiner asks for and is then stated on eve
 Every input is synthetic.
 """
 import json
+import os
 
 import pytest
 
@@ -218,3 +219,94 @@ def _closure_of(request):
     indexes = {"conv": index}
     return partial_report.expand(indexes, partial_report.resolve(indexes, request.selection),
                                  request.options)
+
+
+# --------------------------------------------------------------------------- finding the full reports
+
+def _report_folder(path, *manifests):
+    """A folder that looks like a Reports/ folder, holding the named cross-report manifests."""
+    os.makedirs(path, exist_ok=True)
+    with open(os.path.join(path, "run_id.txt"), "w", encoding="utf-8") as fh:
+        fh.write("run-1")
+    for rel in manifests:
+        target = os.path.join(path, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+    return path
+
+
+def test_the_full_report_folder_is_found_next_to_the_selection_file(tmp_path):
+    """Where the selection sits is the evidence of which run it belongs to.
+
+    The GUI makes a new timestamped run folder for every run, so guessing *this* run's Reports/ pointed
+    at a folder that does not exist and every cross-report link degraded to nothing, silently.
+    """
+    run = tmp_path / "Snapchat_Auto-1"
+    reports = _report_folder(str(run / "Reports"))
+    selection = run / "selection.json"
+    selection.write_text("{}", encoding="utf-8")
+
+    assert partial_report.find_links_dir(str(selection)) == os.path.abspath(reports)
+
+
+def test_a_selection_kept_inside_the_reports_folder_is_also_found(tmp_path):
+    reports = _report_folder(str(tmp_path / "Reports"))
+    selection = os.path.join(reports, "selection.json")
+    with open(selection, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    assert partial_report.find_links_dir(selection) == os.path.abspath(reports)
+
+
+def test_a_selection_filed_away_from_any_report_folder_finds_nothing(tmp_path):
+    """Better empty than wrong: an unrelated folder must not be taken for a report folder."""
+    selection = tmp_path / "downloads" / "selection.json"
+    selection.parent.mkdir()
+    selection.write_text("{}", encoding="utf-8")
+    assert partial_report.find_links_dir(str(selection)) == ""
+
+
+def test_every_cross_report_manifest_present_is_reported_as_such(tmp_path, caplog):
+    reports = _report_folder(str(tmp_path / "Reports"),
+                             *[rel for rel, _why in partial_report.LINK_MANIFESTS])
+    caplog.clear()
+    found = partial_report.check_links_dir(reports)
+    assert len(found) == len(partial_report.LINK_MANIFESTS)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_missing_manifest_is_named_and_warned_about(tmp_path, caplog):
+    """Silence here reads as "these rows link to nothing" rather than "we could not find the file"."""
+    reports = _report_folder(str(tmp_path / "Reports"), "Conversations/cache_links.json")
+    caplog.clear()
+    found = partial_report.check_links_dir(reports)
+
+    assert len(found) == 1
+    warnings = " ".join(r.message for r in caplog.records if r.levelname == "WARNING")
+    assert "Memories/memory_pages.json" in warnings
+    assert "CacheMedia/by_cache_key.json" in warnings
+
+
+def test_no_report_folder_at_all_says_so_rather_than_listing_five_misses(tmp_path, caplog):
+    caplog.clear()
+    assert partial_report.check_links_dir(str(tmp_path / "nope")) == []
+    warnings = " ".join(r.message for r in caplog.records if r.levelname == "WARNING")
+    assert "no full report folder" in warnings and "--links-dir" in warnings
+
+
+def test_the_request_takes_the_folder_derived_from_the_selection(tmp_path):
+    run = tmp_path / "run"
+    reports = _report_folder(str(run / "Reports"))
+    path, _payload = _selection(run)
+    request, error = app._partial_request({"selection": path})
+    assert error is None
+    assert request.links_dir == os.path.abspath(reports)
+
+
+def test_an_explicit_links_dir_wins_over_the_derived_one(tmp_path):
+    run = tmp_path / "run"
+    _report_folder(str(run / "Reports"))
+    elsewhere = _report_folder(str(tmp_path / "elsewhere"))
+    path, _payload = _selection(run)
+    request, error = app._partial_request({"selection": path, "links-dir": elsewhere})
+    assert error is None and request.links_dir == elsewhere
