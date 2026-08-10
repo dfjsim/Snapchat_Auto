@@ -48,6 +48,7 @@ import html
 import uuid
 import shutil
 import logging
+import calendar
 from datetime import datetime
 from urllib.parse import quote
 
@@ -491,25 +492,38 @@ var SCSel=(function(){
  /* One delegated handler for every checkbox in the document, virtual rows included. The key record
     is read from the row itself (`data-i` on the .vr) rather than emitted into every row's markup —
     at 100 000 rows that attribute would cost more than the selection is worth. Hand-written
-    checkboxes carry `data-keys` inline; there are only a handful of those. */
+    checkboxes carry `data-keys` inline; there are only a handful of those.
+
+    An inline `data-keys` wins over the row's, and the order matters: a hand-written box can sit
+    INSIDE a virtual row (the Memories index renders a folded group's members in their lead's
+    expanded area, each with its own box). Reading the row's keys there would file one Memory's tick
+    under another Memory's identifiers, and a later run would then resolve the selection to the wrong
+    row — the exact failure this key record exists to prevent. `data-keys` is always a statement
+    about the box that carries it. */
  document.addEventListener('change',function(ev){
   var el=ev.target;
   if(!el||!el.classList||!el.classList.contains('selbox'))return;
-  var keys=null,vr=el.closest?el.closest('.vr[data-i]'):null,raw;
-  if(vr&&window.SCV&&SCV.selKeys)keys=SCV.selKeys(+vr.getAttribute('data-i'));
-  else if((raw=el.getAttribute('data-keys'))){try{keys=JSON.parse(raw);}catch(e){}}
+  var keys=null,raw=el.getAttribute('data-keys'),vr;
+  if(raw){try{keys=JSON.parse(raw);}catch(e){}}
+  else if((vr=el.closest?el.closest('.vr[data-i]'):null)&&window.SCV&&SCV.selKeys)
+   keys=SCV.selKeys(+vr.getAttribute('data-i'));
   set(el.getAttribute('data-kind'),el.getAttribute('data-id'),el.checked,keys);});
  return {get:get,set:set,setMany:setMany,ids:ids,keys:keys,count:count,total:total,clear:clear,
          preload:preload,onChange:function(f){subs.push(f);},saveFile:saveFile,loadFile:loadFile,
          dirty:isDirty,legacy:legacyIds,schema:schema};
 })();
-// reflect the stored state onto plain (non-virtual) checkboxes, e.g. on a detail sub-page
+// Reflect the stored state onto every checkbox the virtual table does not draw itself — the ones on
+// a detail sub-page, and the hand-written ones inside an expanded row (the Memories index puts a
+// folded group's members there, each with its own box). Only a row's OWN checkbox is skipped: that
+// one is rebuilt from the store by rowHtml on every render, and re-setting it here would be a second
+// answer to the same question. A box in a `.vdet` is not — the detail HTML is one static string, so
+// without this a Memory ticked anywhere else renders unticked the moment its row is redrawn.
 // NOTE the invariant this rests on: `data-id` is the *store* id and must be unique across the whole
 // run. A page-local anchor (a message's, whose number restarts per conversation) must be prefixed —
 // see C.selPrefix in VTABLE_JS.
 function scSyncBoxes(){
  document.querySelectorAll('input.selbox[data-id]').forEach(function(b){
-  if(b.closest('.vr'))return;                       // virtual rows are re-rendered from the store
+  if(b.closest('.vcells'))return;                   // the row's own box: drawn from the store
   b.checked=SCSel.get(b.getAttribute('data-kind'),b.getAttribute('data-id'));});}
 """.replace("__SCHEMA__", str(SELECTION_SCHEMA))
 
@@ -626,6 +640,157 @@ def counted_options(states, counts):
     return "".join(
         f'<option value="{value}"{"" if counts.get(value) else " disabled"}>'
         f'{label} &mdash; {counts.get(value, 0)}</option>' for value, label in states)
+
+
+_TS_PREFIX = re.compile(r"\s*(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?")
+
+
+def ts_key(text):
+    """A displayed timestamp -> the seconds since 1970 of the **wall clock it shows**, or None.
+
+    Every report renders its times through one formatter whose output starts
+    ``YYYY-MM-DD HH:MM:SS`` in the run's chosen timezone, and this reads that back. So the number a
+    row is filtered on is derived from the string the examiner is looking at, and the two cannot
+    disagree — which is the whole point of not keeping a second, independently converted copy of
+    each time.
+
+    It is deliberately **not** a UTC epoch. The examiner types a date they read off the report, so
+    the comparison has to be wall clock against wall clock; converting either side into real UTC
+    would need the run's zone (and its DST history for that date) in the browser, and would shift
+    every entered time by the offset if it got it wrong. Both sides here are naive, so a run in any
+    timezone filters correctly with no zone arithmetic at all.
+    """
+    match = _TS_PREFIX.match(text or "")
+    if not match:
+        return None
+    year, month, day, hour, minute, second = (int(g or 0) for g in match.groups())
+    return int(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
+
+
+def ts_keys(*texts):
+    """The distinct `ts_key` values of several displayed timestamps, sorted. Empties are dropped.
+
+    This is what a row carries for the time filter. A row that yields an empty list has no time this
+    report can read, and `scTimeHit` will not match it while a window is set — see `time_filter`.
+    """
+    keys = {key for key in (ts_key(text) for text in texts) if key is not None}
+    return sorted(keys)
+
+
+_TIME_UNITS = (("m", "minutes"), ("h", "hours"), ("d", "days"))
+
+
+def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
+    """The shared date/time window control: *any time*, *between* two points, or *within ± N of* one.
+
+    ``prefix`` namespaces the element ids so a page can carry more than one (the Conversations index
+    has one; its conversation pages have their own). ``scopes`` is ``[(value, label)]`` for reports
+    where a row has more than one kind of timestamp — the Conversations index applies the window to
+    the conversation's own activity, to its messages' times, or to both — and is omitted where the
+    question does not arise.
+
+    Both inputs are ``datetime-local``, which needs no library and works on ``file://``. What is
+    entered is read as a wall clock and compared against `ts_key` values, so it means the time as
+    the report displays it, in the run's timezone — see `ts_key`.
+    """
+    scope_html = ""
+    if scopes:
+        options = "".join(f'<option value="{value}">{html.escape(text)}</option>'
+                          for value, text in scopes)
+        scope_html = (f'<label class="tfscope" title="Which of this row\'s timestamps the window is '
+                      f'applied to.">of <select id="{prefix}scope" oninput="flt()">{options}'
+                      f'</select></label>')
+    units = "".join(f'<option value="{value}"{" selected" if value == "h" else ""}>{text}</option>'
+                    for value, text in _TIME_UNITS)
+    full_hint = (hint + " " if hint else "") + (
+        f"The window is compared against the times as this report displays them, in the run's "
+        f"timezone — so enter what you read in the table. A {noun} matches when ANY of its "
+        f"timestamps falls inside the window, including the ones only its detail shows. A {noun} "
+        f"with no readable timestamp at all cannot be shown to fall inside a window, so it is "
+        f"hidden while one is set rather than being included on the strength of nothing — clear "
+        f"the filter to see it again. Leaving one end of «between» empty makes the window "
+        f"open-ended in that direction.")
+    return (
+        f'<label class="tfl" title="{html.escape(full_hint)}">{html.escape(label)}'
+        f'{info_icon(full_hint)} '
+        f'<select id="{prefix}mode" oninput="scTimeMode(\'{prefix}\')">'
+        f'<option value="">any time</option>'
+        f'<option value="range">between</option>'
+        f'<option value="near">within</option></select></label>'
+        f'<span class="tfg" id="{prefix}gr" style="display:none">'
+        f'<input type="datetime-local" id="{prefix}from" step="1" oninput="flt()" '
+        f'title="From (inclusive). Leave empty for «anything up to the other end».">'
+        f'<span class="tfsep">and</span>'
+        f'<input type="datetime-local" id="{prefix}to" step="1" oninput="flt()" '
+        f'title="To (inclusive). Leave empty for «anything from the other end onwards»."></span>'
+        f'<span class="tfg" id="{prefix}gn" style="display:none">'
+        f'<input type="number" id="{prefix}n" value="1" min="0" step="any" oninput="flt()" '
+        f'title="How far either side of the moment below.">'
+        f'<select id="{prefix}unit" oninput="flt()">{units}</select>'
+        f'<span class="tfsep">of</span>'
+        f'<input type="datetime-local" id="{prefix}at" step="1" oninput="flt()" '
+        f'title="The moment to search around."></span>'
+        + scope_html)
+
+
+TIME_CSS = """
+ .tfl{white-space:nowrap} .tfg{display:inline-flex;align-items:center;gap:5px}
+ .tfg input[type=datetime-local]{font-size:12px} .tfg input[type=number]{width:64px;font-size:12px}
+ .tfsep{color:#777;font-size:12px} .tfscope{white-space:nowrap}
+ /* the member of a folded group whose timestamp matched the window */
+ .mhit{background:#fff6d9;box-shadow:0 0 0 2px #e6c983 inset;border-radius:5px}
+"""
+
+
+TIME_JS = r"""
+/* The shared date/time window (report_ui.time_filter). One window, three states: off, a range, or
+   ±N around a moment. Every value here is a naive wall clock — see report_ui.ts_key for why the
+   comparison is deliberately not done in UTC. */
+function scTimeVal(id){
+ var v=scFv(id);
+ if(!v)return null;
+ var m=/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)(?::(\d\d))?/.exec(v);
+ if(!m)return null;                                    /* still being typed */
+ return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+(m[6]||0))/1000;}
+
+function scTimeWin(p){
+ var mode=scFv(p+'mode');
+ if(!mode)return null;
+ if(mode==='range'){
+  var a=scTimeVal(p+'from'),b=scTimeVal(p+'to');
+  if(a===null&&b===null)return null;                   /* "between" with neither end set is off */
+  return {a:a===null?-Infinity:a,b:b===null?Infinity:b};}
+ var at=scTimeVal(p+'at');
+ if(at===null)return null;
+ var n=parseFloat(scFv(p+'n'));
+ if(!isFinite(n)||n<0)return null;
+ var mult={m:60,h:3600,d:86400}[scFv(p+'unit')||'h']||3600;
+ return {a:at-n*mult,b:at+n*mult};}
+
+/* A row matches when any of its timestamps is inside the window. No timestamps means no match: a
+   row we cannot place in time may not be presented as one that falls in the window asked for. */
+function scTimeHit(win,list){
+ if(!win)return true;
+ if(!list||!list.length)return false;
+ for(var i=0;i<list.length;i++)if(list[i]>=win.a&&list[i]<=win.b)return true;
+ return false;}
+
+/* `quiet` is set by scTimeReset, which runs inside the report's own reset() — the refilter that
+   follows it is already on its way, and asking for a second one would filter the table twice. */
+function scTimeMode(p,quiet){
+ var mode=scFv(p+'mode');
+ var gr=document.getElementById(p+'gr'),gn=document.getElementById(p+'gn');
+ if(gr)gr.style.display=(mode==='range')?'':'none';
+ if(gn)gn.style.display=(mode==='near')?'':'none';
+ if(!quiet&&window.flt)flt();}
+
+function scTimeReset(p){
+ scFvReset(p+'mode');scFvReset(p+'from');scFvReset(p+'to');scFvReset(p+'at');
+ var n=document.getElementById(p+'n');if(n)n.value='1';
+ var u=document.getElementById(p+'unit');if(u)u.value='h';
+ var s=document.getElementById(p+'scope');if(s)s.selectedIndex=0;
+ scTimeMode(p,true);}
+"""
 
 
 def clear_filters_button(noun="row"):
@@ -848,10 +1013,54 @@ var SCV=(function(){
 "use strict";
 var C=null,rows=[],byId={},view=[],vpos={},slice=[],pos={},cum=null,exp={},expH={},det={},
     chunkState={},mount,win,pad,pager,hlId=null,lastA=-1,lastB=-1,dirty=true,
-    sortCol=-1,sortDir=1,scheduled=false,measuring=0,pageSize=0,page=0,pagerSig='';
+    sortCol=-1,sortDir=1,scheduled=false,measuring=0,pageSize=0,page=0,pagerSig='',
+    kids={},foldHit={},hits={},nhit=0;
 
 function setRows(r){rows=r;byId={};for(var i=0;i<rows.length;i++)byId[rows[i][0]]=i;
+ buildFolds();
  if(C)refilter();}
+
+/* ---------- folded rows ----------
+   A row may be *folded* into another: it keeps its place in `rows` — so its anchor, its selection
+   id and every cross-report link into it go on working — but the table shows its lead's row instead
+   and renders it inside that row's detail. The Memories index folds a group of Memories behind its
+   earliest member, because a group is the same media under several snap rows and three rows read as
+   three findings.
+
+   The lead is shown when the lead OR any folded member matches the current filters, and when only a
+   member matched, `foldHit` remembers which — that is what lets the report open the lead and point
+   at the member instead of showing a row that appears not to match at all. */
+function buildFolds(){
+ kids={};
+ for(var i=0;i<rows.length;i++){
+  var lead=(rows[i][5]||{}).lead;
+  if(lead&&lead!==rows[i][0])(kids[lead]=kids[lead]||[]).push(i);}}
+
+function folded(){return !!(C&&C.folded&&C.folded());}
+
+function foldHits(){return foldHit;}
+
+/* Open every lead the filters reached only through a folded member. Called by the report after
+   refilter(): a lead whose own cells do not match is otherwise a row with no visible reason to be
+   there, so there is no count at which leaving them shut is the better answer — and that rules out
+   the obvious `open()` per row, whose rebuild() would make this quadratic. Rows are marked open, the
+   chunks they need are fetched once each, and the offsets are rebuilt once, as expandAll does.
+   Targeted at the member hits only; expandAll() would open the whole page. */
+function openFoldHits(){
+ var ids=Object.keys(foldHit),need={},opened=0;
+ for(var k=0;k<ids.length;k++){
+  var id=ids[k],i=byId[id];
+  if(i===undefined||exp[id])continue;
+  exp[id]=1;opened++;
+  if(C.detailBase&&det[id]===undefined&&rows[i][4]!==null&&rows[i][4]!==undefined)
+   need[rows[i][4]]=i;}
+ if(!opened)return 0;
+ dirty=true;rebuild();
+ Object.keys(need).forEach(function(n){
+  loadDetail(need[n],function(){dirty=true;rebuild();});});
+ return opened;}
+
+function openRow(id){var i=byId[id];if(i===undefined||exp[id])return false;open(i);return true;}
 
 function init(o){
  C=o;mount=document.getElementById(o.mount);win=document.getElementById(o.win);
@@ -886,11 +1095,27 @@ function hit(text,ts){
 function refilter(){
  if(!C)return;
  var ts=terms((C.query?C.query():'').toLowerCase()),m=C.match||null;
- view=[];
- for(var i=0;i<rows.length;i++){
+ function matches(i){
   var r=rows[i];
-  if(ts.length&&!hit(r[2],ts))continue;
-  if(m&&!m(r[5]||{},r))continue;
+  if(ts.length&&!hit(r[2],ts))return false;
+  return !(m&&!m(r[5]||{},r));}
+ var fold=folded();
+ view=[];foldHit={};hits={};nhit=0;
+ for(var i=0;i<rows.length;i++){
+  var id=rows[i][0],lead=fold?(rows[i][5]||{}).lead:null;
+  if(lead&&lead!==id)continue;                       /* shown inside its lead's row instead */
+  var own=matches(i),mine=own?[i]:[];
+  /* Which rows of this fold matched, kept per shown lead. "Select all shown" needs it: a folded
+     member the filters do NOT match must not be ticked just because its lead is on screen, and a
+     member that DOES match must be, because that is the row the examiner asked for. */
+  if(fold&&kids[id])
+   for(var k=0;k<kids[id].length;k++)
+    if(matches(kids[id][k]))mine.push(kids[id][k]);
+  if(!mine.length)continue;
+  /* the lead itself does not match — but a member it is hiding does, and dropping the group because
+     its earliest member is not the one searched for would lose that member entirely */
+  if(!own)foldHit[id]=rows[mine[0]][0];
+  hits[i]=mine;nhit+=mine.length;
   view.push(i);}
  if(sortCol>=0)sortView();
  rebuild();}
@@ -969,7 +1194,10 @@ function rebuild(){
  for(var k=0;k<n;k++){pos[slice[k]]=k;cum[k+1]=cum[k]+rowH(slice[k]);}
  pad.style.height=cum[n]+'px';
  renderPager();
- if(C.count)C.count(view.length,rows.length);
+ /* `nhit` is every matching row; `view.length` is how many rows that is on screen. The two differ
+    only when a fold is in effect, and a report that showed one as the other would report a group of
+    three as one memory. */
+ if(C.count)C.count(view.length,rows.length,nhit);
  var e=document.getElementById(C.empty);
  if(e)e.style.display=view.length?'none':'block';
  dirty=true;render();}
@@ -995,7 +1223,22 @@ function render(){
  win.style.top=cum[a]+'px';
  win.innerHTML=h.join('');
  lastA=a;lastB=b;dirty=false;
+ markFoldHits();
+ /* Hand-written checkboxes inside an expanded row come from static detail HTML, so their state has
+    to be put back after every redraw — see scSyncBoxes. Guarded because the selection code is not
+    loaded on every page that uses this table. */
+ if(window.scSyncBoxes)scSyncBoxes();
  measure();}
+
+/* Point at the folded member whose timestamp (or search term) is why its lead is on screen. Done
+   after every render rather than baked into the detail HTML: the detail is one static string shared
+   by every filter state, and innerHTML is rewritten each time the window scrolls. */
+function markFoldHits(){
+ for(var id in foldHit){
+  var host=document.getElementById(id);
+  if(!host)continue;
+  var el=host.querySelector('[data-mem="'+foldHit[id]+'"]');
+  if(el)el.classList.add('mhit');}}
 
 /* Re-measure the open rows after something inside one changed size — an image or a video that
    finished loading, say. Without this the row keeps the height it had while the media was still
@@ -1107,12 +1350,17 @@ function selKeys(i){
  if(!C||!C.selKeys||!rows[i])return null;
  try{return C.selKeys(rows[i])||null;}catch(e){return null;}}
 
+/* Every row the current filters match, including the members of a folded group — but only the ones
+   that match. See the note in refilter(). */
 function selectShown(on){
  if(!C.selKind)return 0;
- var byStoreId={};
- var list=view.map(function(i){var s=selId(rows[i][0]);byStoreId[s]=i;return s;});
+ var byStoreId={},list=[];
+ for(var v=0;v<view.length;v++){
+  var mine=hits[view[v]]||[view[v]];
+  for(var k=0;k<mine.length;k++){
+   var s=selId(rows[mine[k]][0]);byStoreId[s]=mine[k];list.push(s);}}
  SCSel.setMany(C.selKind,list,on,function(s){return selKeys(byStoreId[s]);});
- return view.length;}
+ return list.length;}
 
 /* ---------- anchor navigation ---------- */
 function hasRow(id){return byId[id]!==undefined;}
@@ -1171,8 +1419,10 @@ return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSor
         expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
         remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
         selId:selId,selKeys:selKeys,
+        foldHits:foldHits,openFoldHits:openFoldHits,openRow:openRow,
         page:function(){return page;},
-        pages:pageCount,count:function(){return view.length;}};
+        pages:pageCount,count:function(){return view.length;},
+        matching:function(){return nhit;}};
 })();
 
 /* Read / clear a filter control that a report only emits when the data has something for it to

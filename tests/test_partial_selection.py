@@ -293,7 +293,7 @@ def test_the_store_id_is_prefixed_and_the_anchor_is_not():
     assert 'data-id="\'+selId(id)+\'"' in vt
     assert "SCSel.get(C.selKind,selId(id))" in vt
     # selectShown must store the same prefixed ids, or "select all shown" and a row tick disagree
-    assert "selId(rows[i][0])" in vt
+    assert "selId(rows[mine[k]][0])" in vt
     assert "selId:selId" in vt and "selKeys:selKeys" in vt
 
 

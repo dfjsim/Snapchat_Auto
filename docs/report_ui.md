@@ -151,6 +151,71 @@ Reading an optional control from `match`/`reset` goes through `scFv(id)` / `scFv
 tolerate the element being absent, so the same generated JS works whether or not the control was
 emitted.
 
+## The date/time window (`report_ui.time_filter`, `TIME_JS`)
+
+One shared control, three states — *any time*, *between* two points, *within ± N minutes/hours/days
+of* a moment — used by the Memories index, the Conversations index and each conversation page. Two
+`datetime-local` inputs, which need no library and work on `file://`.
+
+**The comparison is wall clock against wall clock, deliberately not UTC.** Every report renders its
+times through one formatter whose output starts `YYYY-MM-DD HH:MM:SS` in the run's chosen timezone;
+`report_ui.ts_key` reads that string back into seconds-since-1970 *of the clock it shows*, and
+`scTimeVal` does the same to what the examiner typed. So the number a row is filtered on is derived
+from the string the examiner is looking at, and the two cannot disagree. Converting either side into
+real UTC would need the run's zone — and that date's DST offset — inside the browser, and getting it
+wrong would shift every entered time by the offset. Both sides being naive means a run rendered in
+any timezone filters correctly with no zone arithmetic at all. It also means these keys are **not**
+comparable with the real epochs in the row's sort values; they are for this filter and nothing else.
+
+**A row carries its keys as a list, and an empty list never matches an active window.** A row whose
+time could not be read — a carved Memory has no `ZGALLERYSNAP` row at all, a message can have no
+recovered `creation_timestamp` — cannot be shown to fall inside the window asked for, so it is hidden
+while one is set rather than included on the strength of nothing. Every control's "?" says so, and
+says that clearing the filter brings it back. The keys cover **every** timestamp a row has, including
+the ones only its detail shows, which is the point: a capture time is findable without knowing which
+column holds it.
+
+**A conversation's two kinds of time are kept apart** (`scConvTimes`). `ct` is the conversation's own
+first/last activity — which for a conversation holding no message comes from the app's chat feed and
+says only that it was active then (`FEED_DATE_TITLE`) — and `mt` is the times of the messages
+themselves. The scope control picks one or the union, and *message times only* never falls back to a
+feed date: answering a question about messages with a feed date would be a claim the evidence does
+not make. The union is the default, because a filter that under-includes hides evidence while one
+that over-includes only shows more.
+
+## Folded rows (`C.folded`, `SCV.foldHits`, `openFoldHits`)
+
+A row may be **folded** into another: it keeps its place in `rows` — so its anchor, its selection id
+and every cross-report link into it go on working — but the table draws its lead's row instead and
+renders it inside that row's expanded area. The Memories index folds a group of Memories behind its
+earliest member, because a group is the same media object under several snap rows and three rows for
+it read as three findings. A row declares its lead in its filter metadata (`{"lead": "<row id>"}`),
+which `setRows` turns into the lead → members index once.
+
+Four rules make it safe rather than merely tidier:
+
+* **a lead is shown when the lead *or any member* matches.** Hiding a group because its earliest
+  member is not the one searched for would lose that member entirely;
+* **when only a member matched, `foldHit[lead] = member`** and the report calls
+  `SCV.openFoldHits()` after `refilter()`, which opens those leads and marks the member that matched
+  (`markFoldHits`, `.mhit`). A row whose visible cells do not match is otherwise a row with no
+  apparent reason to be there, so there is no count at which leaving them shut is the better answer —
+  which is why it marks the rows open, fetches each chunk once and rebuilds the offsets **once**,
+  rather than calling `open()` per row and paying its `rebuild()` each time. The marking itself runs
+  after every render, not in the detail HTML: that HTML is one static string shared by every filter
+  state;
+* **"Select all shown" ticks the members the filters match, and no others.** Not every member of a
+  shown lead — a folded row the filters exclude must not enter a disclosure selection because its
+  lead happened to be on screen — and not only the leads either, since the fold is a way of showing
+  rows rather than a reason to leave them out;
+* **`C.reset()` unfolds.** That is what lets a cross-report link aimed at a folded row land on it:
+  `goTo` calls `reset()` when its target is not in the view, and reset means *stop hiding anything*.
+  Clear all filters therefore unfolds too, and the control's "?" says so.
+
+`C.count(n, t, k)` receives the rows on screen, the total, **and** how many rows the filters matched;
+the last two differ exactly when a fold is in effect, and a report that showed one as the other would
+count a group of three as one Memory.
+
 ## The "?" popovers
 
 Every explanation icon opens its popover with `position:fixed`, placed next to the icon in viewport
@@ -210,8 +275,12 @@ The durable store is therefore **a file the examiner saves**: `Reports/selection
 * Every page of the run loads it at startup (`<script src="…/selection.js">`) — that is how the
   Memories index, the Memory detail sub-pages and the cache_controller report agree on what is
   selected.
-* Ticks are held in memory; a **“unsaved”** marker appears next to the count, and leaving the page
-  with unsaved ticks raises the browser's "leave site?" confirmation.
+* Ticks are held in memory; a persistent **“unsaved — use Save selections”** note sits next to the
+  count. There is deliberately **no** `beforeunload` guard: it claimed work was unsaved when every
+  tick is already stashed in `localStorage`, a browser will not show custom text in that dialog so it
+  could not explain itself, and a `dirty` flag restored from a stash made it fire on tabs the
+  examiner had never touched — including ones opened after they had saved the file elsewhere, since
+  each `file://` tab has its own storage.
 * `localStorage` is still written as a same-tab safety net, so an accidental reload does not lose
   work; a stash newer than the loaded file wins on reload, but an explicit **Load…** always
   replaces what is in memory.
@@ -295,4 +364,17 @@ are read straight out of the evidence and survive any parsing improvement — `m
 The keys cost nothing per row in the data files: `SCV.init` takes a `selKeys(row)` callback and the
 delegated `change` handler looks the row up through the `data-i` attribute `.vr` already carries, so
 they are read only when a box is actually ticked. Hand-written checkboxes (a Memory sub-page's member
-blocks, a conversation page's own box) carry `data-keys` inline — there are only a handful.
+blocks, the Memories index's folded-group members, a conversation page's own box) carry `data-keys`
+inline — there are only a handful.
+
+**An inline `data-keys` wins over the row's, and the order matters.** A hand-written box can sit
+*inside* a virtual row: the Memories index renders a folded group's members in their lead's expanded
+area, each with its own box. Reading the row's keys there would file one Memory's tick under another
+Memory's identifiers, and a later partial run would resolve that selection to the wrong Memory —
+precisely the failure the key record exists to prevent. `data-keys` is always a statement about the
+box carrying it.
+
+**`scSyncBoxes` skips only a row's *own* checkbox**, i.e. boxes in `.vcells`, which `rowHtml` rebuilds
+from the store on every render. A box inside a `.vdet` is not rebuilt — the detail is one static
+string with no `checked` in it — so `render()` calls `scSyncBoxes()` after each redraw. Without that, a
+Memory ticked anywhere else appears unticked the moment its row is drawn again.

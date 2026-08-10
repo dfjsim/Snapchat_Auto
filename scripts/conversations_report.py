@@ -648,6 +648,21 @@ _FEED_BASIS = (
     "conversation was active on this device; they do NOT say that a message existed at that "
     "moment, and they are not evidence of message content.")
 
+_TIME_SCOPE_HINT = (
+    "A conversation has two kinds of time and the window is applied to whichever you pick, because "
+    "they are different statements. «First / last activity» is the conversation's own range — and "
+    "for a conversation holding no message that comes from the app's chat feed, which says the "
+    "conversation was active then and NOT that a message existed then (those cells are marked "
+    "«feed»). «Message times» are the times of the messages themselves, and that scope never falls "
+    "back to a feed date, so it cannot answer a question about messages with one. «Either kind» is "
+    "the union of the two: it can only ever return more conversations than either alone, which is "
+    "why it is the default — a filter that leaves something out hides evidence.")
+
+_MSG_TIME_HINT = (
+    "Each row here is a message, so the window is applied to its own creation time — the value in "
+    "the Created column. A message whose time could not be recovered from arroyo.db is hidden while "
+    "a window is set, since it cannot be shown to fall inside one.")
+
 _ACTIVITY_HINT = (
     "First and last activity in this conversation.\n\n"
     "• Normally these are the first and last arroyo.db conversation_message.creation_timestamp — "
@@ -838,12 +853,12 @@ def write_assets(outdir):
     with open(os.path.join(assets, "ui.css"), "w", encoding="utf-8") as fh:
         fh.write("/* Snapchat Auto — shared report UI (see scripts/report_ui.py) */\n"
                  + report_ui.PAGE_CSS + report_ui.VTABLE_CSS + report_ui.NAV_CSS
-                 + report_ui.SELECT_CSS + report_ui.HINT_CSS + _REPORT_CSS)
+                 + report_ui.SELECT_CSS + report_ui.HINT_CSS + report_ui.TIME_CSS + _REPORT_CSS)
     with open(os.path.join(assets, "ui.js"), "w", encoding="utf-8") as fh:
         # SELECT_JS first: ../selection.js is loaded right after this file and calls SCSel.preload().
         fh.write("/* Snapchat Auto — shared report UI (see scripts/report_ui.py) */\n"
                  + report_ui.SELECT_JS + report_ui.VTABLE_JS + report_ui.HINT_JS
-                 + report_ui.NAV_JS + report_ui.SELECT_TOOLBAR_JS + _REPORT_JS)
+                 + report_ui.NAV_JS + report_ui.SELECT_TOOLBAR_JS + report_ui.TIME_JS + _REPORT_JS)
 
 
 # Report-specific styling for both tables (kept out of the row data: every byte of a cell is
@@ -926,6 +941,16 @@ _REPORT_CSS = """
 _REPORT_JS = """
 var flt_t=0;
 function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}
+/* Which of a conversation row's two time lists the window is applied to. They are separate claims:
+   `ct` is the conversation's own first/last activity, which for a conversation with no message comes
+   from the app's chat feed and says only that it was active then, while `mt` is the times of the
+   messages themselves. "Message times only" therefore may not fall back to `ct`, or a feed date
+   would answer a question about messages. */
+function scConvTimes(m){
+ var s=scFv('tscope')||'both';
+ if(s==='mt')return m.mt||[];
+ if(s==='ct')return m.ct||[];
+ return (m.ct||[]).concat(m.mt||[]);}
 function xall(btn){
  var op=btn.dataset.o==='1';
  if(!SCV.expandAll(!op,500)){
@@ -1206,6 +1231,10 @@ def _message_rows(conv, chunk_of):
             {"dir": direction, "type": "|" + "|".join(msg["types"] or ["(none)"]) + "|",
              "att": "y" if atts else "n",
              "wal": "gone" if msg.get("wal") == sqlite_open.MAIN_ONLY else "live",
+             # This message's own time, as the wall clock the row displays (report_ui.ts_key), for
+             # the time window. A message whose time could not be recovered gets an empty list and is
+             # hidden while a window is set — it cannot be placed inside one.
+             "ts": report_ui.ts_keys(msg["created"]),
              # The raw server message id, carried so a saved selection identifies this message by
              # what arroyo.db calls it rather than by our anchor — the anchor is sanitised, may take
              # a duplicate suffix, and for an unsent message is only a *position* in the
@@ -1362,7 +1391,10 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         '</select></label>'
         '<label>Attachment <select id="att" onchange="flt()"><option value="">any</option>'
         '<option value="y">with</option><option value="n">without</option></select></label>'
-        + _wal_filter_html(conv["n_wal_gone"], "message") +
+        + _wal_filter_html(conv["n_wal_gone"], "message")
+        # The same control as the index, without the scope question: here every row IS a message, so
+        # there is only one kind of time to apply the window to.
+        + report_ui.time_filter("t", label="Time", noun="message", hint=_MSG_TIME_HINT) +
         '<button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>'
         f'{report_ui.clear_filters_button("message")}'
         f'<span id="count" style="color:#555"></span></div>'
@@ -1408,13 +1440,13 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         't=document.getElementById("type").value,a=document.getElementById("att").value,'
         'w=scFv("wal");'
         'return (!d||m.dir===d)&&(!t||m.type.indexOf("|"+t+"|")>-1)&&(!a||m.att===a)'
-        '&&(!w||m.wal===w);},'
+        '&&(!w||m.wal===w)&&scTimeHit(scTimeWin("t"),m.ts);},'
         'rowClass:function(m){return m.dir==="Sent"?"out":"";},'
         'count:function(n,t){document.getElementById("count").textContent='
         'n===t?(n+" messages"):(n+" of "+t+" shown");},'
         'reset:function(){document.getElementById("q").value="";'
         'document.getElementById("dir").value="";document.getElementById("type").value="";'
-        'document.getElementById("att").value="";scFvReset("wal");}});'
+        'document.getElementById("att").value="";scFvReset("wal");scTimeReset("t");}});'
         'scSyncBoxes();scSelNote();SCSel.onChange(function(){scSyncBoxes();scSelNote();});'
         'scConsumeHash();'
         '</script></body></html>')
@@ -1509,6 +1541,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
     rows = []
     for conv in conversations:
         parts = conv["participants"]
+        activity = conv.get("activity") or {}
         # the row is one fixed height: name the first two participants and count the rest — the
         # expanded row (and the conversation's own page) lists them all with their user ids
         shown = ", ".join(_participant_html(p, "../", chip=False, closure=closure)
@@ -1547,6 +1580,14 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
             {"kind": conv["kind"], "msg": "y" if conv["n_messages"] else "n",
              "att": "y" if conv["n_attachments"] else "n",
              "wal": "gone" if conv["n_wal_gone"] else "live",
+             # The two kinds of time a conversation has, kept apart because they are different
+             # claims. `ct` is the conversation's own first/last activity, which for a conversation
+             # holding no message comes from the app's chat feed and says only that it was active
+             # then (report_ui.FEED_DATE_TITLE). `mt` is every message's own time. The scope control
+             # picks which the window is applied to, and "message times" has to mean exactly that —
+             # a feed date presented as a message time would be a claim the evidence does not make.
+             "ct": report_ui.ts_keys(*(activity.get(k) or "" for k in ("first", "last"))),
+             "mt": report_ui.ts_keys(*(m["created"] for m in conv["messages"])),
              # the conversation's other identity, recorded with a selection as a fallback match
              **({"sid": conv["server_id"]} if conv["server_id"] else {})},
         ])
@@ -1611,6 +1652,10 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         '<label>Attachments <select id="att" onchange="flt()"><option value="">any</option>'
         '<option value="y">with</option><option value="n">without</option></select></label>'
         + _wal_filter_html(sum(1 for c in conversations if c["n_wal_gone"]), "conversation")
+        + report_ui.time_filter(
+            "t", label="Time", noun="conversation", hint=_TIME_SCOPE_HINT,
+            scopes=(("both", "either kind of time"), ("mt", "message times only"),
+                    ("ct", "first / last activity only")))
         + report_ui.clear_filters_button("conversation") +
         '<span id="count" style="color:#555"></span></div>'
         f'<div class="toolbar">{report_ui.selection_toolbar("conversation")}</div>'
@@ -1648,6 +1693,10 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         'g=document.getElementById("msg").value,a=document.getElementById("att").value,'
         'w=scFv("wal");'
         'return (!k||m.kind===k)&&(!g||m.msg===g)&&(!a||m.att===a)&&(!w||m.wal===w)'
+        # The scope decides which list the window is applied to. "both" is the union, so it can only
+        # ever show more than either alone — the safe default for a filter, since a filter that
+        # under-includes hides evidence. The other two are exact about which claim they are matching.
+        '&&scTimeHit(scTimeWin("t"),scConvTimes(m))'
         '&&(!document.getElementById("selonly").checked||SCSel.get("conv",SCV.selId(r[0])));},'
         'selectedOnly:function(){return document.getElementById("selonly").checked;},'
         'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
@@ -1656,7 +1705,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         'n===t?(n+" conversations"):(n+" of "+t+" shown");},'
         'reset:function(){document.getElementById("q").value="";'
         'document.getElementById("kind").value="";document.getElementById("msg").value="";'
-        'document.getElementById("att").value="";scFvReset("wal");'
+        'document.getElementById("att").value="";scFvReset("wal");scTimeReset("t");'
         'document.getElementById("selonly").checked=false;}});'
         'scSelNote();scConsumeHash();'
         '</script></body></html>')
