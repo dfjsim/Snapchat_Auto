@@ -127,6 +127,24 @@ Two things to get right there, both already true of the report and easy to break
   carrying the same bytes two or three times. Note this changes published filenames and
   `media_by_cache_key.json`, so it needs a fresh corpus byte-diff baseline; it is its own change, not
   something to fold into another commit.
+
+  Where it goes (located, so this need not be re-derived):
+  - **`_save_media(outdir, name, data)`** is the single choke point — every published Memory file goes
+    through it, and it returns the `{"out": name, …}` that becomes `f["path"] = "media/" + f["out"]`.
+    Give it a per-run `{md5: name}` map: identical bytes return the name already written instead of
+    writing a second file. The **first writer's name wins**, so confirm the iteration order over
+    memories is deterministic before relying on it — otherwise two runs of the same build would name the
+    shared file differently, which the corpus byte-diff would (rightly) fail on.
+  - **`_dedup_media(members)`** already merges the group's file list by `hashes[0][1]` (the MD5), which
+    is the same content key — so the file *table* already shows one row per distinct content. What it
+    does not do is say which Memories reference that row: that is the display half, and it needs a
+    file → referencing snap ids map passed into the table in `_render_group_detail`.
+  - Check, do not assume: `write_media_manifest` (keyed by cache key, so shared paths should be fine),
+    `_prune_media` (keep-set is built from `f["out"]`, so it should be fine), and `_best_still` /
+    poster extraction, which name a poster after a snap id and may now be deriving one from a file
+    another snap owns.
+  - Verification is the existing partial-report checker plus the corpus diff: every published file
+    referenced by something, and every internal link resolving to a file that is present.
 - We need to be able to filter/search by URL.
 - ~~Fix MEO decryption that fails in some cases.~~ **Fixed in v1.5.2** — four separate causes, see
   DONE.md ("Snapchat Memories report"). Still open in this area:
