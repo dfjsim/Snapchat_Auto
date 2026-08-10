@@ -843,6 +843,18 @@ def _verdict_rows(verdict):
     return "".join(rows)
 
 
+def _prov_section(title, answer, body):
+    """One collapsible sub-section of the provenance, whose summary already carries the answer.
+
+    The three long tables (the source verdicts, the per-report counts, the relation policy) are
+    folded because expanded they push the links to the reports off the first screen of the index —
+    but folding a statement out of sight is only acceptable if the statement's *answer* stays
+    visible, so each summary states it and the table behind it is the working.
+    """
+    return (f'<details class="provsec"><summary>{title}'
+            f'{f" <span>{answer}</span>" if answer else ""}</summary>{body}</details>')
+
+
 def provenance_html(closure, prov=None, *, open_by_default=False):
     """The collapsible block that states how this extract was produced, and what it leaves out.
 
@@ -850,6 +862,9 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
     holding: which selection, checked against which evidence, with which relations followed, and how
     much of each report is missing. The relations that were **not** followed are listed as well —
     an omission the reader cannot see is an omission they will not account for.
+
+    ``open_by_default`` is set on the report index, where this block is the page's own provenance
+    rather than a footnote to a table. Its long sub-sections are folded even then: see `_prov_section`.
     """
     prov = prov or {}
     sel = prov.get("selection") or {}
@@ -873,52 +888,66 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
     body.append("<table>" + "".join(f"<tr><th>{name}</th><td>{value}</td></tr>"
                                     for name, value in rows) + "</table>")
 
-    body.append("<div><b>Source artifacts</b></div>")
-    body.append('<table><tr><th>Role</th><th>Detail</th><th>Verdict</th></tr>'
-                + _verdict_rows(prov.get("sources")) + "</table>")
+    sources = prov.get("sources")
+    body.append(_prov_section(
+        "<b>Source artifacts</b>",
+        "not checked — the selection carried no fingerprints" if sources is None
+        else _esc(sources.get("text") or ("verified" if sources.get("ok") else "differ")),
+        '<table><tr><th>Role</th><th>Detail</th><th>Verdict</th></tr>'
+        + _verdict_rows(sources) + "</table>"))
     version = prov.get("version")
     if version is not None:
         mark = "yes" if version.get("ok") else "no"
         body.append(f'<div>Tool version: <span class="{mark}">{_esc(version.get("text") or "")}'
                     f"</span></div>")
 
-    body.append("<div><b>What this extract contains</b></div>")
     counts = closure.counts()
-    body.append('<table><tr><th>Report</th><th>Selected</th><th>Pulled in</th>'
-                "<th>In the extraction</th></tr>"
-                + "".join(f'<tr><td>{KIND_NOUN.get(kind, kind)}</td>'
-                          f'<td>{c["selected"]}</td><td>{c["pulled_in"]}</td>'
-                          f'<td>{c["total"]}</td></tr>' for kind, c in counts.items())
-                + "</table>")
+    here = sum(c["selected"] + c["pulled_in"] for c in counts.values())
+    there = sum(c["total"] for c in counts.values())
+    body.append(_prov_section(
+        "<b>What this extract contains</b>",
+        f"{here} of {there} row(s), across {len(counts)} report(s)",
+        '<table><tr><th>Report</th><th>Selected</th><th>Pulled in</th>'
+        "<th>In the extraction</th></tr>"
+        + "".join(f'<tr><td>{KIND_NOUN.get(kind, kind)}</td>'
+                  f'<td>{c["selected"]}</td><td>{c["pulled_in"]}</td>'
+                  f'<td>{c["total"]}</td></tr>' for kind, c in counts.items())
+        + "</table>"))
 
     relations = closure.options.get("relations") or {}
-    body.append("<div><b>Related items</b> &mdash; "
-                + ("following every included row's own links until nothing new is added "
-                   "(transitive)" if closure.options.get("transitive")
-                   else "one hop from each selected row, plus what a row cannot be shown without")
-                + "</div>")
-    body.append('<table><tr><th></th><th>Relation</th><th>Basis</th></tr>'
-                + "".join(f'<tr><td class="{"yes" if relations.get(r.key) else "no"}">'
-                          f'{"&#10004;" if relations.get(r.key) else "&#10008;"}</td>'
-                          f'<td>{_esc(r.label)} <span class="mono">({_esc(r.key)})</span></td>'
-                          f"<td>{_esc(r.basis)}</td></tr>" for r in RELATIONS)
-                + "</table>")
-    body.append("<div>Always included, never optional: " + "; ".join(CONTAINMENT) + ".</div>")
-    body.append("<div>The legacy Communications / LocalMemories reports have no row selection, so "
-                + ("they are included whole." if closure.options.get("legacy_reports")
-                   else "they are <b>left out</b> of this extract entirely.") + "</div>")
-    body.append("<div>The files in this folder are the media the included rows display, and nothing "
-                "else. <b>Encrypted cached bytes are never copied into a report</b> — not into a full "
-                "one either: they are hashed as stored, and the hashes are on the row. Nor are the "
-                "byte-range shards of a split file; what is published is the reconstructed whole. "
-                "Without the databases and the keychain, ciphertext sitting in this folder could not "
-                "be decrypted by anyone reading it anyway.</div>")
-    body.append("<div>A full report keeps staged copies of <span class='mono'>cache_controller.db</span>"
-                " (with its write-ahead log applied and without) under "
-                "<span class='mono'>CacheController/sqlite_views/</span>, so every figure can be read "
-                "back from the database it came from. Those copies are <b>not</b> in this extract: they "
-                "are the whole database, every row of it, which is what an extract of selected rows "
-                "exists not to contain.</div>")
+    followed = sum(1 for r in RELATIONS if relations.get(r.key))
+    reach = ("following every included row's own links until nothing new is added (transitive)"
+             if closure.options.get("transitive")
+             else "one hop from each selected row, plus what a row cannot be shown without")
+    body.append(_prov_section(
+        "<b>Related items</b>",
+        f"{followed} of {len(RELATIONS)} relation(s) followed &mdash; {reach}",
+        f"<div>{reach[0].upper()}{reach[1:]}.</div>"
+        '<table><tr><th></th><th>Relation</th><th>Basis</th></tr>'
+        + "".join(f'<tr><td class="{"yes" if relations.get(r.key) else "no"}">'
+                  f'{"&#10004;" if relations.get(r.key) else "&#10008;"}</td>'
+                  f'<td>{_esc(r.label)} <span class="mono">({_esc(r.key)})</span></td>'
+                  f"<td>{_esc(r.basis)}</td></tr>" for r in RELATIONS)
+        + "</table>"
+        + "<div>Always included, never optional: " + "; ".join(CONTAINMENT) + ".</div>"
+        + "<div>The legacy Communications / LocalMemories reports have no row selection, so "
+        + ("they are included whole." if closure.options.get("legacy_reports")
+           else "they are <b>left out</b> of this extract entirely.") + "</div>"))
+
+    body.append(_prov_section(
+        "<b>What is in this folder</b>", "media the included rows display, and nothing else",
+        "<div>The files in this folder are the media the included rows display, and nothing "
+        "else. <b>Encrypted cached bytes are never copied into a report</b> — not into a full "
+        "one either: they are hashed as stored, and the hashes are on the row. Nor are the "
+        "byte-range shards of a split file; what is published is the reconstructed whole. "
+        "Without the databases and the keychain, ciphertext sitting in this folder could not "
+        "be decrypted by anyone reading it anyway.</div>"
+        "<div>A full report keeps staged copies of <span class='mono'>cache_controller.db</span>"
+        " (with its write-ahead log applied and without) under "
+        "<span class='mono'>CacheController/sqlite_views/</span>, so every figure can be read "
+        "back from the database it came from. Those copies are <b>not</b> in this extract: they "
+        "are the whole database, every row of it, which is what an extract of selected rows "
+        "exists not to contain.</div>"))
 
     excluded = closure.excluded_ref_count()
     body.append(f"<div><b>{excluded}</b> cross-reference(s) point at "

@@ -1676,6 +1676,7 @@ var flt_t=0;
 function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
+ emptyAll:'This extract contains no file from Library/Caches.',
  pager:'pager',pageSize:500,selKind:'cm',
  /* This anchor is the hash of the *recovered* content, so a build that decodes more moves it.
     The raw bytes' hashes and the path are what a later run matches on then. */

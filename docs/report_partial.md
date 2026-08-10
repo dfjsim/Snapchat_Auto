@@ -206,6 +206,14 @@ Two rules follow, worth stating separately because both were bugs waiting to hap
   is what gets quoted.
 * **It returns a copy.** The model itself stays intact — the closure was decided from it, and the other
   reports still read it.
+* **A sub-report holding nothing is a normal outcome, and must read as one.** An extract of two Memories
+  legitimately contains no conversation, no contact and no Library/Caches file. Both of the messages a
+  reader would otherwise get there were wrong: the shared table raised the *"row data could not be
+  loaded — keep the data folder next to the HTML"* banner on any empty table, and the empty-table text
+  said *"nothing matches the current filters"* with no filter set. Neither is true of an extract that
+  simply holds none of that kind, and both send the examiner after a fault instead of at the figures
+  above, which already say `0 of 246`. See
+  [report_ui.md](report_ui.md#an-empty-report-is-not-a-broken-one).
 
 **The provenance block** (`provenance_html`) is a collapsed `<details>` on each report and expanded on
 `index.html`: the tool version, the selection's identity (name, SHA-256 as supplied, `selection_digest`,
@@ -213,6 +221,16 @@ its `exported` stamp and schema), the source verification verdict with its per-a
 per-report *selected / pulled in / total*, and every relation with a check or cross and its basis. The
 relations that were **not** followed are listed too — an omission the reader cannot see is one they will
 not account for. So is the fact that the legacy reports have no row selection and were left out whole.
+
+Its four long sub-sections — the source verdicts, the per-report counts, the relation policy, and what
+is and is not in the folder — are themselves **folded** (`_prov_section`), because expanded on
+`index.html` they push the links to the reports off the first screen, and the links are what the page is
+for. Folding a statement out of sight is only acceptable if the statement's *answer* stays visible, so
+each summary carries it — *"12 of 12 identical to the run this selection was made in"*, *"41 of 848
+row(s), across 6 report(s)"*, *"9 of 11 relation(s) followed — one hop from each selected row"* — and the
+table behind it is the working. What stays unfolded is the identity table plus the one-line statements
+that have no table to hide: the tool-version verdict, the count of cross-references pointing outside the
+extract, any withheld fields, and how the selection resolved.
 
 **`partial_manifest.json`** at the extract root is the machine-readable form, and the file to read when
 the question is *"what was left out"*, which no amount of on-page marking answers in aggregate: the

@@ -315,6 +315,36 @@ The four are referred to by the properties that matter (see "Referring to test d
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
 # Snapchat Memories report
+- **Follow-ups to the group fold, from reading it on a real report.**
+  - **A lead row now carries a second, three-state checkbox for the whole group** — filled when every
+    Memory grouped in the row is selected, a squared-off mark when only some are, empty when none are —
+    and clicking it selects or clears all of them. So "is this group selected?" is answered without
+    expanding the row, which was the ask. Kept as a *separate* control rather than making the existing
+    box select the whole group: that box's `data-id` **is** its Memory's store id, and one box writing
+    several ids would stop it reporting its own row's state, which "Selected only", "Select all shown"
+    and the selection file all read. It appears only where there is a group and only while the fold is
+    on. `indeterminate` is a property rather than an attribute, so it is applied after every render
+    alongside the fold-hit marking, and the box is handled by `VTABLE_JS`'s own listener because only
+    that module knows a fold's membership. Note the deliberate difference from "Select all shown",
+    which follows the filters and may tick some members of a group and not the rest — which is the
+    state the middle mark exists to show.
+  - **An empty report no longer accuses itself of a missing data folder.** `init` raised
+    `missing_data_banner` ("keep the data folder next to the HTML") whenever `rows.length` was 0, so a
+    partial extract legitimately holding no Library/Caches file reported a fault that was not there.
+    `setRows` now sets a `loaded` flag and the data file calls it even with an empty array, so the
+    banner fires only when that script really did not run. The empty-table text had the same problem —
+    each report words its own as "nothing matches the current filters", which is the wrong statement
+    with no filter set — so `rebuild()` swaps in the report's `emptyAll` sentence ("This extract
+    contains no Memory.") while there are no rows to filter, and restores the filter wording as soon
+    as there are.
+  - **The provenance block's four long sub-sections are folded** (`_prov_section`). Expanded on the
+    report index they pushed the links to the sub-reports off the first screen, and the links are what
+    that page is for. Folding a statement out of sight is only acceptable if its *answer* stays
+    visible, so each summary carries it ("12 of 12 identical to the run this selection was made in",
+    "41 of 848 row(s), across 6 report(s)", "9 of 11 relation(s) followed — one hop from each selected
+    row") and the table behind it is the working. The identity table and the one-line statements with
+    no table to hide — the tool-version verdict, the count of cross-references pointing outside the
+    extract, withheld fields, how the selection resolved — stay unfolded.
 - **A Memory group is one index row, and both chat and Memory rows can be filtered by time.** Two
   requests with one implementation. A group of three Memories was three rows all linking to the same
   sub-page, which reads as three findings; and the only way to find a Memory by time was to sort, which

@@ -216,6 +216,40 @@ Four rules make it safe rather than merely tidier:
 the last two differ exactly when a fold is in effect, and a report that showed one as the other would
 count a group of three as one Memory.
 
+### The group's own selection box (`C.groupBox`, `SCV.selectGroup`)
+
+A lead row carries **two** checkboxes, and they answer different questions. The first is the row's own
+selection — its `data-id` *is* this row's store id, which is what "Selected only", "Select all shown"
+and the selection file all read. The second (`.grpbox`, no `data-id`) stands for the whole fold: it is
+three-state (none / some / all of the group selected) and clicking it selects every member, or clears
+them when they are all already selected.
+
+They are separate rather than one box doing both, because making one box write several store ids would
+stop it reporting its own row's state — and the per-Memory tick is the unit the whole selection format
+is built on. The group box is only emitted where there is a group to act on *and* the fold is on: with
+the fold off every Memory has a row and a box of its own.
+
+Two mechanics worth knowing. `indeterminate` is a property, not an attribute, so the three-state box
+cannot be drawn by the HTML a row is built from — `markGroupBoxes()` sets it after every render,
+alongside the fold-hit marking. And the group box is handled by a `change` listener in `VTABLE_JS`
+rather than by `SELECT_JS`'s delegated handler: only this module knows a fold's membership.
+
+`selectGroup`/`foldCount` act on the group **as the app data has it**, not on what the filters match —
+that is the difference from `selectShown`, and each control's "?" says which it is.
+
+### An empty report is not a broken one
+
+`missing_data_banner` says *"keep the data folder next to the HTML"*, and `init` used to raise it
+whenever `rows.length` was 0 — so a report that legitimately contains nothing (a partial extract with
+no Library/Caches file in it) accused itself of a missing data folder and sent the examiner after a
+fault that was not there. `setRows` now sets a `loaded` flag, and the data file calls it even with an
+empty array, so the banner fires only when that script really did not run.
+
+The same distinction applies to the empty-table message. Each report words its own as *"nothing matches
+the current filters"*, which is the wrong statement when there are no rows to filter; `rebuild()`
+swaps in `C.emptyAll` (*"This extract contains no Memory."*) while `rows` is empty and puts the
+report's own wording back as soon as there is something to filter.
+
 ## The "?" popovers
 
 Every explanation icon opens its popover with `position:fixed`, placed next to the icon in viewport

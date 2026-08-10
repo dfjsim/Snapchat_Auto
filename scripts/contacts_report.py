@@ -758,6 +758,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            'function flt(){clearTimeout(flt_t);flt_t=setTimeout(function(){SCV.refilter();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
            f'empty:"vempty",pager:"pager",pageSize:500,selKind:"ct",sort:6,sortDir:-1,'
+           'emptyAll:"This extract contains no contact.",'
            # contact_anchor falls back username -> conversation id -> "ct-unknown", so the anchor is
            # not always the user id and is not always unique; every identifier this row has travels
            # with the selection so a later run can still find the contact.

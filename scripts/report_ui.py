@@ -282,6 +282,14 @@ PARTIAL_CSS = """
  .prov th,.prov td{border:1px solid #dcdce8;padding:3px 7px;text-align:left;vertical-align:top}
  .prov th{background:#f4f4f8} .prov .mono{font-family:ui-monospace,Consolas,monospace}
  .prov .no{color:#7a1f1f} .prov .yes{color:#1f6a3a}
+ /* A long sub-section of the provenance, folded so the links to the reports stay on the first
+    screen. Its summary carries the answer, so nothing is hidden that the reader has to expand for. */
+ .prov .provsec{margin:5px 0;border:1px solid #e4e4ee;border-radius:5px;background:#fafafd}
+ .prov .provsec>summary{cursor:pointer;padding:4px 9px;color:#2d2d71}
+ .prov .provsec>summary>span{color:#555;font-weight:400}
+ .prov .provsec[open]>summary{border-bottom:1px solid #e4e4ee}
+ .prov .provsec>:not(summary){padding:0 9px}
+ .prov .provsec table{margin:6px 0}
 """
 
 # --------------------------------------------------------------------------- anchor navigation
@@ -986,7 +994,11 @@ VTABLE_CSS = """
  .vcells>.vc{padding:6px 10px;overflow:hidden;box-sizing:border-box;min-width:0}
  .vr.clickable{cursor:pointer}
  .vdet{padding:2px 16px 16px 34px;background:#fafaff;border-top:1px dashed #dcdce8;cursor:default}
- .vcells>.vc.sel{display:flex;align-items:center;justify-content:center;padding:0}
+ .vcells>.vc.sel{display:flex;align-items:center;justify-content:center;padding:0;gap:6px}
+ /* The group box (SCV.selectGroup): a lead row's control for the whole fold, next to — and visibly
+    not the same thing as — the row's own selection box. Squared off, because a three-state control
+    that looked identical to the per-row one would be read as one. */
+ input.grpbox{width:14px;height:14px;cursor:pointer;accent-color:#5a5a96;margin:0;border-radius:0}
  .vr:has(input.selbox:checked){background:#eff2ff;box-shadow:inset 3px 0 0 #2d2d71}
  .vhdr .vc.sel{display:flex;align-items:center;justify-content:center;padding:0;cursor:default}
  .pager{background:#f4f4fa;border-bottom:1px solid #d7d7e2;padding:6px 24px;font-size:12.5px;
@@ -1014,9 +1026,10 @@ var SCV=(function(){
 var C=null,rows=[],byId={},view=[],vpos={},slice=[],pos={},cum=null,exp={},expH={},det={},
     chunkState={},mount,win,pad,pager,hlId=null,lastA=-1,lastB=-1,dirty=true,
     sortCol=-1,sortDir=1,scheduled=false,measuring=0,pageSize=0,page=0,pagerSig='',
-    kids={},foldHit={},hits={},nhit=0;
+    kids={},foldHit={},hits={},nhit=0,loaded=false;
 
-function setRows(r){rows=r;byId={};for(var i=0;i<rows.length;i++)byId[rows[i][0]]=i;
+function setRows(r){rows=r;byId={};loaded=true;
+ for(var i=0;i<rows.length;i++)byId[rows[i][0]]=i;
  buildFolds();
  if(C)refilter();}
 
@@ -1068,9 +1081,20 @@ function init(o){
  pager=o.pager?document.getElementById(o.pager):null;
  pageSize=o.pageSize||0;
  mount.addEventListener('click',onClick);
+ /* The group box carries no data-id, so SELECT_JS's own handler ignores it: what it means is "every
+    Memory of this fold", which only this module knows the membership of. */
+ mount.addEventListener('change',function(ev){
+  var box=ev.target;
+  if(!box||!box.classList||!box.classList.contains('grpbox'))return;
+  selectGroup(box.getAttribute('data-grp'),box.checked);});
  window.addEventListener('scroll',schedule,{passive:true});
  window.addEventListener('resize',function(){dirty=true;schedule();});
- if(!rows.length){var m=document.getElementById(o.missing);if(m)m.style.display='block';}
+ /* "The data file did not load" and "this report has no rows" are different statements, and only the
+    first is a fault. They were told apart by rows.length, so a report that legitimately contains
+    nothing — a partial extract holding no Library/Caches file, say — accused itself of a missing
+    data folder. `loaded` is set by setRows, which the data file calls even with an empty array, so
+    the banner now fires only when that script really did not run. */
+ if(!loaded){var m=document.getElementById(o.missing);if(m)m.style.display='block';}
  if(o.sort!==undefined&&o.sort>=0){sortCol=o.sort;sortDir=o.sortDir||1;}
  if(o.selKind&&window.SCSel)SCSel.onChange(function(){
   if(C.selectedOnly&&C.selectedOnly())refilter();else{dirty=true;render();}
@@ -1198,8 +1222,17 @@ function rebuild(){
     only when a fold is in effect, and a report that showed one as the other would report a group of
     three as one memory. */
  if(C.count)C.count(view.length,rows.length,nhit);
+ /* Each report words its empty message as "nothing matches the current filters", which is the wrong
+    statement when the report has no rows at all — a partial extract holding no Library/Caches file
+    would read as a filter left set. The report's own wording is kept for the case it describes. */
  var e=document.getElementById(C.empty);
- if(e)e.style.display=view.length?'none':'block';
+ if(e){
+  if(!view.length&&!rows.length){
+   if(e.getAttribute('data-filtered')===null)e.setAttribute('data-filtered',e.innerHTML);
+   e.innerHTML=C.emptyAll||'This report contains no rows.';}
+  else if(e.getAttribute('data-filtered')!==null)
+   e.innerHTML=e.getAttribute('data-filtered');
+  e.style.display=view.length?'none':'block';}
  dirty=true;render();}
 
 function find(y){var lo=0,hi=cum.length-1;
@@ -1224,6 +1257,7 @@ function render(){
  win.innerHTML=h.join('');
  lastA=a;lastB=b;dirty=false;
  markFoldHits();
+ markGroupBoxes();
  /* Hand-written checkboxes inside an expanded row come from static detail HTML, so their state has
     to be put back after every redraw — see scSyncBoxes. Guarded because the selection code is not
     loaded on every page that uses this table. */
@@ -1268,10 +1302,18 @@ function rowHtml(i){
  s='<div class="vr'+(op?' open':'')+(C.detailBase?' clickable':'')+extra+
    (hlId===id?' schl':'')+'" id="'+id+'" data-i="'+i+'" style="height:'+
    (op?'auto':C.rowHeight+'px')+'"><div class="vcells" style="height:'+C.rowHeight+
-   'px;grid-template-columns:'+(C.selKind?'30px ':'')+C.cols+'">';
- if(C.selKind)s+='<div class="vc sel"><input type="checkbox" class="selbox" data-kind="'+
+   'px;grid-template-columns:'+(C.selKind?(C.selWidth||'30px')+' ':'')+C.cols+'">';
+ if(C.selKind){
+  s+='<div class="vc sel"><input type="checkbox" class="selbox" data-kind="'+
    C.selKind+'" data-id="'+selId(id)+'"'+(SCSel.get(C.selKind,selId(id))?' checked':'')+
-   ' title="mark this row as relevant (saved in this browser; use Export to keep it)"></div>';
+   ' title="mark this row as relevant (saved in this browser; use Export to keep it)">';
+  /* The group box: a second, three-state control on a lead row, standing for the whole fold. It is
+     separate from the row's own box on purpose — that one's data-id IS this row's selection id, and
+     making one box write several ids would stop it reporting its own row's state, which "Selected
+     only", "Select all shown" and the selection file all read. */
+  if(C.groupBox&&folded()&&kids[id])
+   s+='<input type="checkbox" class="grpbox" data-grp="'+id+'">';
+  s+='</div>';}
  for(var c=0;c<cells.length;c++)s+='<div class="vc c'+c+'">'+cells[c]+'</div>';
  s+='</div>';
  if(op)s+='<div class="vdet">'+(det[id]!==undefined?det[id]:
@@ -1350,6 +1392,43 @@ function selKeys(i){
  if(!C||!C.selKeys||!rows[i])return null;
  try{return C.selKeys(rows[i])||null;}catch(e){return null;}}
 
+/* ---------- a folded group's own selection ---------- */
+
+/* The rows one fold covers: the lead and every member, whether or not the filters match them. This
+   is the group as the app data has it, which is what a control labelled "the whole group" must act
+   on — selectShown is the one that answers to the filters instead. */
+function foldRows(id){
+ var i=byId[id];
+ return i===undefined?[]:[i].concat(kids[id]||[]);}
+
+/* ``[selected, total]`` for one fold, so the group box can be none / some / all. */
+function foldCount(id){
+ var mine=foldRows(id),n=0;
+ for(var k=0;k<mine.length;k++)if(SCSel.get(C.selKind,selId(rows[mine[k]][0])))n++;
+ return [n,mine.length];}
+
+function selectGroup(id,on){
+ var mine=foldRows(id),byStoreId={},list=[];
+ for(var k=0;k<mine.length;k++){
+  var s=selId(rows[mine[k]][0]);byStoreId[s]=mine[k];list.push(s);}
+ if(!list.length)return 0;
+ SCSel.setMany(C.selKind,list,on,function(s){return selKeys(byStoreId[s]);});
+ return list.length;}
+
+/* `indeterminate` is a property, not an attribute, so a three-state box cannot be drawn by the HTML
+   the row is built from — it has to be set after every render, like the fold-hit marking. */
+function markGroupBoxes(){
+ if(!C.groupBox)return;
+ var boxes=win.querySelectorAll('input.grpbox[data-grp]');
+ for(var j=0;j<boxes.length;j++){
+  var box=boxes[j],c=foldCount(box.getAttribute('data-grp')),n=c[0],total=c[1];
+  box.checked=n===total&&total>0;
+  box.indeterminate=n>0&&n<total;
+  box.title=(n===0?'None':n===total?'All':n+' of '+total)+
+   ' of the '+total+' Memories grouped in this row are selected. Click to select them all'+
+   (n===total?' (they are; click to clear them)':'')+
+   '. The box to the left is this row\'s own Memory.';}}
+
 /* Every row the current filters match, including the members of a folded group — but only the ones
    that match. See the note in refilter(). */
 function selectShown(on){
@@ -1420,6 +1499,7 @@ return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSor
         remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
         selId:selId,selKeys:selKeys,
         foldHits:foldHits,openFoldHits:openFoldHits,openRow:openRow,
+        selectGroup:selectGroup,foldCount:foldCount,
         page:function(){return page;},
         pages:pageCount,count:function(){return view.length;},
         matching:function(){return nhit;}};
