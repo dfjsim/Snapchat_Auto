@@ -182,6 +182,19 @@ The expansion is not only for groups: **every** row's expanded area lists that M
 which is where the time filter's matches can be seen (the index has room for one time column, and the
 filter searches them all).
 
+**A lead row carries two checkboxes.** The first is that row's own Memory — the same tick as its detail
+page, and what the selection file records. The second stands for the whole group: filled when every
+Memory grouped in the row is selected, a squared-off mark when only some are, empty when none are, and
+clicking it selects or clears all of them. So "is this group selected?" is answered without expanding
+the row. It appears only where there is a group and only while the fold is on. See
+[report_ui.md](report_ui.md#the-groups-own-selection-box-cgroupbox-scvselectgroup) for why the two are
+separate controls rather than one; the short version is that the first box's id *is* the Memory's
+selection id, and one box writing several ids would stop it reporting its own row's state.
+
+Note the deliberate difference from **Select all shown**, which follows the filters: it ticks the
+Memories that match, which may be some members of a group and not the rest — which is exactly the state
+the group box's middle mark exists to show.
+
 ### Finding a Memory by time
 
 The toolbar's **Time** control (shared — see

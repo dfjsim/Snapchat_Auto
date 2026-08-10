@@ -2093,6 +2093,17 @@ FOLD_CONTROL_HINT = (
     "Memory — unfolds the table.")
 
 
+GROUP_BOX_HINT = (
+    "Two boxes on the row of a folded group, because they answer two different questions. The FIRST "
+    "is this row's own Memory — the same tick as its detail page, and what the selection file "
+    "records. The SECOND stands for the whole group: it shows a filled box when every Memory grouped "
+    "in this row is selected, a squared-off mark when only some are, and nothing when none are; "
+    "clicking it selects all of them, or clears them if they are all already selected. It appears "
+    "only where there is a group to act on, and only while «Fold groups» is on — with the fold off "
+    "every Memory has a row and a box of its own. Note that «Select all shown», by contrast, follows "
+    "the filters: it ticks the Memories that match, which may be some of a group and not the rest.")
+
+
 TIME_FILTER_HINT = (
     "Every timestamp a Memory carries is searched, not only the Created column: the ZGALLERYSNAP "
     "capture and placeholder times and every ZGALLERYENTRY album time, which are otherwise only on "
@@ -2401,6 +2412,9 @@ _MAP_CSS = """
 # Index-table geometry (the virtual table uses one fixed row height and one column track list for
 # the header and every row; the thumbnail column sets the height).
 MEM_COLS = "24px 86px 78px 118px 236px 152px 288px 128px 144px 116px"
+# Wider than the shared default because a folded group's lead row carries two boxes: its own Memory's
+# and the group's (report_ui: C.groupBox / SCV.selectGroup).
+MEM_SEL_W = "52px"
 MEM_ROW_H = 130
 
 # Styling shared by the detail sub-pages (single-braced: inserted as a value into the f-string).
@@ -3339,10 +3353,12 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<span id="count" style="color:#555"></span></div>'
            f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
            f'<div class="pager" id="pager"></div>'
-           f'<div class="vhdr" id="vhdr" style="grid-template-columns:30px {MEM_COLS}">'
-           f'<div class="vc sel"><input type="checkbox" class="selall"'
+           f'<div class="vhdr" id="vhdr" style="grid-template-columns:{MEM_SEL_W} {MEM_COLS}">'
+           f'<div class="vc sel">'
+           f'<input type="checkbox" class="selall"'
            f' title="Select / unselect every memory matching the current filters"'
-           f' onclick="SCV.selectShown(this.checked)"></div>'
+           f' onclick="SCV.selectShown(this.checked)">'
+           f'{report_ui.info_icon(GROUP_BOX_HINT)}</div>'
            f'<div class="vc nosort"></div>'
            f'<div class="vc nosort">Thumb</div>'
            f'<div class="vc" onclick="SCV.setSort(2)">Kind <span class="ar">↕</span></div>'
@@ -3365,6 +3381,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'SCV.refilter();SCV.openFoldHits();},120);}'
            'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
            f'empty:"vempty",pager:"pager",pageSize:500,selKind:"mem",'
+           f'selWidth:"{MEM_SEL_W}",groupBox:true,'
+           'emptyAll:"This extract contains no Memory.",'
            # ZSNAPID is a device-assigned UUID, so the anchor is stable; the media id is recorded
            # as a fallback for a Memory whose row is only reachable through its media object.
            'selKeys:function(r){var k={snap:r[0].slice(4)},s=(r[3]["4"]||"").split("|");'

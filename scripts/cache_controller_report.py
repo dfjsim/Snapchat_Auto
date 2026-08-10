@@ -1908,6 +1908,7 @@ function xall(btn){{
  btn.dataset.o=op?'0':'1';btn.textContent=op?'Expand all':'Collapse all';}}
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
+ emptyAll:'This extract contains no cache_controller entry.',
  pager:'pager',pageSize:500,selKind:'cc',
  /* The CACHE_KEY is a key in cache_controller.db, so the anchor is stable; the hash of the
     bytes on disk is recorded as a fallback match. */

@@ -1425,6 +1425,7 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         '<script>'
         'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
         'empty:"vempty",pager:"pager",pageSize:500,selKind:"msg",sort:1,sortDir:1,'
+        'emptyAll:"This conversation holds no message in this extract.",'
         # A message number restarts in every conversation, so the row anchor ("msg-12.0") is unique
         # only on this page while the *stored* id has to be unique across the run. The anchor stays
         # as it is — every cross-report link and cache_links.json record depends on it.
@@ -1685,6 +1686,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         '<script>'
         'SCV.init({mount:"vwrap",win:"vwin",pad:"vpad",header:"#vhdr",missing:"vmiss",'
         'empty:"vempty",pager:"pager",pageSize:500,selKind:"conv",sort:5,sortDir:-1,'
+        'emptyAll:"This extract contains no conversation.",'
         'selKeys:function(r){var m=r[5]||{},k={conv:r[0].slice(5)};'
         'if(m.sid)k.server=m.sid;return k;},'
         f'rowHeight:{CONV_ROW_H},estDetail:200,cols:"{CONV_COLS}",detailBase:"data/detail-",'

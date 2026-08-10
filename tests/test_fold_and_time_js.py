@@ -69,7 +69,7 @@ function flt(){flt_calls++;}
 _HARNESS = "function report(o){console.log(JSON.stringify(o));}\n"
 
 
-def _run(rows, script, *, folded=True, extra=""):
+def _run(rows, script, *, folded=True, extra="", set_rows=True, opts=""):
     """Load VTABLE_JS + TIME_JS in node over ``rows``, run ``script``, return its printed JSON.
 
     ``extra`` is a report's own script, for the parts of the filtering that live there (the
@@ -85,10 +85,12 @@ def _run(rows, script, *, folded=True, extra=""):
         extra,
         _HARNESS,
         f"var ROWS={json.dumps(rows)};",
-        "SCV.setRows(ROWS);",
+        # Skipped by the test for a data file that failed to load: that is the whole difference
+        # between "this report has no rows" and "this report's rows never arrived".
+        "SCV.setRows(ROWS);" if set_rows else "",
         "SCV.init({mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',"
         "empty:'vempty',rowHeight:100,cols:'1fr',selKind:'mem',detailBase:'data/detail-',"
-        f"folded:function(){{return {'true' if folded else 'false'};}},"
+        f"folded:function(){{return {'true' if folded else 'false'};}},{opts}"
         "query:function(){return document.getElementById('q').value;},"
         "match:function(m,r){return scTimeHit(scTimeWin('t'),m.ts)"
         "&&(!document.getElementById('meo').checked||m.meo==='y');}});",
@@ -261,6 +263,96 @@ def test_the_window_and_the_fold_work_together():
 
     assert out[0]["rows"] == 1 and out[0]["matching"] == 1
     assert out[0]["hits"] == {"mem-A": "mem-B"}
+
+
+# --------------------------------------------------- the group's own selection box
+
+@needs_node
+def test_a_lead_row_carries_a_group_box_and_a_lone_row_does_not():
+    rows = [_row("mem-A", lead="mem-A"), _row("mem-B", lead="mem-A"), _row("mem-C")]
+    out = _run(rows, "report({html:document.getElementById('vwin').innerHTML});",
+               opts="groupBox:true,")
+
+    html = out[0]["html"]
+    assert html.count('class="grpbox"') == 1, "one group box, on the lead of the only group"
+    assert 'data-grp="mem-A"' in html
+
+
+@needs_node
+def test_unfolding_takes_the_group_box_away():
+    """With the fold off every Memory has a row and a box of its own, so a control for "the whole
+    group" would be a second way to do the same thing."""
+    rows = [_row("mem-A", lead="mem-A"), _row("mem-B", lead="mem-A")]
+    out = _run(rows, "report({html:document.getElementById('vwin').innerHTML});",
+               folded=False, opts="groupBox:true,")
+
+    assert "grpbox" not in out[0]["html"]
+
+
+@needs_node
+def test_the_group_box_reports_none_some_or_all():
+    rows = [_row("mem-A", lead="mem-A"), _row("mem-B", lead="mem-A"), _row("mem-C", lead="mem-A")]
+    out = _run(rows, "report({none:SCV.foldCount('mem-A')});"
+                     "TICKED['mem-B']=1;report({some:SCV.foldCount('mem-A')});"
+                     "TICKED['mem-A']=1;TICKED['mem-C']=1;"
+                     "report({all:SCV.foldCount('mem-A')});",
+               opts="groupBox:true,")
+
+    assert out[0]["none"] == [0, 3]
+    assert out[1]["some"] == [1, 3] and out[2]["all"] == [3, 3]
+
+
+@needs_node
+def test_the_group_box_acts_on_the_whole_group_whatever_the_filters_say():
+    """Unlike "Select all shown", which follows the filters: this control is labelled "the whole
+    group", so it has to mean the group as the app data has it."""
+    rows = [_row("mem-A", lead="mem-A", meo="y"), _row("mem-B", lead="mem-A", meo="n"),
+            _row("mem-C", lead="mem-A", meo="y"), _row("mem-D")]
+    out = _run(rows, "VALUES['meo']=true;SCV.refilter();"
+                     "report({n:SCV.selectGroup('mem-A',true),ticked:Object.keys(TICKED).sort()});"
+                     "SCV.selectGroup('mem-A',false);report({after:Object.keys(TICKED)});",
+               opts="groupBox:true,")
+
+    assert out[0]["n"] == 3 and out[0]["ticked"] == ["mem-A", "mem-B", "mem-C"]
+    assert out[1]["after"] == [], "and clears the same three"
+
+
+def test_the_three_state_box_is_set_as_a_property_not_an_attribute():
+    """`indeterminate` cannot be written into the HTML a row is built from, so it has to be applied
+    after every render — like the fold-hit marking."""
+    assert "box.indeterminate=n>0&&n<total;" in report_ui.VTABLE_JS
+    assert "markGroupBoxes();" in report_ui.VTABLE_JS
+
+
+# --------------------------------------------------- an empty report vs a missing data file
+
+@needs_node
+def test_a_report_with_no_rows_does_not_accuse_itself_of_a_missing_data_folder():
+    """A partial extract can legitimately contain no row of a kind. Saying "keep the data folder next
+    to the HTML" there sends the examiner after a fault that is not present."""
+    out = _run([], "report({banner:document.getElementById('vmiss').style.display||'',"
+                   "empty:document.getElementById('vempty').innerHTML});")
+
+    assert out[0]["banner"] != "block"
+    assert out[0]["empty"] == "This report contains no rows."
+
+
+@needs_node
+def test_a_data_file_that_never_loaded_still_raises_the_banner():
+    out = _run([], "report({banner:document.getElementById('vmiss').style.display});",
+               set_rows=False)
+
+    assert out[0]["banner"] == "block"
+
+
+@needs_node
+def test_a_report_that_has_rows_keeps_its_own_filtered_to_nothing_wording():
+    rows = [_row("mem-A", ts=report_ui.ts_keys("2026-01-02 09:30:00 UTC"))]
+    out = _run(rows, "document.getElementById('vempty').innerHTML='No memory matches the filters.';"
+                     "VALUES['tmode']='range';VALUES['tfrom']='2030-01-01T00:00';SCV.refilter();"
+                     "report({empty:document.getElementById('vempty').innerHTML});")
+
+    assert out[0]["empty"] == "No memory matches the filters."
 
 
 # --------------------------------------------------- the checkboxes inside a folded row
