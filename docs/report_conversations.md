@@ -151,11 +151,17 @@ absent for a sender who is not in the friends artifact at all.
 id — which was true of the documentation and not of the index, so a tool doing exactly what it said
 matched nothing, silently.
 
-The index now registers that key under **both** spellings — the permanent id and the display name — so
-a selection built against the spec resolves, and one saved by an older report still does. Both are
-matched case-insensitively. Confirmed on all four corpus devices that `sender_id` really is a user id
-(every message's is a UUID); no device in the corpus has a message *without* a server message id, so
-the fallback itself is held by `tests/test_message_sender_identity.py` rather than by the corpus.
+So the key is the **user id and nothing else**, matched case-insensitively. The display name is
+deliberately not a second spelling: a key that cannot be trusted is worse than no key, and a message
+whose sender id was not recovered simply has no `ts_sender` key. Nothing needs the old spelling — a
+selection older than this change is re-ticked, which takes seconds.
+
+Confirmed on all four corpus devices that `sender_id` really is a user id (every message's is a UUID).
+No device in the corpus has a message *without* a server message id, so the fallback itself is held by
+`tests/test_message_sender_identity.py` rather than by the corpus. It is still worth having: the parser
+explicitly labels unsent rows *"Sending Message"* and gives them no server id (`cell()` maps the
+`"None"` it writes to `""`), which is code written because someone met the case — and those are exactly
+the rows whose anchor is positional and therefore movable.
 
 Expanding a row shows the full text, **each** attachment as a capped preview (150 px tall, with a
 link to open it full size) plus its name, detected type, size, **MD5 and SHA-256**, where it was
