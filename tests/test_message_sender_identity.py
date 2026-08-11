@@ -119,6 +119,94 @@ def _ts_sender_keys(conv_id, msg):
     return {key for kind, key in index.keys if kind == "ts_sender"}
 
 
+# --------------------------------------------------------------- what a message is anchored on
+
+def test_a_message_with_no_server_id_is_anchored_on_the_devices_own_id(tmp_path):
+    """`client_message_id` is evidence exactly as the server id is, and unique within a conversation —
+    so it keeps the anchor a fact about the row instead of a fact about how many rows were recovered
+    before it."""
+    frame = _frame(**{cr.COL_SMID: "", cr.COL_CMID: "7"})
+    msg = _messages(frame, tmp_path)[0]
+
+    assert msg["anchor"] == "msg-c7"
+
+
+def test_position_is_only_the_last_resort(tmp_path):
+    frame = _frame(**{cr.COL_SMID: "", cr.COL_CMID: ""})
+    msg = _messages(frame, tmp_path)[0]
+
+    assert msg["anchor"] == "msg-row0"
+
+
+def test_a_server_id_still_wins_over_the_device_one(tmp_path):
+    """Unchanged for every message that has one, which is every message in the corpus."""
+    msg = _messages(_frame(**{cr.COL_CMID: "7"}), tmp_path)[0]
+
+    assert msg["anchor"] == "msg-12.0"
+
+
+# --------------------------------------------------------------- a position is never a match
+
+def _positional_index(row_id):
+    index = partial_report.Index("msg")
+    index.add(row_id, {}, smid="")
+    return index
+
+
+def test_a_positional_id_is_not_honoured_even_when_it_still_exists():
+    """The false positive this exists to stop. Recovering one more message shifts every later
+    position, so the identical string names a different message — and an exact match would hand that
+    over with «its own id» as its reason."""
+    row = f"conv-{CONV}|msg-row7"
+    index = _positional_index(row)
+    selection = {"schema": 2, "selections": {"msg": {row: {"conv": CONV}}}}
+
+    result = partial_report.resolve({"msg": index}, selection, unresolved="drop")
+
+    assert result.seeds["msg"] == set()
+    assert len(result.unresolved) == 1
+    why = result.unresolved[0]["why"]
+    assert "only the message's position" in why and "Re-tick" in why
+
+
+def test_a_positional_id_is_still_resolved_by_what_was_recorded_with_it():
+    """Refusing is the fallback's failure mode, not its purpose: the time and the sender's user id
+    identify the message wherever it has moved to."""
+    index = _positional_index(f"conv-{CONV}|msg-row7")
+    index.keys[("ts_sender", f"{CONV}|1700000000|{UID.lower()}")].add(f"conv-{CONV}|msg-row7")
+    selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-row2": {
+        "conv": CONV, "ts": 1700000000, "sender": UID}}}}
+
+    result = partial_report.resolve({"msg": index}, selection)
+
+    assert result.seeds["msg"] == {f"conv-{CONV}|msg-row7"}
+
+
+def test_an_id_that_is_evidence_is_still_honoured_exactly():
+    """Only the positional form loses the exact-match shortcut. A client-message-id anchor is a fact
+    about the row, so it keeps it — otherwise this change would cost every unsent message its id."""
+    for row in (f"conv-{CONV}|msg-12.0", f"conv-{CONV}|msg-c7"):
+        index = _positional_index(row)
+        selection = {"schema": 2, "selections": {"msg": {row: {"conv": CONV}}}}
+
+        result = partial_report.resolve({"msg": index}, selection)
+
+        assert result.seeds["msg"] == {row}, row
+        assert result.how[("msg", row)] == "its own id"
+
+
+def test_the_deduplicating_suffix_does_not_hide_a_position():
+    """Two messages can land on one anchor, and the second takes a «-2» suffix. That is still a
+    position, so the pattern has to see through the suffix."""
+    row = f"conv-{CONV}|msg-row7-2"
+    index = _positional_index(row)
+    selection = {"schema": 2, "selections": {"msg": {row: {"conv": CONV}}}}
+
+    result = partial_report.resolve({"msg": index}, selection, unresolved="drop")
+
+    assert result.seeds["msg"] == set()
+
+
 # --------------------------------------------------------------- end to end through resolve()
 
 def test_a_selection_carrying_the_user_id_finds_the_message(tmp_path):

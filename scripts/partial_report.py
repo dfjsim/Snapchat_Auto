@@ -29,6 +29,7 @@ This module owns no linking logic of its own. It consumes the edges the generato
 """
 
 import os
+import re
 import html
 import json
 import logging
@@ -418,10 +419,18 @@ def _lookups(kind, name, keys):
     return [((name, str(value)), f"its {name} ({str(value)[:24]})")]
 
 
+#: A ``msg`` row id that encodes nothing but the message's **position** in its conversation, which is
+#: what `conversations_report` falls back to for a message that has neither a server nor a client
+#: message id. Alone among the row ids in this scheme it is not derived from the evidence: recovering
+#: one more message in that conversation shifts it, so the identical string can name a *different*
+#: message in a later run. It is therefore never accepted as a match — see :func:`_resolve_one`.
+_POSITIONAL_MSG = re.compile(r"\|msg-row\d+(?:-\d+)?$")
+
+
 def _resolve_one(index, kind, ticked_id, keys):
     """``(row id, how, weak)`` for one ticked id. ``row id`` is None when nothing identifies one row.
 
-    Two rules, and the first is the one that matters:
+    Three rules, and the first is the one that matters:
 
     **An exact id match is the answer.** The alternates exist only to find a row whose *id moved*
     between builds; consulting them when the id is present can only invent doubt. Collecting every
@@ -429,13 +438,21 @@ def _resolve_one(index, kind, ticked_id, keys):
     identifies a media object that several snap rows share by design, which is the very basis of Memory
     grouping, so it matched two rows and the build refused a selection that was never ambiguous.
 
+    **Except for an id that is only a position.** That rule rests on a row id being a fact about the
+    evidence, which every id here is but one: a message with no id of its own is anchored on where it
+    sits in its conversation. Recovering one more message shifts it, and the shifted id still *exists*,
+    so an exact match would hand over a different message than the one ticked — silently, and with the
+    confident "its own id" as its reason. A positional id must therefore be proved by an alternate, and
+    if nothing does, it is reported as not found. Refusing to name a message is a bad outcome; naming
+    the wrong one is a worse one.
+
     **An alternate that matches several rows is not discriminating, and is not ambiguity.** It is
     skipped in favour of the next one, and reported in ``weak`` so a genuine dead end can say what it
     tried. Only when *no* alternate identifies exactly one row is the id ambiguous — which is the case
     that must still refuse, because a Library/Caches row is identified by its recovered content and
     rows are merged by that content, so the row ticked and the row offered can be different bytes.
     """
-    if ticked_id in index.rows:
+    if ticked_id in index.rows and not (kind == "msg" and _POSITIONAL_MSG.search(ticked_id)):
         return ticked_id, "its own id", []
     weak = []
     for name in RESOLVE_ORDER.get(kind, ()):
@@ -487,9 +504,16 @@ def resolve(indexes, selection, *, unresolved="refuse"):
                              "that decodes differently can split or merge them.")})
                 continue
             if row_id is None:
-                result.unresolved.append(
-                    {"kind": kind, "id": ticked_id,
-                     "why": "no row of this run carries that id or any identifier recorded with it"})
+                # A positional id needs its own answer: the string may well still exist in this run,
+                # so "no row carries that id" would be untrue and would send the examiner looking for
+                # a missing message rather than at the real reason it cannot be honoured.
+                why = ("no row of this run carries that id or any identifier recorded with it")
+                if kind == "msg" and _POSITIONAL_MSG.search(ticked_id):
+                    why = ("this id is only the message's position in its conversation — the message "
+                           "had no id of its own — so it cannot be matched on, and nothing recorded "
+                           "with it (its time and its sender's user id) named exactly one message in "
+                           "this run. Re-tick it in this run's reports")
+                result.unresolved.append({"kind": kind, "id": ticked_id, "why": why})
                 continue
             result.seeds[kind].add(row_id)
             result.how[(kind, row_id)] = how

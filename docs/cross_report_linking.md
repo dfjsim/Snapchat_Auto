@@ -58,8 +58,12 @@ Two things follow from this page being the single reference, and both are load-b
 | Cached media (Library/Caches) | `cm-<sha256>` | each distinct-content row | `generate_report` in `scripts/cache_media_report.py` |
 | Communications (legacy) | `cf-<CACHE_KEY>` | each cached chat attachment | `path_to_image_html` in `scripts/ParseSnapchat_iOS.py` |
 
-A message with no `server_message_id` (one the app had not finished sending) is anchored on its
-position in the conversation instead: `msg-row<N>`. Duplicate anchors get a `-2`, `-3`, … suffix.
+A message with no `server_message_id` (one the app had not finished sending) is anchored on the
+**device's own** id instead — `msg-c<client_message_id>`, which `arroyo.db` assigns and which is unique
+within a conversation, so it is a fact about the row exactly as the server id is. Only a message with
+neither id falls back to its **position**, `msg-row<N>`; that is the one anchor in this table that is
+not evidence, and `partial_report` refuses to match a selection on it (see
+[report_partial.md](report_partial.md)). Duplicate anchors get a `-2`, `-3`, … suffix.
 
 The Memories report is split into a lightweight index (`Memories_report.html`) plus one detail
 sub-page per group (`pages/<key>.html`); the same `mem-<ZSNAPID>` anchor exists on both, so links can

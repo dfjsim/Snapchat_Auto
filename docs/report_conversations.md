@@ -133,6 +133,27 @@ by the **message table**, which is the same virtual table as the index:
 | Msg ID | `server_message_id` + `.` + the part index (e.g. `12.0`), with the device's own `client_message_id` under it |
 | Read | the read timestamp, empty when the message was never read |
 
+### What a message is anchored on, and why a position is never matched on
+
+Three sources, in order, each one a fact about the row until the last:
+
+| | |
+|---|---|
+| `msg-<server_message_id>` | normally — every message in the corpus has one |
+| `msg-c<client_message_id>` | a message the app had not sent yet, so it has no *server* id. `arroyo.db` still assigns its own, unique within a conversation (verified on all four corpus devices, where it is unique within each whole database) |
+| `msg-row<N>` | last resort, for a message with neither |
+
+Only the third is not evidence: it says where the message sits in the conversation, so recovering one
+more message shifts it and the identical string names a *different* message in a later run. A saved
+selection therefore **never matches on it** — `partial_report` requires an alternate (conversation +
+time + the sender's user id) and names the row as not found if nothing proves it, rather than handing
+over the wrong message with "its own id" as its reason. See
+[report_partial.md](report_partial.md#schema-2).
+
+Reading the device's own id here is what keeps that rare: before it, *every* unsent message was
+positional. Anchors are page-local and de-duplicated with a `-2`, `-3` suffix, and the suffix does not
+make a position stop being one.
+
 ### The sender's name is shown; the sender's id is kept
 
 `ParseSnapchat_iOS.fixSenders` replaces `conversation_message.sender_id` **in place** with the friend's
@@ -141,12 +162,11 @@ a `Sender User ID` column first, and `build_messages` carries it as `msg["sender
 it — the name is what the column displays — and the legacy Communications report drops it, exactly as
 it drops `Message Text`, so that report's table is unchanged.
 
-It exists because a display name is the wrong thing to *match a message on*. A message with no server
-message id yet is anchored on its **position** in the conversation (`msg-row7`), which recovering one
-more message shifts, so a saved selection re-finds it by conversation + time + sender
-([report_partial.md](report_partial.md)). Keyed on the name, that fallback rested on whatever the
-device happened to know at extraction time: it differs between two extractions of one phone, and it is
-absent for a sender who is not in the friends artifact at all.
+It exists because a display name is the wrong thing to *match a message on*. A message that has no id
+of its own is re-found by conversation + time + sender ([report_partial.md](report_partial.md)), and
+keyed on the name that fallback rested on whatever the device happened to know at extraction time: it
+differs between two extractions of one phone, and it is absent for a sender who is not in the friends
+artifact at all.
 [selection_format.md](selection_format.md) had always told an external tool that `sender` is a user
 id — which was true of the documentation and not of the index, so a tool doing exactly what it said
 matched nothing, silently.
