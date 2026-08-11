@@ -1445,12 +1445,12 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         # as it is — every cross-report link and cache_links.json record depends on it.
         f'selPrefix:{json.dumps("conv-" + conv["id"] + "|")},'
         # what a later run matches this message on if our anchor for it has moved
-        # The sender is recorded as its permanent user id when the row carries one, and as the
-        # displayed name otherwise. The index registers both spellings, so either resolves — but the
-        # id is the one that still resolves after the device's name for that account changes.
+        # The sender is recorded as its permanent user id, which is the only spelling the index is
+        # keyed on. Omitted when the row has none — a name in its place would look like a usable
+        # identifier and resolve to nothing.
         'selKeys:function(r){var m=r[5]||{},k={conv:' + json.dumps(conv["id"]) + '};'
         'if(m.smid)k.smid=m.smid;'
-        'else{k.ts=r[3]["1"];k.sender=m.uid||r[3]["3"];k.anchor=r[0];}return k;},'
+        'else{k.ts=r[3]["1"];if(m.uid)k.sender=m.uid;k.anchor=r[0];}return k;},'
         f'rowHeight:{MSG_ROW_H},estDetail:300,cols:"{MSG_COLS}",'
         f'detailBase:"data/{key}/detail-",'
         'query:function(){return document.getElementById("q").value;},'
@@ -1881,17 +1881,14 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             # chats, so an unqualified key would put one selection on a message in every conversation.
             sel_msg.add(msg_row, msg,
                         smid=f'{conv["id"]}|{msg["smid"]}' if msg.get("smid") else "")
-            # What finds a message whose anchor was only its position in the conversation. Registered
-            # under the sender's permanent **user id** and under the display name, because the two
-            # spellings come from different places and both have to resolve: an external tool has the
-            # user id (which is what docs/selection_format.md tells it to send, and the only stable
-            # half of this key — a display name is whatever the device knew at extraction time), while
-            # a selection saved from a report before this existed carries the name.
-            if msg.get("created_unix"):
-                for value in {str(msg.get("sender_uid") or "").lower(),
-                              str(msg.get("sender") or "").lower()} - {""}:
-                    sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
-                                               f'|{value}')].add(msg_row)
+            # What finds a message whose anchor was only its position in the conversation. Keyed on
+            # the sender's permanent **user id** and nothing else: the display name the report shows
+            # is only what the device knew at extraction time, so a key built from it promises a
+            # stable identifier and delivers a label. A message whose sender id was not recovered
+            # gets no key here — no key at all is honest, a key that cannot be trusted is not.
+            if msg.get("created_unix") and msg.get("sender_uid"):
+                sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
+                                           f'|{str(msg["sender_uid"]).lower()}')].add(msg_row)
             sel_msg.contains(msg_row, conv_row)
             sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
             for att in msg.get("atts") or ():

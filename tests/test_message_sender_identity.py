@@ -86,24 +86,26 @@ def test_the_time_and_sender_key_is_registered_under_the_user_id(tmp_path):
     assert f'{CONV}|{msg["created_unix"]}|{UID.lower()}' in keys
 
 
-def test_the_display_name_still_resolves_for_a_selection_saved_before_this(tmp_path):
+def test_the_display_name_is_not_a_key(tmp_path):
+    """The name is what the report shows and nothing more. A key built from it would promise a stable
+    identifier and deliver a label that changes with whatever the device knew at extraction time."""
     frame = _frame(**{cr.COL_SMID: ""})
     by_conv, _ = cr.build_messages(frame, str(tmp_path / "c"), str(tmp_path / "m"), lambda ts: "")
     msg = by_conv[CONV][0]
 
     keys = _ts_sender_keys(CONV, msg)
 
-    assert f'{CONV}|{msg["created_unix"]}|alice test' in keys
+    assert f'{CONV}|{msg["created_unix"]}|alice test' not in keys
+    assert len(keys) == 1
 
 
-def test_a_sender_with_no_recovered_id_is_indexed_by_name_alone(tmp_path):
+def test_a_sender_with_no_recovered_id_gets_no_key_at_all(tmp_path):
+    """No key is honest; a key that cannot be trusted is not."""
     frame = _frame(**{cr.COL_SMID: "", cr.COL_SENDER_UID: ""})
     by_conv, _ = cr.build_messages(frame, str(tmp_path / "c"), str(tmp_path / "m"), lambda ts: "")
     msg = by_conv[CONV][0]
 
-    keys = _ts_sender_keys(CONV, msg)
-
-    assert keys == {f'{CONV}|{msg["created_unix"]}|alice test'}
+    assert _ts_sender_keys(CONV, msg) == set()
 
 
 def _ts_sender_keys(conv_id, msg):
@@ -111,9 +113,9 @@ def _ts_sender_keys(conv_id, msg):
     index = partial_report.Index("msg")
     row = f'conv-{conv_id}|{msg["anchor"]}'
     index.add(row, msg, smid="")
-    for value in {str(msg.get("sender_uid") or "").lower(),
-                  str(msg.get("sender") or "").lower()} - {""}:
-        index.keys[("ts_sender", f'{conv_id}|{msg["created_unix"]}|{value}')].add(row)
+    if msg.get("created_unix") and msg.get("sender_uid"):
+        index.keys[("ts_sender", f'{conv_id}|{msg["created_unix"]}'
+                                 f'|{str(msg["sender_uid"]).lower()}')].add(row)
     return {key for kind, key in index.keys if kind == "ts_sender"}
 
 
@@ -128,12 +130,11 @@ def test_a_selection_carrying_the_user_id_finds_the_message(tmp_path):
     index = partial_report.Index("msg")
     row = f'conv-{CONV}|{msg["anchor"]}'
     index.add(row, msg, smid="")
-    for value in (UID.lower(), "alice test"):
-        index.keys[("ts_sender", f'{CONV}|{msg["created_unix"]}|{value}')].add(row)
+    index.keys[("ts_sender", f'{CONV}|{msg["created_unix"]}|{UID.lower()}')].add(row)
 
-    # Each spelling a selection can carry, including the case a tool did not choose: the index
-    # case-folds what it stores, so the lookup has to fold too or a capital silently matches nothing.
-    for sender in (UID, UID.upper(), "Alice Test", "alice test"):
+    # Either case: the index case-folds what it stores, so the lookup has to fold too — some tools
+    # print a UUID upper-case, and a capital silently matching nothing is the worst kind of failure.
+    for sender in (UID, UID.upper()):
         selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-row99": {
             "conv": CONV, "ts": msg["created_unix"], "sender": sender}}}}
         resolution = partial_report.resolve({"msg": index}, selection)

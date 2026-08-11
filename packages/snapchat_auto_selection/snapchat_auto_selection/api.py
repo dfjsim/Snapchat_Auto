@@ -42,8 +42,10 @@ IDENTIFIERS = {
             "note": "A server message id is a per-conversation ordinal, so it is only meaningful "
                     "together with its conversation. ts is a unix timestamp. sender is the sender's "
                     "permanent user id (arroyo.db conversation_message.sender_id), matched "
-                    "case-insensitively; the displayed name is accepted as a fallback but is only "
-                    "what the device knew at extraction time, so prefer the id."},
+                    "case-insensitively and the only accepted spelling — the displayed name is not a "
+                    "key, being only what the device knew at extraction time. ts and sender matter "
+                    "for one case: a message with no server id yet, which is anchored on its "
+                    "position in the conversation and so has an id that can move."},
     "ct": {"primary": ("user_id",), "alternates": ("username", "conversation_id"),
            "note": "The permanent user id when known. A contact with none is anchored on its "
                    "username, then on a conversation id, so those travel too."},
@@ -142,9 +144,13 @@ class SelectionBuilder:
         anchor for it moves, which happens to messages that carry no server id.
 
         ``sender`` is the sender's **permanent user id** (``conversation_message.sender_id``), matched
-        case-insensitively. The report displays the sender's *name* instead, so this is the one
-        identifier that cannot be read off a page; the name is accepted as a fallback, but it is only
-        what the device knew at extraction time. Prefer the id.
+        case-insensitively and the only accepted spelling. The report displays the sender's *name*
+        instead, so this is the one identifier that cannot be read off a page; the name is **not** a
+        key, being only what the device knew at extraction time.
+
+        Both only matter for a message with no server message id yet — one the app had not sent when
+        the extraction was taken. Those are anchored on their position in the conversation, so their id
+        moves if a later run recovers one more message; anything with a server id is matched on that.
         """
         anchor = anchor_for("msg", conversation_id=conversation_id,
                             server_message_id=server_message_id)

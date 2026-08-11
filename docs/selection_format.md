@@ -157,17 +157,21 @@ different message in every conversation. `validate()` rejects an unqualified `ms
 Note the asymmetry: the anchor *inside a conversation page* is page-local (`#msg-12.0`), while the
 **selection id** is qualified. Do not copy an anchor out of a URL.
 
-**`sender` is the sender's permanent user id** — `conversation_message.sender_id` — and it is matched
-case-insensitively. Send that whenever you have it: it is the only stable half of the
-`conv + ts + sender` fallback, which is what re-finds a message whose id was merely its *position* in
-the conversation (a message with no server id yet). The displayed **name** is also accepted, because a
-selection saved from a report before this was recorded carries it — but a name is only what the device
-knew at extraction time, it differs between two extractions of one phone, and it is missing entirely
-for a sender who is not in the friends artifact. Prefer the id; fall back to the name only if that is
-all you have.
+**`sender` is the sender's permanent user id** — `conversation_message.sender_id` — matched
+case-insensitively, and it is the **only** accepted spelling. The displayed sender **name** is not a
+key: it is whatever the device knew at extraction time, it can differ between two extractions of one
+phone, and it is absent for a sender who is not in the friends artifact, so a key built from it would
+promise a stable identifier and deliver a label. A message whose sender id was not recovered has no
+`ts_sender` key, and sending a name in its place resolves to nothing.
 
-The report *shows* the name, so this is the one identifier you cannot read off a page. It comes from
-`arroyo.db`.
+Since the report *shows* the name, this is the one identifier you cannot read off a page — it comes
+from `arroyo.db`.
+
+This alternate exists for one case: a message with **no server message id yet** (one the app had not
+sent when the extraction was taken — the parser labels those *"Sending Message"*). Those are anchored
+on their **position** in the conversation, which recovering one more message shifts, so the
+`conv + ts + sender` triple is the only thing that can find such a message again. A message that has a
+server id is matched on that and never needs this.
 
 #### Contacts
 
