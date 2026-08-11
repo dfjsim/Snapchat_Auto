@@ -8,6 +8,7 @@ helper can find and compare, and the GUI has to survive the helper not being ins
 Every input is synthetic. No extraction data is required or used.
 """
 import pytest
+from packaging import version
 
 import Snapchat_Auto
 
@@ -20,6 +21,11 @@ def test_this_projects_release_name_is_one_the_update_check_accepts(tmp_path):
     file the update check can find and compare. Dropping the `+build.<N>` tag from the version, or
     renaming the artifact by hand, silently turns update checks off — nothing raises, no build is
     ever newer.
+
+    Compared as **versions**, not as strings, which is what the check itself does: a pre-release
+    version is not stored the way it is written (``1.6.0-beta.1`` is the PEP 440 version
+    ``1.6.0b1``), so a string comparison would fail on a beta release while the check it stands for
+    works perfectly.
     """
     name, running = Snapchat_Auto.get_project_name(), Snapchat_Auto.get_version()
     (tmp_path / f"{name}-{running}{auto_update.ARCH_STR}.msi").write_bytes(b"")
@@ -27,7 +33,17 @@ def test_this_projects_release_name_is_one_the_update_check_accepts(tmp_path):
     found, found_version = auto_update.newest_installer(name, tmp_path)
 
     assert found is not None, f"{name}-{running} is not a name the update check recognizes"
-    assert str(found_version) == running
+    assert found_version == version.parse(running)
+
+
+def test_a_pre_release_is_older_than_the_version_it_leads_to():
+    """The reason `[project].version` carries the marker while the MSI ProductVersion cannot: it is
+    what puts a beta *below* its own release and above the last one, so an examiner running the beta
+    is still offered 1.6.0 when it lands."""
+    beta = version.parse("1.6.0-beta.1+build.20260811")
+
+    assert version.parse("1.5.2+build.20260808") < beta < version.parse("1.6.0+build.20260901")
+    assert beta.is_prerelease
 
 
 def test_a_missing_update_helper_leaves_the_gui_working(monkeypatch):
