@@ -83,6 +83,12 @@ _MEDIA_ONLY_TYPES = {"Video (Unknown Source)": "video", "Sticker": "image"}
 COL_CONV = "Client Conversation ID"
 COL_SCONV = "Server Conversation ID"                           # optional
 COL_SENDER = "Sender ID"
+# The sender's permanent user id. `Sender ID` above holds the *name* the parser replaced it with
+# (ParseSnapchat_iOS.fixSenders), which is what the report shows; this is the only stable way to
+# identify the sender again on a later run, and it is what a saved selection matches a message on
+# when the message has no server message id. Optional: it is absent from a frame an older build
+# produced, and the code below falls back to the name exactly as it did before.
+COL_SENDER_UID = "Sender User ID"
 COL_CONTENT = "Message Content"
 COL_TYPE = "Content Type"
 COL_RAWTYPE = "Content Type (arroyo)"                          # optional: the numeric value the
@@ -392,6 +398,9 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "smid": cell(row.get(COL_SMID)),
             "cmid": _id_str(row.get(COL_CMID)),
             "sender": sender_plain,
+            # The sender's permanent id when the frame carries it, for matching this message again;
+            # never shown, since the name above is what a reader needs. See COL_SENDER_UID.
+            "sender_uid": cell(row.get(COL_SENDER_UID)) if COL_SENDER_UID in columns else "",
             "sender_bold": sender != sender_plain,
             "direction": "Sent" if outgoing else ("Received" if sender_plain else ""),
             "types": [ctype] if ctype else [],
@@ -1240,7 +1249,12 @@ def _message_rows(conv, chunk_of):
              # a duplicate suffix, and for an unsent message is only a *position* in the
              # conversation, which shifts the moment the parser recovers one more row. Omitted when
              # there is none, in which case `selKeys` falls back to the time and sender.
-             **({"smid": msg["smid"]} if msg["smid"] else {})},
+             **({"smid": msg["smid"]} if msg["smid"] else {}),
+             # Only for a message with no server message id, which is the only case selKeys falls
+             # back to the time and sender for — so the id is carried on the handful of rows that
+             # can use it rather than on every row of every conversation.
+             **({"uid": msg["sender_uid"]}
+                if not msg["smid"] and msg.get("sender_uid") else {})},
         ])
     return rows
 
@@ -1431,9 +1445,12 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         # as it is — every cross-report link and cache_links.json record depends on it.
         f'selPrefix:{json.dumps("conv-" + conv["id"] + "|")},'
         # what a later run matches this message on if our anchor for it has moved
+        # The sender is recorded as its permanent user id when the row carries one, and as the
+        # displayed name otherwise. The index registers both spellings, so either resolves — but the
+        # id is the one that still resolves after the device's name for that account changes.
         'selKeys:function(r){var m=r[5]||{},k={conv:' + json.dumps(conv["id"]) + '};'
         'if(m.smid)k.smid=m.smid;'
-        'else{k.ts=r[3]["1"];k.sender=r[3]["3"];k.anchor=r[0];}return k;},'
+        'else{k.ts=r[3]["1"];k.sender=m.uid||r[3]["3"];k.anchor=r[0];}return k;},'
         f'rowHeight:{MSG_ROW_H},estDetail:300,cols:"{MSG_COLS}",'
         f'detailBase:"data/{key}/detail-",'
         'query:function(){return document.getElementById("q").value;},'
@@ -1864,10 +1881,17 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             # chats, so an unqualified key would put one selection on a message in every conversation.
             sel_msg.add(msg_row, msg,
                         smid=f'{conv["id"]}|{msg["smid"]}' if msg.get("smid") else "")
-            if msg.get("created_unix") and msg.get("sender"):
-                # what finds a message whose anchor was only its position in the conversation
-                sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
-                                           f'|{str(msg["sender"]).lower()}')].add(msg_row)
+            # What finds a message whose anchor was only its position in the conversation. Registered
+            # under the sender's permanent **user id** and under the display name, because the two
+            # spellings come from different places and both have to resolve: an external tool has the
+            # user id (which is what docs/selection_format.md tells it to send, and the only stable
+            # half of this key — a display name is whatever the device knew at extraction time), while
+            # a selection saved from a report before this existed carries the name.
+            if msg.get("created_unix"):
+                for value in {str(msg.get("sender_uid") or "").lower(),
+                              str(msg.get("sender") or "").lower()} - {""}:
+                    sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
+                                               f'|{value}')].add(msg_row)
             sel_msg.contains(msg_row, conv_row)
             sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
             for att in msg.get("atts") or ():

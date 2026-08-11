@@ -404,7 +404,13 @@ def _lookups(kind, name, keys):
     if name == "ts_sender":
         conv, ts, sender = keys.get("conv"), keys.get("ts"), keys.get("sender")
         if conv and ts and sender:
-            return [(("ts_sender", f"{conv}|{ts}|{sender}"), "its conversation, time and sender")]
+            # Case-folded, because the index stores it that way. A sender arrives either as the
+            # permanent user id or as the name the report displayed, and neither is under our control:
+            # "Alice Test" from a tool that read the name off a page, and an upper-case UUID from one
+            # that got the id from a tool that prints them that way, both used to match nothing at
+            # all — silently, since a non-matching alternate is indistinguishable from an absent one.
+            return [(("ts_sender", f"{conv}|{ts}|{str(sender).lower()}"),
+                     "its conversation, time and sender")]
         return []
     value = keys.get(name)
     if not value:

@@ -40,7 +40,10 @@ IDENTIFIERS = {
              "note": "arroyo.db client_conversation_id — a device-assigned UUID."},
     "msg": {"primary": ("conversation_id", "server_message_id"), "alternates": ("ts", "sender"),
             "note": "A server message id is a per-conversation ordinal, so it is only meaningful "
-                    "together with its conversation. ts is a unix timestamp; sender a user id."},
+                    "together with its conversation. ts is a unix timestamp. sender is the sender's "
+                    "permanent user id (arroyo.db conversation_message.sender_id), matched "
+                    "case-insensitively; the displayed name is accepted as a fallback but is only "
+                    "what the device knew at extraction time, so prefer the id."},
     "ct": {"primary": ("user_id",), "alternates": ("username", "conversation_id"),
            "note": "The permanent user id when known. A contact with none is anchored on its "
                    "username, then on a conversation id, so those travel too."},
@@ -135,8 +138,14 @@ class SelectionBuilder:
         return self._add("conv", anchor, {"conv": conversation_id, "server": server_id})
 
     def add_message(self, conversation_id, server_message_id, *, ts=None, sender=None):
-        """One message. ``ts`` (unix seconds) and ``sender`` (user id) let it be found again if the
-        report's own anchor for it moves, which happens to messages that carry no server id."""
+        """One message. ``ts`` (unix seconds) and ``sender`` let it be found again if the report's own
+        anchor for it moves, which happens to messages that carry no server id.
+
+        ``sender`` is the sender's **permanent user id** (``conversation_message.sender_id``), matched
+        case-insensitively. The report displays the sender's *name* instead, so this is the one
+        identifier that cannot be read off a page; the name is accepted as a fallback, but it is only
+        what the device knew at extraction time. Prefer the id.
+        """
         anchor = anchor_for("msg", conversation_id=conversation_id,
                             server_message_id=server_message_id)
         return self._add("msg", anchor, {"conv": conversation_id, "smid": server_message_id,
