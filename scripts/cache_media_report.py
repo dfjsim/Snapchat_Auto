@@ -809,8 +809,8 @@ RENAMED_BASIS = (
     "back from extraction_manifest.json; percent-decoding either spelling yields the same URL.")
 
 
-def load_renamed(src_root, app):
-    """``{relative path on disk: exact on-device name}`` from the extraction manifest."""
+def _load_manifest(src_root, app, field):
+    """One field of the extraction manifest, or ``{}`` when there is no manifest to read."""
     for root in (src_root, app, os.path.dirname(app or ""), os.path.dirname(app or "") + "/.."):
         if not root:
             continue
@@ -818,10 +818,66 @@ def load_renamed(src_root, app):
         if os.path.isfile(candidate):
             try:
                 with open(candidate, encoding="utf-8") as fh:
-                    return json.load(fh).get("renamed") or {}
+                    return json.load(fh).get(field) or {}
             except Exception as error:
                 logger.debug(f"could not read {candidate}: {error}")
     return {}
+
+
+def load_renamed(src_root, app):
+    """``{relative path on disk: exact on-device name}`` from the extraction manifest."""
+    return _load_manifest(src_root, app, "renamed")
+
+
+def load_device_mtimes(src_root, app):
+    """``{relative path on disk: mtime on the device}`` (unix seconds UTC) from the manifest.
+
+    Written by `extract_zip` out of each archive entry's ``UT`` field. Empty for an extraction folder
+    produced before this was recorded, in which case the report says the time was not recorded rather
+    than falling back to the extracted copy's own mtime — that is when *we* unzipped the file, which is
+    a fact about this run and not about the evidence.
+    """
+    return _load_manifest(src_root, app, "mtimes")
+
+
+#: Shown where the archive recorded no time for an entry. Not an empty cell: a blank
+#: reads as "nothing happened", where the truth is that we do not know.
+_NO_MTIME = "<span class=muted>not recorded</span>"
+
+
+_DEVICE_MTIME_BASIS = (
+    "The file's modification time ON THE DEVICE, read from the extraction archive's own record of it "
+    "(the ZIP entry's UT field, which carries UTC seconds). It is NOT the timestamp of the copy on "
+    "this machine: unzipping a file gives it a new mtime, so the extracted copy's is the moment this "
+    "run — or an earlier one — wrote it, and says nothing about the evidence. Verified by two "
+    "extractions of one device, taken by different tools fifteen days apart, carrying the same stamps "
+    "for the same cache files. «not recorded» means the archive carried no timestamp for this entry, "
+    "or the extraction folder was produced by a build older than this and holds none.")
+
+
+#: Where the extraction wrote each file: `extract_zip` keys the manifest on the path from the container
+#: segment onward, so a lookup has to be built the same way. `rel` here is relative to Library/Caches
+#: instead, which is why it cannot be the key.
+_CONTAINER_RE = re.compile(r"(?:^|/)(Application|AppGroup)/", re.I)
+
+
+def _manifest_key(full):
+    """The path `extract_zip` recorded this file under, or "" if it is not under a container.
+
+    The separators are normalised **before** matching rather than matched as a character class: an
+    escaped backslash inside one is one editing slip away from a class that only accepts a forward
+    slash, which matches nothing on Windows and shows every file as having no recorded time. Which is
+    exactly what it did.
+    """
+    text = (full or "").replace("\\", "/")
+    match = _CONTAINER_RE.search(text)
+    return text[match.start(1):] if match else ""
+
+
+def _device_mtime(full, mtimes, ms_fmt):
+    """The displayed device mtime for one file, or "" when the archive recorded none."""
+    stamp = mtimes.get(_manifest_key(full)) if mtimes else None
+    return ms_fmt(int(stamp) * 1000) if stamp is not None else ""
 
 
 def _device_name(full, rel, renamed):
@@ -1053,7 +1109,8 @@ def _stream_hashes(path):
     return md5.hexdigest(), sha.hexdigest(), total
 
 
-def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=None):
+def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=None,
+                  device_mtimes=None):
     """One entry per file under Library/Caches, deduplicated by recovered content.
 
     Returns ``(entries, stats)``. Entries are keyed by the SHA-256 of the **recovered payload** (or
@@ -1099,7 +1156,8 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             "path": full, "rel": rel, "name": name, "bytes": size,
             "raw_md5": md5, "raw_sha256": sha,
             "producer": producer_of(name),
-            "mtime": ms_fmt(int(os.path.getmtime(full) * 1000)) if os.path.exists(full) else "",
+            # The device's mtime, never the extracted copy's — see _DEVICE_MTIME_BASIS.
+            "mtime": _device_mtime(full, device_mtimes, ms_fmt),
             "src": device_path(full, src_root, manifest),
             # the exact name on the device, when extraction had to sanitise it
             "device_name": _device_name(full, rel, renamed),
@@ -1444,7 +1502,7 @@ def _detail_html(entry, rel_prefix, closure=None):
         rows.append(f"<tr><td class='mono'>{shown}</td><td>{_fmt_bytes(c['bytes'])}</td>"
                     f"<td>{_esc(c['producer']) or '<span class=muted>none</span>'}</td>"
                     f"<td class='hex'>{_esc(c['raw_sha256'][:32])}…</td>"
-                    f"<td>{_esc(c['mtime'])}</td></tr>")
+                    f"<td>{_esc(c['mtime']) or _NO_MTIME}</td></tr>")
     parts.append("<div class='sect'>Copies on disk" + _info(
         "Every file under Library/Caches whose recovered content is these exact bytes. The same "
         "media is often written more than once under different names — at the Caches root and in "
@@ -1452,7 +1510,8 @@ def _detail_html(entry, rel_prefix, closure=None):
         "this table is of the file AS STORED, which differs from the recovered content's hash "
         "whenever the file had to be decoded or decrypted.") + "</div>"
         "<table class='sub'><tr><th>path under Library/Caches</th><th>size</th><th>producer</th>"
-        "<th>SHA-256 as stored</th><th>modified</th></tr>" + "".join(rows) + "</table>")
+        "<th>SHA-256 as stored</th><th>modified on the device"
+        + _info(_DEVICE_MTIME_BASIS) + "</th></tr>" + "".join(rows) + "</table>")
     parts.append("<div class='sect'>Source path(s)</div><div class='paths'>"
                  + "<br>".join(_esc(c["src"]) for c in entry["copies"]) + "</div>")
 
@@ -1813,7 +1872,9 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     logger.info(f"Cached media: {key_info['note']}")
 
     renamed = load_renamed(src_root, app)
-    entries, stats = build_entries(app, key_info, ms_fmt, src_root, manifest, renamed)
+    device_mtimes = load_device_mtimes(src_root, app)
+    entries, stats = build_entries(app, key_info, ms_fmt, src_root, manifest, renamed,
+                                  device_mtimes)
     logger.info(f"Cached media: {stats['files']} file(s) under Library/Caches "
                 f"({_fmt_bytes(stats['bytes'])}) → {len(entries)} distinct file(s), "
                 f"{stats['decoded']} decoded/decrypted")
