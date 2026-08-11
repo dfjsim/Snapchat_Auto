@@ -144,7 +144,7 @@ primary id.
 | `conv` | Conversations | `conv-<client conversation id>` | `conv`, `server` |
 | `msg` | Conversations | `conv-<client conversation id>\|msg-<server message id>` | `conv`, `smid`, `ts`, `sender` |
 | `ct` | Contacts | `ct-<user id>` | `uid`, `user`, `conv` |
-| `mem` | Memories | `mem-<ZSNAPID>` | `snap`, `mediaid`, `entry` |
+| `mem` | Memories | `mem-<ZSNAPID>` | `snap`, `mediaid`, `entry`, `cachekeys` (a **list**) |
 | `cc` | cache_controller | `ck-<CACHE_KEY>` | `key`, `sha` |
 | `cm` | Library/Caches | `cm-<sha256 of the recovered content>` | `sha`, `raw` (a **list**), `rel` |
 
@@ -153,6 +153,11 @@ primary id.
 **A message id is qualified with its conversation.** `server_message_id` is a *per-conversation ordinal*
 — `12.0` is message 12, part 0, and message 12 exists in nearly every chat — so a bare `msg-12.0` names a
 different message in every conversation. `validate()` rejects an unqualified `msg` id for that reason.
+
+**Either spelling of the id resolves.** The report renders `<message>.<part>`, and the part is ours to
+add: `arroyo.db` holds the message number, so `12` and `12.0` both work as the `smid` in a key record.
+When a bare number matches several parts of one message it identifies no single row, and the run reports
+that rather than choosing a part.
 
 Note the asymmetry: the anchor *inside a conversation page* is page-local (`#msg-12.0`), while the
 **selection id** is qualified. Do not copy an anchor out of a URL.
@@ -172,6 +177,29 @@ sent when the extraction was taken — the parser labels those *"Sending Message
 on their **position** in the conversation, which recovering one more message shifts, so the
 `conv + ts + sender` triple is the only thing that can find such a message again. A message that has a
 server id is matched on that and never needs this.
+
+#### A Memory you have no snap id for
+
+`cache_keys` is a list of `cache_controller.db` CACHE_KEY values the Memory's media was recovered from
+— equivalently, for CDN-downloaded media, `sha256(<the token in the CDN URL>)[:32]`. It is the only
+`mem` identifier available to a tool that never read `scdb-27`, so `snap_id` may be **omitted** when it
+is given:
+
+```python
+sel.add_memory(cache_keys=["<CACHE_KEY>"])        # -> "mem-by-cachekey-<CACHE_KEY>"
+```
+
+The row id is then a **placeholder**, and deliberately does not look like a snap id: the run resolves
+the row through the key and records the real `mem-<ZSNAPID>` it landed on in the report's provenance. An
+id shaped like a snap id that no row carries would read as "this Memory is missing" instead.
+
+**A cache key names a file, and one file can belong to several Memories** — a grouped media object is
+exactly that, and it is why the Memories report folds a group into one row. So this alternate is tried
+**last**, and when it does not identify a single Memory the run refuses and names it rather than picking
+one. Pass `media_id` / `entry_id` as well whenever you have them; either is more specific.
+
+Gate on it rather than assuming: `describe()["kinds"]["mem"]["alternates"]` lists `cache_keys` on a
+build that supports it.
 
 #### Contacts
 

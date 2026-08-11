@@ -317,3 +317,66 @@ def test_a_built_selection_and_a_browser_saved_one_resolve_to_the_same_rows():
 
     assert from_api.seeds == from_browser.seeds
     assert from_api.ok and not from_api.moved
+
+
+# ------------------------------------------------- a Memory named by the file it came from
+
+def test_a_memory_can_be_named_by_its_cache_key_when_the_snap_id_is_unknown():
+    """For a tool that never read scdb-27: it has the cached file, not the ZSNAPID. The id is then a
+    placeholder that says so, rather than something shaped like a snap id that was not found."""
+    builder = api.SelectionBuilder()
+    anchor = builder.add_memory(cache_keys=["ABCD" + "0" * 28])
+
+    assert anchor == "mem-by-cachekey-ABCD" + "0" * 28
+    record = builder.to_payload()["selections"]["mem"][anchor]
+    assert record["cachekeys"] == ["ABCD" + "0" * 28] and record.get("snap") is None
+    assert api.validate(builder.to_payload()) == []
+
+
+def test_a_memory_with_neither_a_snap_id_nor_a_cache_key_is_refused():
+    with pytest.raises(ValueError, match="snap_id"):
+        api.SelectionBuilder().add_memory()
+
+
+def test_the_snap_id_still_wins_and_the_cache_keys_travel_with_it():
+    builder = api.SelectionBuilder()
+    anchor = builder.add_memory("SNAP-1", cache_keys=["ab" * 16])
+
+    assert anchor == "mem-SNAP-1"
+    assert builder.to_payload()["selections"]["mem"][anchor]["cachekeys"] == ["ab" * 16]
+
+
+def test_a_cache_key_resolves_a_memory_and_is_matched_case_insensitively():
+    key = "ABCD" + "0" * 28
+    index = partial_report.Index("mem")
+    index.add("mem-SNAP-1", {}, snap="SNAP-1")
+    index.keys[("cachekeys", key.lower())].add("mem-SNAP-1")
+
+    builder = api.SelectionBuilder()
+    builder.add_memory(cache_keys=[key])                      # upper case, as some tools print it
+    result = partial_report.resolve({"mem": index}, builder.to_payload())
+
+    assert result.seeds["mem"] == {"mem-SNAP-1"}
+    assert "cache key" in result.moved[0]["how"]
+
+
+def test_a_cache_key_shared_by_two_memories_names_neither():
+    """A cache key names a *file*, and a grouped media object is one file under several snap rows. So
+    it is the last alternate tried, and when it does not identify one row the run says so."""
+    key = "ab" * 16
+    index = partial_report.Index("mem")
+    for snap in ("SNAP-1", "SNAP-2"):
+        index.add(f"mem-{snap}", {}, snap=snap)
+        index.keys[("cachekeys", key)].add(f"mem-{snap}")
+
+    builder = api.SelectionBuilder()
+    builder.add_memory(cache_keys=[key])
+
+    with pytest.raises(partial_report.AmbiguousSelection):
+        partial_report.resolve({"mem": index}, builder.to_payload())
+
+
+def test_describe_advertises_the_new_alternate_so_a_tool_can_gate_on_it():
+    """An integrator must be able to ask whether the build it is talking to supports this, rather
+    than hard-coding a second copy of our table."""
+    assert "cache_keys" in api.describe()["kinds"]["mem"]["alternates"]

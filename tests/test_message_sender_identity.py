@@ -1,24 +1,28 @@
-"""A message's sender: the name a report shows, and the id a selection has to match it on.
+"""How a message is identified — by a report, and by a selection that has to find it again.
 
-`conversation_message.sender_id` is the sender's **permanent user id**, and the parser replaces it in
-place with the friend's username or display name, because that is what a reader of the report wants
-to see. But a display name is only what the device knew at extraction time — it can differ between
-two extractions of one phone, and it is missing entirely for a sender who is not in the friends
-artifact. So it is the wrong thing to match a message on.
+Every row id in the selection scheme is meant to be a fact about the evidence. For messages that was
+not quite true, in two ways that both failed silently:
 
-That matters because of one specific fallback: a message with no server message id is anchored on its
-*position* in the conversation (`msg-row7`), which recovering one more message shifts. Such a
-selection is re-found by conversation + time + sender, and the format spec tells an external tool that
-`sender` is a user id. It was in fact indexed under the display name, so a tool doing what the spec
-says matched nothing at all.
+* **the sender.** `conversation_message.sender_id` is the sender's permanent user id, and the parser
+  replaces it in place with the friend's username or display name, because that is what a reader
+  wants. The `ts_sender` alternate was then built from the *name* — while
+  docs/selection_format.md told an external tool that `sender` is a user id, so a tool doing exactly
+  what the spec said matched nothing. A name is also the wrong thing to match on: it is only what the
+  device knew at extraction time, it differs between two extractions of one phone, and it is absent
+  for a sender who is not in the friends artifact.
+* **the anchor.** A message with no *server* message id was anchored on its **position** in the
+  conversation, which recovering one more message shifts — and the shifted string still exists, so an
+  exact match handed over a *different* message than the one ticked, reporting "its own id" as its
+  reason. It now takes the device's own `client_message_id` instead, and a position — the last resort,
+  for a message with neither id — is never matched on at all.
 
-These tests pin both halves: the id survives the rename into its own field, and the index accepts
-either spelling — the id for anything built against the spec, the name for selections saved by a
-report that predates this.
+So these tests cover what a message is anchored on, that a position is never honoured, that the sender
+key is the permanent id and nothing else, and that both spellings of a server message id resolve.
 
 Every input here is synthetic. No extraction data is required or used.
 """
 import pandas as pd
+import pytest
 
 from scripts import conversations_report as cr
 from scripts import partial_report
@@ -237,3 +241,36 @@ def test_the_sender_is_matched_case_insensitively():
         "msg", "ts_sender", {"conv": CONV, "ts": 1700000000, "sender": "Alice TEST"}))
 
     assert (("ts_sender", f"{CONV}|1700000000|alice test")) in lookups
+
+
+# ------------------------------------------------- naming a row the way another tool can
+
+def test_a_bare_server_message_id_resolves_as_well_as_the_rendered_one():
+    """The report renders `<message>.<part>`, and the part is ours to add: arroyo.db holds the number.
+    A tool reading it out of the database has no reason to know which spelling we chose."""
+    row = f"conv-{CONV}|msg-12.0"
+    index = partial_report.Index("msg")
+    index.add(row, {}, smid=f"{CONV}|12.0")
+    index.keys[("smid", f"{CONV}|12")].add(row)
+
+    for smid in ("12.0", "12"):
+        selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-whatever": {
+            "conv": CONV, "smid": smid}}}}
+        assert partial_report.resolve({"msg": index}, selection).seeds["msg"] == {row}, smid
+
+
+def test_a_bare_id_matching_two_parts_of_a_message_names_neither():
+    """Two parts share the message number, so the bare form identifies no single row — and a part
+    chosen for the examiner is a part they did not select. Ambiguity refuses whatever `unresolved`
+    says: dropping a row loses evidence, but including the wrong one over-discloses."""
+    index = partial_report.Index("msg")
+    for part in ("12.0", "12.1"):
+        row = f"conv-{CONV}|msg-{part}"
+        index.add(row, {}, smid=f"{CONV}|{part}")
+        index.keys[("smid", f"{CONV}|12")].add(row)
+
+    selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-gone": {
+        "conv": CONV, "smid": "12"}}}}
+
+    with pytest.raises(partial_report.AmbiguousSelection, match="matches 2 rows"):
+        partial_report.resolve({"msg": index}, selection, unresolved="drop")
