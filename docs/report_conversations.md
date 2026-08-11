@@ -127,11 +127,35 @@ by the **message table**, which is the same virtual table as the index:
 |---|---|
 | Created | in the examiner's timezone; the raw UTC value is in the expanded row |
 | Direction | **Sent** when the sender is the logged-in account of the extraction, else Received |
-| Sender | `sender_id`, replaced with the contact's username by the parser where it could, with a **device owner** badge on the account the extraction came from |
+| Sender | `sender_id`, replaced with the contact's username by the parser where it could, with a **device owner** badge on the account the extraction came from. The **id itself is kept** — see below |
 | Type | the content type(s) of the message (see the "?" on that column) |
 | Content | the message text, and a thumbnail / play button per attached file (see below) |
 | Msg ID | `server_message_id` + `.` + the part index (e.g. `12.0`), with the device's own `client_message_id` under it |
 | Read | the read timestamp, empty when the message was never read |
+
+### The sender's name is shown; the sender's id is kept
+
+`ParseSnapchat_iOS.fixSenders` replaces `conversation_message.sender_id` **in place** with the friend's
+username or display name, because that is what a reader of the report wants. It now copies the id into
+a `Sender User ID` column first, and `build_messages` carries it as `msg["sender_uid"]`. Nothing shows
+it — the name is what the column displays — and the legacy Communications report drops it, exactly as
+it drops `Message Text`, so that report's table is unchanged.
+
+It exists because a display name is the wrong thing to *match a message on*. A message with no server
+message id yet is anchored on its **position** in the conversation (`msg-row7`), which recovering one
+more message shifts, so a saved selection re-finds it by conversation + time + sender
+([report_partial.md](report_partial.md)). Keyed on the name, that fallback rested on whatever the
+device happened to know at extraction time: it differs between two extractions of one phone, and it is
+absent for a sender who is not in the friends artifact at all.
+[selection_format.md](selection_format.md) had always told an external tool that `sender` is a user
+id — which was true of the documentation and not of the index, so a tool doing exactly what it said
+matched nothing, silently.
+
+The index now registers that key under **both** spellings — the permanent id and the display name — so
+a selection built against the spec resolves, and one saved by an older report still does. Both are
+matched case-insensitively. Confirmed on all four corpus devices that `sender_id` really is a user id
+(every message's is a UUID); no device in the corpus has a message *without* a server message id, so
+the fallback itself is held by `tests/test_message_sender_identity.py` rather than by the corpus.
 
 Expanding a row shows the full text, **each** attachment as a capped preview (150 px tall, with a
 link to open it full size) plus its name, detected type, size, **MD5 and SHA-256**, where it was

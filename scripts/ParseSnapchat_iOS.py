@@ -858,6 +858,26 @@ def getFriendsPrimary(primary, arroyo):
 
 
 def fixSenders(df_messages, df_friends, df_snapchatter):
+    """Show each message's sender by name instead of by id — keeping the id in its own column.
+
+    ``conversation_message.sender_id`` is the account's **permanent user id**, and this replaces it
+    in place with the friend's username or display name, which is what a reader of the report wants.
+    But the id is the only *stable* thing about a sender: a display name is whatever the device knew
+    at extraction time, and it can differ between two extractions of one phone, or be absent for a
+    sender who is not in the friends artifact at all. So it is copied out first.
+
+    That copy is what the saved-selection machinery matches a message on when it has no server
+    message id (``partial_report``'s ``ts_sender`` alternate, and the ``sender`` identifier
+    docs/selection_format.md documents). Keyed on the display name, that alternate promised a
+    stable identifier and delivered a label — and an external tool exporting a real user id, as the
+    format tells it to, matched nothing at all.
+
+    The copy is a whole-column assignment made **before** the try block, so the column exists even
+    if the name lookup below fails, and so it never goes through the per-cell `.loc` writes that
+    pandas 3 rejects on a numeric or all-null column (docs/pandas3_python314_compat.md).
+    """
+    if "sender_id" in df_messages.columns:
+        df_messages["sender_user_id"] = df_messages["sender_id"]
     logger.info("Replacing user ID with username in chats")
     try:
         array = []
@@ -1743,6 +1763,10 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
         merge_df.loc[index, 'content_type'] = "Sending Message"
     renames = {'client_conversation_id': 'Client Conversation ID', 'server_message_id': 'Server Message ID',
                'message_content': 'Message Content', 'content_type': 'Content Type', 'sender_id': 'Sender ID',
+               # The sender's permanent user id, kept beside the name fixSenders replaced it with:
+               # the name is what a reader wants, the id is the only stable way to match the sender
+               # again on a later run. See fixSenders.
+               'sender_user_id': 'Sender User ID',
                'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text',
                # arroyo's own numeric content_type, kept beside the label derived from it
                'arroyo_content_type': 'Content Type (arroyo)',
@@ -2153,9 +2177,10 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         columns={'Creation Timestamp': 'Creation Timestamp UTC+0', 'Read Timestamp': 'Read Timestamp UTC+0'})
     # The device-side ids are only present when this app version's conversation_message has them
     # (see getChats), so the column list is filtered rather than fixed.
-    wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Message Content",
-              "Message Text", "Content Type", "Content Type (arroyo)", "Creation Timestamp UTC+0",
-              "Read Timestamp UTC+0", "Server Message ID", "Client Message ID", "WAL View"]
+    wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Sender User ID",
+              "Message Content", "Message Text", "Content Type", "Content Type (arroyo)",
+              "Creation Timestamp UTC+0", "Read Timestamp UTC+0", "Server Message ID",
+              "Client Message ID", "WAL View"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
      
     logger.info("Cleaning up cache files not linked to messages")
@@ -2201,9 +2226,10 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # per-conversation pages), so it needs them while Message Content still holds the raw attachment
     # filename — the loop below replaces it with the legacy report's HTML in place.
     msg_df = final_df.copy()
-    # "Message Text" is the parsed content the merge would otherwise have thrown away; only the
-    # Conversations report uses it, so the legacy report's table is left exactly as it was.
-    final_df = final_df.drop(columns=["Message Text"], errors="ignore")
+    # "Message Text" is the parsed content the merge would otherwise have thrown away, and "Sender
+    # User ID" the sender's permanent id that fixSenders replaced with a name; only the Conversations
+    # report uses either, so the legacy report's table is left exactly as it was.
+    final_df = final_df.drop(columns=["Message Text", "Sender User ID"], errors="ignore")
 
     if legacy_wanted:
         for index, row in final_df.iterrows():

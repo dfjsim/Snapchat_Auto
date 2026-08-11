@@ -157,6 +157,18 @@ different message in every conversation. `validate()` rejects an unqualified `ms
 Note the asymmetry: the anchor *inside a conversation page* is page-local (`#msg-12.0`), while the
 **selection id** is qualified. Do not copy an anchor out of a URL.
 
+**`sender` is the sender's permanent user id** — `conversation_message.sender_id` — and it is matched
+case-insensitively. Send that whenever you have it: it is the only stable half of the
+`conv + ts + sender` fallback, which is what re-finds a message whose id was merely its *position* in
+the conversation (a message with no server id yet). The displayed **name** is also accepted, because a
+selection saved from a report before this was recorded carries it — but a name is only what the device
+knew at extraction time, it differs between two extractions of one phone, and it is missing entirely
+for a sender who is not in the friends artifact. Prefer the id; fall back to the name only if that is
+all you have.
+
+The report *shows* the name, so this is the one identifier you cannot read off a page. It comes from
+`arroyo.db`.
+
 #### Contacts
 
 `ct` uses the first available of user id → username → conversation id, then `ct-unknown`, with every
