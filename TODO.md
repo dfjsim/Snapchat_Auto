@@ -102,6 +102,16 @@ corpus these are the correct answers, not defects.
   - KEEP `scripts/DecryptLocalMemories_iOS.py` — the new Memories report reuses its `readKeychain`
     (imported as `_memkeys`). Optionally delete `scripts/parseSnapvideos_PREFETCH.py` (unused after).
   - Benefit: faster runs and no longer writing into `ExtractedData`.
+  - **Measured evidence that writing into `ExtractedData` changes report content.** Deleting the
+    extraction folders and re-extracting them changed 30 rows of the cache_controller report on one
+    device and 20 on another, in each case a shard file named `<cache_key>_0-1` becoming
+    `<cache_key>_PREFETCH` — the name it actually has in the archive. The databases were byte-identical
+    across the re-extraction (all ten fingerprinted artifacts, all four devices), so the difference was
+    entirely files an earlier run had written into the tree: exactly the 30 cache keys that
+    `SnapFixedVideos` holds a reconstructed `.mp4` for. So the report had been quoting a filename the
+    device never had, and only a re-extraction revealed it. Two consequences: this is a correctness
+    argument for the removal above, not just a tidiness one; and a corpus baseline must be taken from a
+    freshly extracted tree or it bakes in the pollution.
 
 # Evidence hygiene: something still opens a database in place
 
@@ -141,20 +151,10 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 
 # New report for other cached files in `Library/Caches/*`
 - See `docs/snapchat_ios_cache_media.md`
-- **The "modified" column is our extraction time, not a device time.** `cache_media_report.py:1102`
-  fills it with `os.path.getmtime()` of the **extracted copy on the analyst's disk**, and `:1455` heads
-  the column plainly `modified` in the "Copies on disk" table — beside the path, size, producer and
-  stored SHA-256, which *are* device facts. Found by the corpus gate: re-extracting the same ZIP moved
-  every one of that report's timestamps to the moment of the unzip, which is proof the value carries
-  nothing from the device. Two problems in one — a reader takes it as a fact about the evidence, and it
-  stamps the processing date onto every row (the public-repo rule about extraction dates rests on the
-  same reasoning, and it applies at least as much to what a report asserts).
-  Decide between: reading the timestamp from the **ZIP entry** (which may carry the device's, and can
-  be checked against the archive), dropping the column, or keeping it under an unambiguous label such
-  as *"mtime of the extracted copy — not a device time"* with a "?" saying so. Do not relabel without
-  first checking whether the ZIP holds the real value: a column that could carry a device time is worth
-  more than one that admits it carries none. `mtime` has exactly two references, so the edit is small
-  either way; it is the decision that needs the care.
+- ~~The "modified" column is our extraction time, not a device time.~~ **Fixed** — it is read from the
+  archive entry's `UT` field, which carries the file's mtime **on the device**, and the extracted copies
+  are stamped with it too. See DONE.md and
+  [snapchat_ios_cache_media.md](docs/snapchat_ios_cache_media.md#the-modified-column).
 
 # Add support for offline tile map server [DONE — see DONE.md]
 - Remaining ideas (not done):

@@ -38,6 +38,38 @@ version-dependent and never assume it.
 
 ---
 
+## The `modified` column
+
+The report's "Copies on disk" table shows each file's mtime **on the device**, read from the extraction
+archive's own record of it — the ZIP entry's `UT` extra field, which carries UTC seconds.
+
+It used to show `os.path.getmtime()` of the extracted copy, which is when *we* unzipped the file. That
+is a fact about the run and none about the evidence, and it sat under a bare `modified` heading beside
+the path, size, producer and stored SHA-256, which are all device facts — so a reader took it as one.
+It also stamped the processing date onto every row. The corpus gate is what exposed it: re-extracting
+the same ZIP moved every timestamp in the report to the moment of the unzip.
+
+**That an extraction ZIP preserves the device's mtime is worth stating, because it is not obvious.**
+Two extractions of one phone, taken by *different tools fifteen days apart*, carry the same stamps for
+the same Snapchat cache files — 2026-07-14 11:5x in both, while the second extraction was taken on
+2026-07-29. Archive-creation stamping could not produce that agreement.
+
+Three details that decide the implementation:
+
+* **The `UT` field, not the DOS date/time in the header.** The DOS field is a *local* wall clock with no
+  zone recorded and a two-second resolution, so turning it into a real instant means guessing whose
+  clock wrote it, and a report may not present a guess as a file's timestamp. Every entry of every
+  extraction ZIP in the corpus has a `UT` field.
+* **It is recorded in `extraction_manifest.json`, and that is what the report reads.** `extract_zip`
+  also applies it to the extracted copy with `os.utime` — as every ordinary unzip tool does and
+  `zipfile` alone does not — but the file cannot be the source of truth: a file always *has* an mtime,
+  so from the file alone "the device recorded this" is indistinguishable from "the archive recorded
+  nothing", and an extraction folder produced by an older build carries our unzip times with no way to
+  say so. Where the archive recorded nothing the column says **not recorded** rather than leaving a
+  blank, which would read as "nothing happened".
+* **The lookup key is the path from the `Application` / `AppGroup` segment on**, which is what the
+  manifest is keyed by; the walker's own `rel` is relative to `Library/Caches` and cannot be used.
+
 ## Inventory by naming scheme
 
 What matters for tooling is not the folder but **how the filename is formed**, because

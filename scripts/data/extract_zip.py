@@ -4,6 +4,7 @@ import sys
 import glob
 import os
 import json
+import struct
 import shutil
 import logging
 import re
@@ -86,6 +87,37 @@ def wanted(path, patterns):
         elif pattern in path:
             return True
     return False
+
+
+#: The "extended timestamp" extra field (`UT`), which carries **UTC** seconds.
+_ZIP_UT_ID = 0x5455
+
+
+def zip_mtime(info):
+    """An archive entry's modification time as unix seconds (UTC), or None if it records none.
+
+    This is the file's time **on the device**: an extraction ZIP preserves it, which is worth stating
+    because it is not obvious. Two extractions of one phone taken by different tools fifteen days
+    apart carry the same stamps for the same Snapchat cache files, which archive-creation stamping
+    could not produce.
+
+    Read from the ``UT`` extra field rather than from the header's DOS date/time. The DOS field is a
+    *local* wall clock with no zone recorded and a two-second resolution, so turning it into a real
+    instant means guessing which machine's clock wrote it — and a forensic report may not display a
+    guess as a file's timestamp. The ``UT`` field is unambiguous, and every entry of every extraction
+    ZIP in the corpus has one. Absent, this returns None and the report says the time was not
+    recorded, which is the honest answer and the reason this cannot simply set the extracted file's
+    own mtime: a file always *has* one, so it could no longer say it does not know.
+    """
+    extra = info.extra or b""
+    pos = 0
+    while pos + 4 <= len(extra):
+        header, size = struct.unpack_from("<HH", extra, pos)
+        body = extra[pos + 4:pos + 4 + size]
+        pos += 4 + size
+        if header == _ZIP_UT_ID and body and body[0] & 1 and len(body) >= 5:
+            return struct.unpack_from("<i", body, 1)[0]
+    return None
 
 
 def extract(file_name, mode, dest="."):
@@ -217,6 +249,10 @@ Rename the folder and run again to extract Snapchat data from zip
             # the full on-device path (e.g. private/var/mobile/Containers/Data/Application/<UUID>).
             container_prefixes = {}
             renamed = {}
+            # relative path on disk -> the file's mtime on the device, from the archive entry. Kept in
+            # the manifest rather than applied to the extracted copy: see zip_mtime for why a report
+            # has to be able to say "not recorded".
+            mtimes = {}
             caches_bytes = sanitized = 0
             try:
                 for i in files_in_zip:
@@ -246,11 +282,33 @@ Rename the folder and run again to extract Snapchat data from zip
                             if len(tail) >= 2:
                                 container_prefixes.setdefault("/".join(tail[:2]),
                                                               i[:index].replace("\\", "/").strip("/"))
+                            try:
+                                stamp = zip_mtime(zip1.getinfo(i))
+                                if stamp is not None:
+                                    mtimes[rel.replace("\\", "/")] = stamp
+                            except Exception:
+                                stamp = None                  # no timestamp is a state, not a failure
                             if not os.path.exists(os.path.dirname(filename)):
                                 os.makedirs(os.path.dirname(filename))
                             try:
                                 with open(filename, "wb") as file:
                                     file.write(data)
+                                if stamp is not None and stamp > 0:
+                                    # Give the copy the device's own time — after writing it, or the
+                                    # write would put it back. Every ordinary unzip tool does this and
+                                    # `zipfile` alone does not, so the tree is a faithful copy and
+                                    # anything that stats a file gets the device's answer rather than
+                                    # the moment we unzipped it.
+                                    #
+                                    # The manifest is still what the reports read: a file always HAS
+                                    # an mtime, so from the file alone "the device recorded this" is
+                                    # indistinguishable from "the archive recorded nothing", and an
+                                    # extraction folder made by an older build carries our unzip times
+                                    # with no way to say so.
+                                    try:
+                                        os.utime(filename, (stamp, stamp))
+                                    except OSError:
+                                        pass                  # a time the filesystem will not take
                             except PermissionError:
                                 pass
                         except Exception as err:
@@ -270,7 +328,11 @@ Rename the folder and run again to extract Snapchat data from zip
                 with open(_out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
                     json.dump({"container_prefixes": container_prefixes,
                                # sanitised path -> the exact name the file had on the device
-                               "renamed": renamed}, mf, indent=2)
+                               "renamed": renamed,
+                               # path on disk -> the file's mtime ON THE DEVICE, unix seconds UTC.
+                               # The extracted copy's own mtime is when we unzipped it and says
+                               # nothing about the evidence, so a report must read this instead.
+                               "mtimes": mtimes}, mf, indent=2)
             except Exception as err:
                 logger.debug(f"Could not write extraction manifest: {err}")
             if not os.path.exists(_out("Application")):

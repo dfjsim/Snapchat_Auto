@@ -314,6 +314,38 @@ The four are referred to by the properties that matter (see "Referring to test d
   - Snapchat_LocalMemories_report_date_time/Report.html --> Report_date_time/LocalMemories_legacy/LocalMemories_legacy_report.html.
 - [DONE-v1.3.3] Add Report_date_time/index.html to help navigate to other reports.
 
+- **The Library/Caches report's "modified" column showed when *we* unzipped the file.** It came from
+  `os.path.getmtime()` of the extracted copy, under a bare `modified` heading beside the path, size,
+  producer and stored SHA-256 — all facts about the device — so a reader took it as one, and it stamped
+  the processing date onto every row. The corpus gate exposed it: re-extracting the same ZIP moved every
+  timestamp in the report to the moment of the unzip.
+  - **An extraction ZIP does record the file's real mtime**, which is not obvious and is now written
+    down. Two extractions of one phone taken by different tools fifteen days apart carry the same stamps
+    for the same cache files, which archive-creation stamping could not produce. It is read from the
+    entry's `UT` extra field (UTC seconds), never from the header's DOS date/time — that is a local wall
+    clock with no zone recorded, so presenting it as an instant would mean guessing whose clock wrote it.
+  - **Recorded in `extraction_manifest.json`, which is what the report reads**, and also applied to the
+    extracted copies with `os.utime` (as every ordinary unzip tool does and `zipfile` alone does not).
+    The file cannot be the source of truth: a file always *has* an mtime, so from the file alone "the
+    device recorded this" cannot be told apart from "the archive recorded nothing", and an extraction
+    folder made by an older build carries our unzip times with no way to say so. Where nothing was
+    recorded the column says **not recorded** rather than leaving a blank that reads as "nothing
+    happened", and the column is now headed *modified on the device* with a "?" explaining the source.
+  - Two of my own mistakes worth the note. The lookup was keyed on the walker's `rel` (relative to
+    `Library/Caches`) while the manifest is keyed from the `Application`/`AppGroup` segment on, so every
+    file reported no time; and the separator character class, written through a shell heredoc, reached
+    the file as `[\/]` — a class matching only `/`, which matches nothing on Windows. Both showed as a
+    plausible-looking "not recorded" everywhere rather than as an error, and 437 passing tests said
+    nothing because none of them covered this. `tests/test_device_mtime.py` now pins both, including
+    each separator spelling.
+  - **It also found that writing into `ExtractedData` had been changing report content.** Re-extracting
+    changed 30 cache_controller rows on one device and 20 on another — a shard named `<key>_0-1` becoming
+    the `<key>_PREFETCH` it actually is in the archive — while every fingerprinted artifact stayed
+    byte-identical. The 30 keys are exactly the ones `SnapFixedVideos` holds a rebuilt `.mp4` for, so an
+    earlier legacy-path run had written those names into the tree and the report was quoting a filename
+    the device never had. Recorded against the legacy-removal item in TODO.md; a baseline must be taken
+    from a freshly extracted tree or it bakes the pollution in.
+
 # Snapchat Memories report
 - **Follow-ups to the group fold, from reading it on a real report.**
   - **A lead row now carries a second, three-state checkbox for the whole group** — filled when every
