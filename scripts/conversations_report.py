@@ -427,10 +427,22 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
                                  _smid_sort(m["smid"])))
         seen = {}
         for position, m in enumerate(msgs):                    # anchors must be unique per page
-            # Rows the app had not sent yet carry no server message id, so they are anchored on
-            # their position in the conversation instead.
-            base = "msg-" + (re.sub(r"[^0-9A-Za-z_.-]", "_", m["smid"]) if m["smid"]
-                             else f"row{position}")
+            # A row the app had not sent yet carries no *server* message id, but it does carry the
+            # device's own — arroyo.db's client_message_id, which is evidence exactly as the server id
+            # is, and is unique within a conversation (verified on all four corpus devices, where it is
+            # unique within each whole database). Anchoring on it keeps such a message's id a fact
+            # about the row rather than a fact about how many rows were recovered before it.
+            #
+            # Position is the last resort, for a message with neither id, and it is the one id in the
+            # scheme that is not evidence: recovering one more message shifts it, so the same string
+            # can name a different message in a later run. `partial_report` therefore refuses to match
+            # on it at all rather than hand over the wrong message (see _POSITIONAL_MSG).
+            if m["smid"]:
+                base = "msg-" + re.sub(r"[^0-9A-Za-z_.-]", "_", m["smid"])
+            elif m["cmid"]:
+                base = "msg-c" + re.sub(r"[^0-9A-Za-z_.-]", "_", m["cmid"])
+            else:
+                base = f"msg-row{position}"
             seen[base] = seen.get(base, 0) + 1
             m["anchor"] = base if seen[base] == 1 else f"{base}-{seen[base]}"
         by_conv[conv_id] = msgs

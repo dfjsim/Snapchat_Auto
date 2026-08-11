@@ -391,9 +391,12 @@ are read straight out of the evidence and survive any parsing improvement — `m
   decoded content — so a build that decrypts or decodes something an earlier one could not gives the
   same file a different id, and may merge or split rows. Every copy's *raw* hash and the path travel
   with the selection.
-* **the fallback branches of `msg` and `ct`.** `msg-row<N>` is positional (recovering one more
-  message shifts every later one, as would the WAL free-space carving in `TODO.md`), and
-  `contact_anchor` falls back username → conversation id → `ct-unknown`, which is not even unique.
+* **the fallback branches of `msg` and `ct`.** A message with no server id takes the device's own
+  (`msg-c<client_message_id>`); one with neither is positional (`msg-row<N>` — recovering one more
+  message shifts every later one, as would the WAL free-space carving in `TODO.md`), and such an id is
+  never matched on at all, since a shifted position still exists and would resolve to the wrong
+  message. `contact_anchor` falls back username → conversation id → `ct-unknown`, which is not even
+  unique.
 
 The keys cost nothing per row in the data files: `SCV.init` takes a `selKeys(row)` callback and the
 delegated `change` handler looks the row up through the `data-i` attribute `.vr` already carries, so

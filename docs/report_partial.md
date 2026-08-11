@@ -99,11 +99,20 @@ Two need care:
   decodes something an earlier one could not therefore gives the same file a different id, and may
   merge two rows into one or split one into two. Every copy's raw SHA-256 and the relative path travel
   with the selection.
-* **the fallback branches of `msg` and `ct`.** A message with no server id is anchored on its
-  *position* (`msg-row<N>`), so recovering one more message shifts every later one — as the WAL
-  free-space carving in `TODO.md` would. `contact_anchor` falls back username → conversation id →
-  `ct-unknown`, which is not unique. Those rows carry the conversation, timestamp and sender, or every
-  identifier the contact has.
+* **the fallback branches of `msg` and `ct`.** A message with no server id is anchored on the
+  device's own (`msg-c<client_message_id>`, which is evidence and needs no special handling); one with
+  **neither** id falls back to its *position*, `msg-row<N>`, and recovering one more message shifts
+  every later one — as the WAL free-space carving in `TODO.md` would. `contact_anchor` falls back
+  username → conversation id → `ct-unknown`, which is not unique. Those rows carry the conversation,
+  timestamp and the sender's user id, or every identifier the contact has.
+
+  **A positional id is never matched on.** `_resolve_one` normally takes an exact id match as the
+  answer, and that rule rests on a row id being a fact about the evidence — which every id here is but
+  this one. A shifted position *still exists*, so an exact match would hand over a different message
+  than the one ticked, silently, reporting the confident "its own id" as its reason. So it has to be
+  proved by an alternate (conversation + time + sender's user id), and if nothing does, it is named as
+  not found with that explanation. Refusing to name a message is a bad outcome; naming the wrong one is
+  worse.
 
 ---
 
