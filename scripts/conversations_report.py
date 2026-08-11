@@ -1893,6 +1893,15 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             # chats, so an unqualified key would put one selection on a message in every conversation.
             sel_msg.add(msg_row, msg,
                         smid=f'{conv["id"]}|{msg["smid"]}' if msg.get("smid") else "")
+            # The same id in its bare form — "12" beside "12.0". A server message id is rendered as
+            # <message>.<part>, and the part is ours to add: arroyo.db holds the message number, and
+            # whether it arrives as 12, 12.0 or the int64 12 depends on the frame's dtype. A tool
+            # reading the number out of the database has no reason to know which spelling we chose, so
+            # both are registered. A bare number that matches several parts of one message identifies
+            # no single row, and `_resolve_one` skips it rather than picking a part.
+            bare = str(msg.get("smid") or "").split(".")[0]
+            if bare and bare != str(msg.get("smid") or ""):
+                sel_msg.keys[("smid", f'{conv["id"]}|{bare}')].add(msg_row)
             # What finds a message whose anchor was only its position in the conversation. Keyed on
             # the sender's permanent **user id** and nothing else: the display name the report shows
             # is only what the device knew at extraction time, so a key built from it promises a

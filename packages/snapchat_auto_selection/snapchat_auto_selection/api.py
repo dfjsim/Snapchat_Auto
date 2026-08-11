@@ -49,9 +49,15 @@ IDENTIFIERS = {
     "ct": {"primary": ("user_id",), "alternates": ("username", "conversation_id"),
            "note": "The permanent user id when known. A contact with none is anchored on its "
                    "username, then on a conversation id, so those travel too."},
-    "mem": {"primary": ("snap_id",), "alternates": ("media_id", "entry_id"),
+    "mem": {"primary": ("snap_id",), "alternates": ("media_id", "entry_id", "cache_keys"),
             "note": "ZGALLERYSNAP.ZSNAPID. ZMEDIAID identifies the media object several snap rows can "
-                    "share; ZENTRYID the album entry."},
+                    "share; ZENTRYID the album entry. cache_keys is a list of cache_controller.db "
+                    "CACHE_KEY values the media was recovered from (for CDN media, "
+                    "sha256(<CDN URL token>)[:32]) and is the only identifier available to a tool "
+                    "that never read scdb-27 — snap_id may be omitted when it is given, and the row "
+                    "id is then a placeholder the run resolves through the key. A cache key names a "
+                    "file and one file can belong to several Memories, so it is matched last and "
+                    "reported rather than guessed at when it does not name exactly one."},
     "cc": {"primary": ("cache_key",), "alternates": ("sha256",),
            "note": "A CACHE_KEY in cache_controller.db. sha256 is of the cached bytes as stored."},
     "cm": {"primary": ("sha256",), "alternates": ("raw_sha256", "rel"),
@@ -85,8 +91,15 @@ def anchor_for(kind, **identifiers):
         return f"conv-{conv}|msg-{smid}"
     if kind == "mem":
         value = get("snap_id")
-        _need(value, kind, "snap_id")
-        return f"mem-{value}"
+        if value:
+            return f"mem-{value}"
+        # No ZSNAPID: a caller that never read scdb-27 has only the cache file the media came from.
+        # The placeholder says so in the id itself rather than presenting a key as a snap id — the run
+        # resolves it through the `cachekeys` alternate and records the real id it landed on.
+        keys = [str(k).strip() for k in (identifiers.get("cache_keys") or ()) if str(k).strip()]
+        if keys:
+            return f"mem-by-cachekey-{_safe(keys[0])}"
+        _need(value, kind, "snap_id (or cache_keys)")
     if kind == "cc":
         value = get("cache_key")
         _need(value, kind, "cache_key")
@@ -162,9 +175,25 @@ class SelectionBuilder:
                             conversation_id=conversation_id)
         return self._add("ct", anchor, {"uid": user_id, "user": username, "conv": conversation_id})
 
-    def add_memory(self, snap_id, *, media_id=None, entry_id=None):
-        anchor = anchor_for("mem", snap_id=snap_id)
-        return self._add("mem", anchor, {"snap": snap_id, "mediaid": media_id, "entry": entry_id})
+    def add_memory(self, snap_id=None, *, media_id=None, entry_id=None, cache_keys=()):
+        """One Memory, by its ``ZSNAPID`` — or, when you do not have one, by the cache file(s) its
+        media was recovered from.
+
+        ``cache_keys`` is a list of ``cache_controller.db`` CACHE_KEY values (equivalently: for
+        CDN-downloaded media, ``sha256(<the token in the CDN URL>)[:32]``). It exists for a tool that
+        never read ``scdb-27`` and so has no snap id at all: pass what you have and the run matches the
+        Memory on it. **A cache key names a file, and one file can belong to several Memories** — a
+        grouped media object is exactly that — so when it does not identify a single Memory the run
+        reports it rather than choosing one.
+
+        With no ``snap_id`` the row id is a placeholder built from the first cache key, which no row of
+        a report will carry. That is deliberate: the run then resolves the row through the key and
+        records the real id it landed on in the report's provenance, instead of the id looking like a
+        snap id that was simply not found.
+        """
+        anchor = anchor_for("mem", snap_id=snap_id, cache_keys=cache_keys)
+        return self._add("mem", anchor, {"snap": snap_id, "mediaid": media_id, "entry": entry_id,
+                                         "cachekeys": [str(k) for k in cache_keys if k] or None})
 
     def add_cache_entry(self, cache_key, *, sha256=None):
         anchor = anchor_for("cc", cache_key=cache_key)

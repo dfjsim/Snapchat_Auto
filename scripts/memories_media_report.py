@@ -3554,6 +3554,13 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
         row_id = f"mem-{snap_id}"
         ids = m.get("ids") or {}
         sel.add(row_id, m, snap=snap_id, mediaid=ids.get("ZMEDIAID"), entry=ids.get("ZENTRYID"))
+        # Every cache file this Memory's media was recovered from, so a selection can name the Memory
+        # by one of them. It is the only identifier for a Memory that something which never read
+        # scdb-27 can have — a tool working from cache_controller.db, or from a CDN URL whose token
+        # hashes to the key. Registered per key rather than through `add`, which takes one value per
+        # name, and case-folded because a CACHE_KEY is hex and tools disagree about its case.
+        for token in _cache_tokens(m):
+            sel.keys[("cachekeys", str(token).lower())].add(row_id)
     groups, _snap_to_key = assign_groups(all_memories)
     for _group_key, members in groups:
         for m in members:

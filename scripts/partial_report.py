@@ -347,7 +347,10 @@ class Stage:
 #: out of the evidence cannot. So the evidence-derived alternates come next, and anything positional
 #: or non-unique comes last.
 RESOLVE_ORDER = {
-    "mem": ("snap", "mediaid", "entry"),
+    # `cachekeys` is last on purpose: a cache key names a *file*, and one file can belong to several
+    # Memories — a grouped media object is exactly that. When it does, it identifies no single row and
+    # `_resolve_one` skips it rather than guessing, which is what makes it safe to offer at all.
+    "mem": ("snap", "mediaid", "entry", "cachekeys"),
     "cc": ("key", "sha"),
     "conv": ("conv", "server"),
     "msg": ("smid", "ts_sender"),
@@ -393,6 +396,17 @@ def _lookups(kind, name, keys):
         return [(("raw", str(value)),
                  f"the raw SHA-256 of one of its copies ({str(value)[:12]}...)")
                 for value in (keys.get("raw") or []) if value]
+    if name == "cachekeys":
+        # A list, like `raw`: a Memory's media comes from several cache files, and a tool that has one
+        # of them has enough. Case-folded because a CACHE_KEY is hex and tools disagree about its case.
+        # This is the only `mem` identifier available to something that never saw scdb-27 — it is what
+        # lets a Memory be named by the cached file it was recovered from instead of by its ZSNAPID.
+        values = keys.get("cachekeys") or []
+        if isinstance(values, str):
+            values = [values]
+        return [(("cachekeys", str(value).lower()),
+                 f"a cache key its media was recovered from ({str(value)[:12]}...)")
+                for value in values if value]
     if name == "smid":
         # A server message id is a **per-conversation ordinal**: message 3 exists in every chat. So
         # this alternate is only ever looked up together with the conversation, exactly as the row id
