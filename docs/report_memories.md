@@ -126,6 +126,27 @@ its count and disabled when it is empty (`_media_filter_options`):
 | completeness not verified | plaintext storage — no padding to check, no shard layout to measure |
 | no media recovered | nothing was decrypted or found; the metadata row is still evidence the Memory existed |
 
+### Geolocation is three states, not with/without
+
+**Geolocation** filters the index on `_geo_state`, which the index cell (`_geo_compact`) reads too —
+one function, so the filter and the cell cannot disagree about what a Memory has:
+
+| option | means |
+|---|---|
+| coordinates recovered | a latitude/longitude came out of `snap_location_table` in the gallery database |
+| on the device, none recovered | `ZGALLERYSNAP.ZHASLOCATION` says the app recorded a location, but no coordinates were read for it |
+| no location | the app recorded none |
+
+The middle state is the reason this is not a two-way filter. Geolocation lives in the **encrypted**
+gallery database, so a run without the FFS keychain recovers none of it — and folding those Memories
+into "no location" would report *this tool's* gap as a fact about the device. Told apart, the same
+rows say something useful: there is a location here, and it is still to be had from the extraction.
+The options carry their counts and grey out when empty (`report_ui.counted_options`), so
+"coordinates recovered — 0" answers "why did that return nothing?" on the face of the control.
+
+A **carved** Memory has no `ZGALLERYSNAP` row at all, so it can only read "no location": what that
+row would have said went with the row, rather than never having been on the device.
+
 Poster frames are still extracted from partial video: what the cache holds starts at the beginning
 of the file, so the opening frames decode. For those files `generate_poster` skips the seek (a seek
 into missing bytes fails and costs a full re-read) and takes the first frame that decodes, bounded
@@ -138,7 +159,8 @@ while those messages come from the decoder context.
 To keep the report usable with many Memories, it is split (`generate_report`):
 
 * **`Memories_report.html`** — a lightweight, **sortable/filterable index table** (global search,
-  per-column sort, a with/without-thumbnail filter, a user filter, an incomplete-media filter).
+  per-column sort, a with/without-thumbnail filter, a user filter, a recovered-media filter, a
+  geolocation filter and a time window).
   One **row per Memory (snap)**
   with: thumbnail, kind, user, `ZSNAPID` / `ZENTRYID` / `ZMEDIAID`, cache-file tokens, the media
   **MD5 / SHA-256**, created time, geolocation, and a link to the detail sub-page. Each row carries
