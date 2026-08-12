@@ -253,6 +253,35 @@ def test_a_whole_second_and_a_float_are_the_same_instant(tmp_path):
         assert partial_report.resolve({"msg": index}, selection).seeds["msg"] == {row}, ts
 
 
+def test_the_real_index_records_the_senders_contact_row(tmp_path):
+    """The `msg_sender` relation follows an edge, and an edge no generator records finds nothing —
+    silently. So this goes through the real `index()` rather than a hand-built one, and checks the
+    anchor is the Contacts report's own (taken from contact_link_index, not derived a second time).
+    """
+    friends = pd.DataFrame([{"Display name": "Alice Test", "Username": "alice-test",
+                             "User ID": UID, "Conversation ID": ""}])
+    stage = cr.index(_frame(), friends, None, str(tmp_path / "Conversations"),
+                     str(tmp_path / "cache"), report_dir=str(tmp_path))
+    sel_msg = stage["indexes"]["msg"]
+
+    senders = [(src, dst) for edge, src, kind, dst in sel_msg.edges
+               if edge == partial_report.EDGE_MESSAGE_SENDER and kind == "ct"]
+
+    assert senders and senders[0][1] == f"ct-{UID}"
+    assert senders[0][0].startswith(f"conv-{CONV}|msg-")
+
+
+def test_a_message_whose_sender_id_was_not_recovered_links_to_no_contact(tmp_path):
+    """Rather than to a contact matched on the display name, which is not an identifier."""
+    friends = pd.DataFrame([{"Display name": "Alice Test", "Username": "alice-test",
+                             "User ID": UID, "Conversation ID": ""}])
+    stage = cr.index(_frame(**{cr.COL_SENDER_UID: ""}), friends, None,
+                     str(tmp_path / "Conversations"), str(tmp_path / "cache"),
+                     report_dir=str(tmp_path))
+
+    assert not [e for e in stage["indexes"]["msg"].edges if e[0] == partial_report.EDGE_MESSAGE_SENDER]
+
+
 def test_the_key_carries_no_fractional_second():
     """Pinned on the spelling itself, so the float cannot come back through either side."""
     assert partial_report.ts_sender_key(CONV, 1700000000.0, UID) == f"{CONV}|1700000000|{UID.lower()}"

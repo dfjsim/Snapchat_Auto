@@ -59,6 +59,7 @@ KINDS = ("conv", "msg", "ct", "mem", "cc", "cm")
 # nothing.
 EDGE_CONV_MESSAGE = "conv_message"                 # conv -> msg
 EDGE_CONV_PARTICIPANT = "conv_participant"         # conv -> ct
+EDGE_MESSAGE_SENDER = "message_sender"             # msg  -> ct
 EDGE_MEMORY_GROUP = "memory_group"                 # mem -> mem
 EDGE_MEMORY_CACHE = "memory_cache"                 # mem <-> cc
 EDGE_MESSAGE_CACHE = "message_cache"               # cc  <-> msg
@@ -66,8 +67,8 @@ EDGE_CACHE_CACHEMEDIA = "cache_cachemedia"         # cc  <-> cm
 EDGE_MEMORY_CACHEMEDIA = "memory_cachemedia"       # mem <-> cm
 EDGE_CACHEMEDIA_MESSAGE = "cachemedia_message"     # cm  <-> msg
 
-EDGES = (EDGE_CONV_MESSAGE, EDGE_CONV_PARTICIPANT, EDGE_MEMORY_GROUP, EDGE_MEMORY_CACHE,
-         EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA,
+EDGES = (EDGE_CONV_MESSAGE, EDGE_CONV_PARTICIPANT, EDGE_MESSAGE_SENDER, EDGE_MEMORY_GROUP,
+         EDGE_MEMORY_CACHE, EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA,
          EDGE_CACHEMEDIA_MESSAGE)
 
 
@@ -91,13 +92,21 @@ class Relation:
 
 
 RELATIONS = (
+    # Off by default: a conversation can hold thousands of messages, and an examiner who ticked the
+    # conversation to get its detail page and participants has not asked to disclose every message in
+    # it. Ticking messages is the finer instrument, and it is a click away in the same report.
     Relation("conv_messages", "Every message of a selected conversation",
-             EDGE_CONV_MESSAGE, "conv", "msg", True,
+             EDGE_CONV_MESSAGE, "conv", "msg", False,
              "The conversation's own messages, as arroyo.db records them."),
     Relation("msg_cache", "The cache_controller entry behind an included message's media",
              EDGE_MESSAGE_CACHE, "msg", "cc", True,
              "A chat claim's EXTERNAL_KEY carries <type>:<conversation>:<message>:<part>, so the "
              "entry names the message directly."),
+    Relation("msg_sender", "The contact record of an included message's sender",
+             EDGE_MESSAGE_SENDER, "msg", "ct", True,
+             "The sender's permanent user id on the message (arroyo.db "
+             "conversation_message.sender_id), matched to the friends artifact - the same Contacts "
+             "row every other report links that person by."),
     Relation("participants", "The contact record of every participant of an included conversation",
              EDGE_CONV_PARTICIPANT, "conv", "ct", True,
              "The participant user ids on the conversation, matched to the friends artifact."),
@@ -470,9 +479,12 @@ _POSITIONAL_MSG = re.compile(r"\|msg-row\d+(?:-\d+)?$")
 
 
 def _resolve_one(index, kind, ticked_id, keys):
-    """``(row id, how, weak)`` for one ticked id. ``row id`` is None when nothing identifies one row.
+    """``(row ids, how, weak)`` for one ticked id. ``row ids`` is empty when nothing identifies a row.
 
-    Three rules, and the first is the one that matters:
+    Normally one row. It is several only in the case :func:`_one_group` describes, where naming them all
+    is what the identifier actually says — never because one of several was picked.
+
+    Four rules, and the first is the one that matters:
 
     **An exact id match is the answer.** The alternates exist only to find a row whose *id moved*
     between builds; consulting them when the id is present can only invent doubt. Collecting every
@@ -493,18 +505,47 @@ def _resolve_one(index, kind, ticked_id, keys):
     tried. Only when *no* alternate identifies exactly one row is the id ambiguous — which is the case
     that must still refuse, because a Library/Caches row is identified by its recovered content and
     rows are merged by that content, so the row ticked and the row offered can be different bytes.
+
+    **Unless those rows are one group** — see :func:`_one_group`.
     """
     if ticked_id in index.rows and not (kind == "msg" and _POSITIONAL_MSG.search(ticked_id)):
-        return ticked_id, "its own id", []
+        return [ticked_id], "its own id", []
     weak = []
+    group = None                  # a whole group named by one key: the last resort, never a first answer
     for name in RESOLVE_ORDER.get(kind, ()):
         for key, how in _lookups(kind, name, keys):
             hits = sorted(index.keys.get(key, ()))
             if len(hits) == 1:
-                return hits[0], how, weak
+                return hits, how, weak
             if len(hits) > 1:
+                if group is None and _one_group(index, hits):
+                    group = (hits, how)
                 weak.append({"by": how, "matches": hits})
-    return None, "", weak
+    if group:
+        # only now: a selection carrying both a group-wide identifier and a row-specific one meant the
+        # specific one, and taking the group first would put rows in the extract that it could name
+        hits, how = group
+        return hits, (f"{how}, which {len(hits)} Memories of one group share "
+                      f"- all {len(hits)} included"), weak
+    return [], "", weak
+
+
+def _one_group(index, hits):
+    """True when every row a key named belongs to one group -- in which case it is not a doubt.
+
+    A cache key names a media *file*, and a group is by definition the snap rows that share one media
+    object, so a key naming every member of one group is a complete statement of the rows that file
+    belongs to rather than a question about which was meant. Picking one would be a guess; including all
+    of them is what the key says, and the ``how`` string says so on the row's provenance line.
+
+    This is the one case an external tool cannot avoid: with no snap id, a cache key is its only ``mem``
+    identifier, and ``ZMEDIAID`` would not have helped -- a group's members share that too. Refusing
+    here stopped the whole build over a row the key had actually identified. With ``mem_group`` on (the
+    default) the closure would have pulled the siblings in anyway, so this usually changes the record
+    rather than the output.
+    """
+    groups = {index.groups.get(row_id) for row_id in hits}
+    return len(groups) == 1 and all(groups)
 
 
 def resolve(indexes, selection, *, unresolved="refuse"):
@@ -534,8 +575,8 @@ def resolve(indexes, selection, *, unresolved="refuse"):
         for ticked_id in sorted(ticked):
             keys = ticked[ticked_id]
             keys = keys if isinstance(keys, dict) else {}
-            row_id, how, weak = _resolve_one(index, kind, ticked_id, keys)
-            if row_id is None and weak:
+            row_ids, how, weak = _resolve_one(index, kind, ticked_id, keys)
+            if not row_ids and weak:
                 result.ambiguous.append(
                     {"kind": kind, "id": ticked_id,
                      "matches": sorted({m for entry in weak for m in entry["matches"]}),
@@ -545,7 +586,7 @@ def resolve(indexes, selection, *, unresolved="refuse"):
                              "its recovered content and rows are merged by that content, so a build "
                              "that decodes differently can split or merge them.")})
                 continue
-            if row_id is None:
+            if not row_ids:
                 # A positional id needs its own answer: the string may well still exist in this run,
                 # so "no row carries that id" would be untrue and would send the examiner looking for
                 # a missing message rather than at the real reason it cannot be honoured.
@@ -557,10 +598,11 @@ def resolve(indexes, selection, *, unresolved="refuse"):
                            "this run. Re-tick it in this run's reports")
                 result.unresolved.append({"kind": kind, "id": ticked_id, "why": why})
                 continue
-            result.seeds[kind].add(row_id)
-            result.how[(kind, row_id)] = how
-            if row_id != ticked_id:
-                result.moved.append({"kind": kind, "was": ticked_id, "now": row_id, "how": how})
+            for row_id in row_ids:
+                result.seeds[kind].add(row_id)
+                result.how[(kind, row_id)] = how
+                if row_id != ticked_id:
+                    result.moved.append({"kind": kind, "was": ticked_id, "now": row_id, "how": how})
 
     if result.moved:
         logger.warning(f"{len(result.moved)} selected row(s) were found under a different id than "

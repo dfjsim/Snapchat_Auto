@@ -193,10 +193,11 @@ class SelectionBuilder:
         CDN-downloaded media, ``sha256(<the token in the CDN URL>)[:32]``). It exists for a tool that
         never read ``scdb-27`` and so has no snap id at all: pass what you have and the run matches the
         Memory on it. **A cache key names a file, and one file can belong to several Memories** — a
-        grouped media object is exactly that — so when it does not identify a single Memory the run
-        reports it rather than choosing one. **Pass every key you can derive**, not one: most Memories
-        carry at least one key that names only them, and sending a single shared key can refuse where
-        sending all of them would have resolved.
+        grouped media object is exactly that — and it never picks one of several: when the rows it names
+        are all one group the run includes the whole group and says so, and when they are not it reports
+        the doubt rather than choosing. **Pass every key you can derive**, not one: most Memories carry
+        at least one key that names only them, so sending all of them names the exact row where a single
+        shared key gets its whole group.
 
         ``media_id`` / ``entry_id`` are not a substitute for the snap id and having neither costs little
         — ``ZMEDIAID`` is shared by a group's members by design and ``ZENTRYID`` can cover several

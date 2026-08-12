@@ -3562,8 +3562,12 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
         for token in _cache_tokens(m):
             sel.keys[("cachekeys", str(token).lower())].add(row_id)
     groups, _snap_to_key = assign_groups(all_memories)
-    for _group_key, members in groups:
+    for group_key, members in groups:
         for m in members:
+            # Which group a row is in, for resolution: a cache key or a ZMEDIAID names a media object
+            # that a group's members share by design, and a key naming every member of ONE group has
+            # identified the rows that file belongs to rather than left the choice open.
+            sel.groups[f"mem-{m['snap_id']}"] = group_key
             for other in members:
                 if m is not other:
                     sel.link(partial_report.EDGE_MEMORY_GROUP, f"mem-{m['snap_id']}", "mem",

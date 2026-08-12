@@ -975,13 +975,16 @@ def _relations_dialog(state):
             rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
                                      key=f"rel_{relation.key}")])
             rows.append([_hint("      " + relation.basis, width=100)])
-    rows.append([sg.Checkbox("Keep following these until nothing new is added (transitive)",
-                             default=state["transitive"], key="transitive",
-                             pad=((0, 0), (12, 0)))])
-    rows.append([_hint('      Off by default, and worth leaving off: with everything on, one message '
-                       'reaches its cache entry, then that entry\'s Memory, then that Memory\'s other '
-                       'entries, then their messages — which is most of a case. One hop from each '
-                       'ticked row is predictable and explainable.', width=100)])
+    # The last two are not relations — they set the scope of the whole extract — so they sit under
+    # their own heading rather than reading as one more hop from a selected row.
+    rows.append([sg.Text("The extract as a whole", font=("", 10, "bold"), pad=((0, 0), (14, 0)))])
+    rows.append([sg.Checkbox("Keep following the relations above until nothing new is added "
+                             "(transitive)", default=state["transitive"], key="transitive")])
+    rows.append([_hint('      Only the relations ticked above are followed — but even the recommended '
+                       'set forms a loop: a message reaches its cache entry, that entry\'s Memory, '
+                       'that Memory\'s other entries, then their messages, and on. So this grows with '
+                       'the case rather than with the selection, and one hop from each ticked row is '
+                       'what stays predictable and explainable.', width=100)])
     rows.append([sg.Checkbox("Include the two legacy reports whole (Communications, Local Memories)",
                              default=state["legacy_reports"], key="legacy_reports")])
     rows.append([_hint('      Neither has row selection, so they are all-or-nothing. Left out by '
