@@ -147,6 +147,43 @@ def test_the_media_filter_disables_a_state_no_memory_is_in():
     assert 'value="none" disabled' in opts
 
 
+# ------------------------------------------------------------------ Memories: geolocation
+
+def test_geolocation_has_three_states_because_two_would_hide_a_finding():
+    """"No coordinates recovered" is not "the app recorded no location". The first is usually a
+    missing keychain — something still to be had from the device — and folding it into "no location"
+    would report the tool's own gap as a fact about the evidence."""
+    state = memories_report._geo_state
+
+    assert state({"latitude": 45.5, "longitude": -73.5, "has_location": True}) == "yes"
+    assert state({"latitude": None, "longitude": None, "has_location": True}) == "ondevice"
+    assert state({"latitude": None, "longitude": None, "has_location": False}) == "no"
+
+
+def test_the_cell_and_the_filter_read_the_same_state():
+    """Written twice, they would eventually disagree — and a row would then be filtered out of a set
+    it plainly belongs to, or into one it does not."""
+    for m, expected in ((({"latitude": 45.5, "longitude": -73.5, "has_location": True}), "45.50000"),
+                        (({"latitude": None, "longitude": None, "has_location": True}), "on-device"),
+                        (({"latitude": None, "longitude": None, "has_location": False}), "—")):
+        cell = memories_report._geo_compact(m)
+        assert expected in cell
+        assert memories_report._geo_state(m) in ("yes", "ondevice", "no")
+
+
+def test_the_geolocation_filter_states_its_counts_and_disables_what_is_not_there():
+    """On a device processed without a keychain, "coordinates recovered — 0" is the answer to why
+    nothing came back; an enabled option that cannot return a row reads as a broken control."""
+    opts = report_ui.counted_options((("yes", "coordinates recovered"),
+                                      ("ondevice", "on the device, none recovered"),
+                                      ("no", "no location")),
+                                     {"ondevice": 71, "no": 16})
+
+    assert 'value="yes" disabled' in opts and "coordinates recovered &mdash; 0" in opts
+    assert 'value="ondevice">' in opts and "none recovered &mdash; 71" in opts
+    assert 'value="no">' in opts and "no location &mdash; 16" in opts
+
+
 def test_counted_options_is_the_shared_rule_not_a_memories_quirk():
     """Thumbnail and My Eyes Only had the same problem — a control that could return nothing."""
     opts = report_ui.counted_options((("y", "only My Eyes Only"), ("n", "exclude")), {"n": 82})

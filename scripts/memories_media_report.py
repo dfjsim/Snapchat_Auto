@@ -1936,6 +1936,21 @@ def _info(text):
             f"<span class='tip'>{html.escape(text)}</span></span>")
 
 
+_GEO_FILTER_HINT = (
+    "Whether this Memory has a location, and whether coordinates were actually recovered for it — "
+    "three states, not two, because «no coordinates» and «no location» are different findings.\n\n"
+    "• «coordinates recovered» — a latitude/longitude came out of the gallery database's "
+    "snap_location_table. This is the one to filter on to place a Memory, or to work through "
+    "everything that can be mapped.\n\n"
+    "• «on the device, none recovered» — ZGALLERYSNAP.ZHASLOCATION says the app recorded a location "
+    "for this Memory, but no coordinates were read for it. That is usually a missing keychain, since "
+    "the geolocation lives in the encrypted gallery database — so it is worth knowing the location is "
+    "on the device and still to be had.\n\n"
+    "• «no location» — the app recorded none. Nothing is missing here.\n\n"
+    "A carved Memory has no ZGALLERYSNAP row at all, so it can only read «no location»: what that row "
+    "would have said went with the row, rather than never having been on the device.")
+
+
 _MEDIA_STATE_HINT = (
     "What was recovered for this Memory, and how much of it — one state per Memory, counted in "
     "each option so you can see what a filter will return before choosing it.\n\n"
@@ -2922,18 +2937,31 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
 
 # --------------------------------------------------------------------------- index page
 
+def _geo_state(m):
+    """Which of three geolocation states a Memory is in: ``yes`` / ``ondevice`` / ``no``.
+
+    The index cell and the Geolocation filter both read it, so they cannot disagree about what a
+    Memory has — and the three are kept apart because "no coordinates were recovered" and "the app
+    recorded no location" are different findings. See :data:`_GEO_FILTER_HINT`.
+    """
+    if m.get("latitude") is not None:
+        return "yes"
+    return "ondevice" if m.get("has_location") else "no"
+
+
 def _geo_compact(m):
     """Short geolocation cell for the index: coords + OpenStreetMap and Google Maps links.
 
     (A tile-server link can be added here later when an offline tile server is configured.)
     """
-    if m["latitude"] is not None:
+    state = _geo_state(m)
+    if state == "yes":
         lat, lon = m["latitude"], m["longitude"]
         return (f'{lat:.5f}, {lon:.5f}<br>'
                 f'<a href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}" '
                 f'target="_blank">OSM</a> &middot; '
                 f'<a href="https://www.google.com/maps?q={lat},{lon}" target="_blank">Google</a>')
-    if m["has_location"]:
+    if state == "ondevice":
         return '<span class="muted">on-device</span>'
     return '<span class="muted">—</span>'
 
@@ -3244,6 +3272,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 chunk_of.get(anchor),
                 {"user": str(uid), "img": "y" if has_img else "n",
                  "meo": "y" if is_meo else "n", "part": _media_state(own, n_part),
+                 # the same function the geolocation cell uses, so the filter and the cell cannot
+                 # disagree about what this Memory has
+                 "geo": _geo_state(m),
                  "wal": ("carved" if carved else
                          "gone" if gone else ("changed" if changed else "")),
                  # Every timestamp this Memory has, as the wall clock the report displays (see
@@ -3264,7 +3295,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     # list and the fold's lead id, which are not states and have nothing to count.
     counts = {}
     for row in rows:
-        for key in ("img", "meo", "part"):
+        for key in ("img", "meo", "part", "geo"):
             value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
     part_opts = _media_filter_options(counts.get("part", {}))
@@ -3272,6 +3303,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                          counts.get("img", {}))
     meo_opts = report_ui.counted_options((("y", "only My Eyes Only"), ("n", "exclude My Eyes Only")),
                                          counts.get("meo", {}))
+    geo_opts = report_ui.counted_options((("yes", "coordinates recovered"),
+                                          ("ondevice", "on the device, none recovered"),
+                                          ("no", "no location")),
+                                         counts.get("geo", {}))
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -3375,6 +3410,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<label>Recovered media{report_ui.info_icon(_MEDIA_STATE_HINT)} '
            f'<select id="part" onchange="flt()"><option value="">any</option>'
            f'{part_opts}</select></label>'
+           f'<label>Geolocation{report_ui.info_icon(_GEO_FILTER_HINT)} '
+           f'<select id="geo" onchange="flt()"><option value="">any</option>'
+           f'{geo_opts}</select></label>'
            f'<label title="Memories recovered by reading scdb-27 without its write-ahead log — '
            f'rows the app itself no longer lists, or that it rewrote after the last checkpoint">'
            f'-wal <select id="wal" onchange="flt()"><option value="">any</option>'
@@ -3430,9 +3468,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
-           'pa=document.getElementById("part").value,wa=document.getElementById("wal").value;'
+           'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
+           'ge=document.getElementById("geo").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&scTimeHit(scTimeWin("t"),m.ts)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
            'selectedOnly:scSelOnly,'
            'selCount:scSelCount,'
@@ -3445,7 +3484,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'reset:function(){document.getElementById("q").value="";'
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
-           'document.getElementById("wal").value="";scTimeReset("t");'
+           'document.getElementById("wal").value="";document.getElementById("geo").value="";'
+           'scTimeReset("t");'
            # The fold hides rows, so "show me everything again" has to include unfolding — and it is
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
            # reset() when its target is not in the view).
