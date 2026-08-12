@@ -201,7 +201,20 @@ id shaped like a snap id that no row carries would read as "this Memory is missi
 **A cache key names a file, and one file can belong to several Memories** — a grouped media object is
 exactly that, and it is why the Memories report folds a group into one row. So this alternate is tried
 **last**, and when it does not identify a single Memory the run refuses and names it rather than picking
-one. Pass `media_id` / `entry_id` as well whenever you have them; either is more specific.
+one.
+
+**`media_id` and `entry_id` are not a way round that, so not having them costs little.** Of the three
+`scdb-27` identifiers only `ZSNAPID` is unique to one Memory row. `ZMEDIAID` names the media *object*
+that a group's members share by design — resolving on it is what once made every grouped Memory report
+as ambiguous — and `ZENTRYID` names an album entry, which can cover more than one snap. Both are
+recorded because they are free once you have read the database, not because they discriminate. A tool
+that cannot read `scdb-27` lacks all three equally, and `cache_keys` is its answer.
+
+**Send every cache key you can derive, not one.** Verified across four devices: a cache key names more
+than one Memory in a small minority of cases, but the large majority of Memories carry at least one key
+that names only them — so a selection sending every key it has resolves where one sending a single key
+may refuse. A Memory whose *every* key is shared with a grouped sibling cannot be named this way at all;
+the run names it and refuses, and it has to be ticked in the reports instead.
 
 Gate on it rather than assuming: `describe()["kinds"]["mem"]["alternates"]` lists `cache_keys` on a
 build that supports it.

@@ -51,8 +51,11 @@ IDENTIFIERS = {
            "note": "The permanent user id when known. A contact with none is anchored on its "
                    "username, then on a conversation id, so those travel too."},
     "mem": {"primary": ("snap_id",), "alternates": ("media_id", "entry_id", "cache_keys"),
-            "note": "ZGALLERYSNAP.ZSNAPID. ZMEDIAID identifies the media object several snap rows can "
-                    "share; ZENTRYID the album entry. cache_keys is a list of cache_controller.db "
+            "note": "ZGALLERYSNAP.ZSNAPID — the only one of the three that is unique to one Memory "
+                    "row. ZMEDIAID names the media object a group's members share by design and "
+                    "ZENTRYID an album entry that can cover several snaps, so neither is a substitute "
+                    "for the snap id; they travel because they are free once you have read scdb-27. "
+                    "cache_keys is a list of cache_controller.db "
                     "CACHE_KEY values the media was recovered from (for CDN media, "
                     "sha256(<CDN URL token>)[:32]) and is the only identifier available to a tool "
                     "that never read scdb-27 — snap_id may be omitted when it is given, and the row "
@@ -191,7 +194,13 @@ class SelectionBuilder:
         never read ``scdb-27`` and so has no snap id at all: pass what you have and the run matches the
         Memory on it. **A cache key names a file, and one file can belong to several Memories** — a
         grouped media object is exactly that — so when it does not identify a single Memory the run
-        reports it rather than choosing one.
+        reports it rather than choosing one. **Pass every key you can derive**, not one: most Memories
+        carry at least one key that names only them, and sending a single shared key can refuse where
+        sending all of them would have resolved.
+
+        ``media_id`` / ``entry_id`` are not a substitute for the snap id and having neither costs little
+        — ``ZMEDIAID`` is shared by a group's members by design and ``ZENTRYID`` can cover several
+        snaps, so both hit the same non-discriminating case a cache key does.
 
         With no ``snap_id`` the row id is a placeholder built from the first cache key, which no row of
         a report will carry. That is deliberate: the run then resolves the row through the key and
