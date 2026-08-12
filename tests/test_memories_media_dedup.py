@@ -236,6 +236,77 @@ def test_a_video_only_one_memory_holds_still_gets_its_own_poster(tmp_path, monke
     assert posters == {"SNAP-1": ["SNAP-1_poster.jpg"], "SNAP-2": ["SNAP-2_poster.jpg"]}
 
 
+def _identical_poster_run(recorded):
+    """Stand in for the extraction subprocess, writing the SAME frame for every video.
+
+    Two different videos yielding byte-identical frames is ordinary — two cached copies of one video
+    where only one is truncated will do it, and so will any two videos that open on the same picture.
+    The other fixture here gives each source its own bytes, which is what let this case through.
+    """
+    def run_jobs(jobs, *args, **kwargs):
+        recorded.extend(jobs)
+        for _src, dst, _complete in jobs:
+            with open(dst, "wb") as fh:
+                fh.write(PNG)
+        return {src: True for src, _dst, _complete in jobs}, []
+    return run_jobs
+
+
+def test_two_videos_with_the_same_frame_do_not_cost_a_third_memory_its_poster(tmp_path, monkeypatch):
+    """The report went missing entirely over this. The frames de-duplicate, so the second one's file is
+    removed — and a further Memory sharing that video then read a file that had just been deleted,
+    which raised out of the whole report. The frame is published once per VIDEO now, before any Memory
+    is handed one, because the worker's output only exists until `_save_media` has seen it.
+    """
+    jobs = []
+    monkeypatch.setattr(memories_report.poster_worker, "run_jobs", _identical_poster_run(jobs))
+    app, scdir = _app(tmp_path)
+    (scdir / CACHE_KEY).write_bytes(MP4)
+    (scdir / OTHER_KEY).write_bytes(MP4[:-8] + b"f" * 8)      # a different video, same frame
+    outdir = str(tmp_path / "out")
+    mems = {"SNAP-1": _memory("SNAP-1"),
+            "SNAP-2": _memory("SNAP-2", url=OTHER_URL),
+            "SNAP-3": _memory("SNAP-3", url=OTHER_URL)}          # shares SNAP-2's video
+
+    memories_report.collect_media(mems, app, outdir)             # used to raise FileNotFoundError
+
+    posters = {sid: [f["out"] for f in m["media_files"] if f.get("generated")]
+               for sid, m in mems.items()}
+    assert all(posters.values()), f"a Memory lost its poster: {posters}"
+    assert len({name for names in posters.values() for name in names}) == 1, "one frame, one file"
+    assert "SNAP-2_poster.jpg" not in os.listdir(outdir), "the de-duplicated copy is still removed"
+
+
+def test_an_unreadable_frame_costs_a_thumbnail_and_nothing_else(tmp_path, monkeypatch):
+    """A poster is a derived artifact, not device data. Reporting one Memory without a generated still
+    is a small loss; losing the report is not."""
+    def run_jobs(jobs, *args, **kwargs):
+        return {src: True for src, _dst, _complete in jobs}, []   # claims success, writes nothing
+    monkeypatch.setattr(memories_report.poster_worker, "run_jobs", run_jobs)
+    app, scdir = _app(tmp_path)
+    (scdir / CACHE_KEY).write_bytes(MP4)
+    mems = {"SNAP-1": _memory("SNAP-1")}
+
+    memories_report.collect_media(mems, app, str(tmp_path / "out"))
+
+    assert [f["out"] for f in mems["SNAP-1"]["media_files"]], "the video itself is still published"
+    assert not [f for f in mems["SNAP-1"]["media_files"] if f.get("generated")]
+
+
+def test_the_whole_poster_stage_cannot_cost_the_report(tmp_path, monkeypatch):
+    """Belt as well as braces: whatever goes wrong in there, the media that was recovered is reported."""
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("the decoder went away")
+    monkeypatch.setattr(memories_report, "_add_posters", boom)
+    app, scdir = _app(tmp_path)
+    (scdir / CACHE_KEY).write_bytes(MP4)
+    mems = {"SNAP-1": _memory("SNAP-1")}
+
+    memories_report.collect_media(mems, app, str(tmp_path / "out"))
+
+    assert [f["role"] for f in mems["SNAP-1"]["media_files"]] == ["full"]
+
+
 # --------------------------------------------------------------- what the page says about it
 
 def _with_file(snap_id, media_id="MEDIA-1", **file_over):
