@@ -1907,9 +1907,13 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             # is only what the device knew at extraction time, so a key built from it promises a
             # stable identifier and delivers a label. A message whose sender id was not recovered
             # gets no key here — no key at all is honest, a key that cannot be trusted is not.
-            if msg.get("created_unix") and msg.get("sender_uid"):
-                sel_msg.keys[("ts_sender", f'{conv["id"]}|{msg["created_unix"]}'
-                                           f'|{str(msg["sender_uid"]).lower()}')].add(msg_row)
+            # partial_report spells this key, for both sides: created_unix is a float, so a tool
+            # exporting the integer the format documents matched nothing while the two were spelled
+            # here and there separately.
+            ts_sender = partial_report.ts_sender_key(
+                conv["id"], msg.get("created_unix"), msg.get("sender_uid"))
+            if ts_sender:
+                sel_msg.keys[("ts_sender", ts_sender)].add(msg_row)
             sel_msg.contains(msg_row, conv_row)
             sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
             for att in msg.get("atts") or ():

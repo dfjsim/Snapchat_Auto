@@ -240,6 +240,35 @@ def test_validate_catches_a_bad_schema_an_unknown_kind_and_an_empty_selection():
     assert any("'selections' is missing" in p for p in api.validate({"schema": 2}))
 
 
+def test_a_message_time_is_recorded_as_whole_seconds():
+    """The reports' own value is a float and an integrator's is an int, and they have to name the same
+    instant. The run folds both, and the builder writes the plain form."""
+    builder = api.SelectionBuilder()
+    builder.add_message(CONV, "12.0", ts=1700000000.0, sender="u-0001")
+    keys = builder.to_payload()["selections"]["msg"][f"conv-{CONV}|msg-12.0"]
+
+    assert keys["ts"] == 1700000000
+
+
+def test_validate_names_a_timestamp_that_is_still_in_milliseconds():
+    """arroyo.db stores creation_timestamp in milliseconds, so this is the likely mistake -- and one
+    that would otherwise fail silently, a ts that matches nothing being indistinguishable from one that
+    was never sent."""
+    builder = api.SelectionBuilder()
+    builder.add_message(CONV, "12.0", ts=1700000000123, sender="u-0001")
+
+    problems = api.validate(builder.to_payload())
+
+    assert any("looks like milliseconds" in p for p in problems)
+    assert api.validate(api.SelectionBuilder().to_payload()) != []      # (and an empty one still fails)
+
+
+def test_validate_names_a_timestamp_that_is_not_a_number():
+    payload = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-12.0": {"ts": "yesterday"}}}}
+
+    assert any("not a number" in p for p in api.validate(payload))
+
+
 def test_validate_catches_a_malformed_key_record_and_a_wrong_prefix():
     payload = {"schema": 2, "selections": {"mem": {f"mem-{SNAP}": "not an object",
                                                    "oops-1": 1}}}
