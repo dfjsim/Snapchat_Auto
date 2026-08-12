@@ -257,8 +257,22 @@ A run that is handed such a file builds it with **containment only** — followi
 would add a second hop from every row that was already pulled in. The file also records
 `relations: "minimal"` itself for the same reason.
 
-**An external tool should set neither.** They describe what a Snapchat Auto run derived, and a selection
-that claims rows were added by relations that never ran would misdescribe itself.
+**An external tool should set neither, and cannot usefully.** They describe what a Snapchat Auto run
+derived from the evidence: which Memories share a `ZMEDIAID` or identical media bytes, which claim in
+`cache_controller.db` names a message, who the participants of a conversation are. None of that is in the
+selection — it comes from the index pass over the databases — so an expansion cannot be produced
+alongside a selection, only by a run that reads the evidence.
+
+Claiming it anyway would make the extract **smaller**, not larger: a run that believes the ticks are
+already a closure follows no relations at all, so the related items the selection was meant to be read
+with would never be included. Under-disclosure is as much a defect as over-disclosure, and it is the one
+that looks like nothing went wrong. So:
+
+* `validate()` reports an `expanded` block with no row carrying `why` as a problem;
+* a run **ignores** such a marker, says so in the log, and follows the relations as usual.
+
+What an external tool *should* do is set `relations` — see above. That records the policy its selection
+is meant to be read with, and the run then expands it correctly itself.
 
 ## How a row is found in the run that consumes the file
 

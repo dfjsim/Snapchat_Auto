@@ -92,11 +92,22 @@ def test_the_relation_spec_reaches_the_options(tmp_path):
     assert request.options["transitive"] and request.options["legacy_reports"]
 
 
+def _expanded_selection(tmp_path, **over):
+    """A selection that really is an expansion: the marker **and** a row recording that a relation put
+    it there. The marker alone is not evidence of anything — see `partial_report.is_expanded`."""
+    return _selection(tmp_path, expanded={"selected": 1, "added": 1},
+                      selections={"conv": {f"conv-{CONV}": {"conv": CONV}},
+                                  "mem": {"mem-SNAP-0002": {"why": "Included because mem "
+                                                                   "mem-SNAP-0001 was selected "
+                                                                   "(relation: mem_group)"}}},
+                      **over)
+
+
 def test_an_expanded_selection_is_built_with_containment_only(tmp_path):
     """Its ticks are already a closure, so following the relations again adds a second hop from every
     row that was pulled in — an extract bigger than the one the examiner reviewed. The file records
     `minimal` itself; this is the belt for a file whose `relations` did not survive a browser save."""
-    path, _ = _selection(tmp_path, expanded={"selected": 1, "added": 4})
+    path, _ = _expanded_selection(tmp_path)
     request, error = app._partial_request({"selection": path})
 
     assert error is None
@@ -106,11 +117,24 @@ def test_an_expanded_selection_is_built_with_containment_only(tmp_path):
 
 def test_an_explicit_policy_still_overrules_an_expanded_selection(tmp_path, caplog):
     """The examiner running the report keeps the last word — but is told what it means."""
-    path, _ = _selection(tmp_path, expanded={"selected": 1, "added": 4})
+    path, _ = _expanded_selection(tmp_path)
     request, error = app._partial_request({"selection": path, "relations": "recommended"})
 
     assert error is None and request.options["relations"]["mem_group"] is True
     assert "a second time" in caplog.text
+
+
+def test_a_marker_with_nothing_to_show_for_it_is_ignored_and_said_out_loud(tmp_path, caplog):
+    """An external tool must not claim an expansion (docs/selection_format.md). If one does, honouring
+    it would follow no relations at all and hand over LESS than was asked for — the failure that looks
+    like nothing went wrong. So it is ignored, and the run says so."""
+    path, _ = _selection(tmp_path, expanded={"selected": 1, "added": 4})   # no row carries `why`
+    request, error = app._partial_request({"selection": path})
+
+    assert error is None
+    assert request.options["relations"] == partial_report.default_options()["relations"]
+    assert request.options["relations_from"] == "the built-in defaults"
+    assert "no row in it records having been added" in caplog.text
 
 
 def test_writing_the_expansion_out_builds_nothing(tmp_path):

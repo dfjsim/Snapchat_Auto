@@ -296,6 +296,23 @@ def validate(payload):
         problems.append(f"schema {schema} is outside what this build reads "
                         f"({SCHEMA_MIN}-{SCHEMA_MAX})")
 
+    # `expanded` says "these ticks are already a closure a Snapchat Auto run derived", and a run that
+    # believes it follows no relations at all. Claiming it without a single row recording that a
+    # relation added it therefore produces an extract SMALLER than intended, silently. An external
+    # tool has no closure to describe, so it should not set the field at all.
+    expanded = payload.get("expanded")
+    if expanded is not None:
+        rows = (payload.get("selections") or {})
+        why = any(isinstance(keys, dict) and keys.get("why")
+                  for kind_rows in rows.values() for keys in (kind_rows or {}).values())
+        if not isinstance(expanded, dict):
+            problems.append("'expanded' should be an object, or absent")
+        elif not why:
+            problems.append("'expanded' says this selection is already a closure, but no row records "
+                            "being added by a relation ('why'). A run would then follow no relations "
+                            "and the extract would hold less than intended. Only Snapchat Auto's own "
+                            "--expand-selection sets this field; leave it out")
+
     selections = payload.get("selections")
     if not isinstance(selections, dict):
         problems.append("'selections' is missing or is not an object")
