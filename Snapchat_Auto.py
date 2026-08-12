@@ -541,6 +541,13 @@ def _partial_request(values):
     # second hop from every row that was pulled in, so the extract would be bigger than the one the
     # examiner reviewed. The file records its own policy as `minimal`, which the branch above picks up —
     # this is the belt for the case where that field did not survive a round trip through the browser.
+    if payload.get(partial_report.EXPANDED_KEY) and not partial_report.is_expanded(payload):
+        # The marker without a single row recording that a relation added it. Honouring it would follow
+        # no relations at all and quietly hand over less than was asked for, so it is ignored -- said
+        # out loud, because a file should not be carrying it (docs/selection_format.md).
+        logger.warning(f"{os.path.basename(path)} says it is an expanded selection, but no row in it "
+                       f"records having been added by a relation. Treating it as an ordinary "
+                       f"selection: the relations below are followed as usual.")
     if partial_report.is_expanded(payload):
         if not values.get("relations"):
             spec, source = partial_report.EXPANDED_RELATIONS, "the selection being already an expansion"

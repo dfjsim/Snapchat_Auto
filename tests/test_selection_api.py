@@ -269,6 +269,26 @@ def test_validate_names_a_timestamp_that_is_not_a_number():
     assert any("not a number" in p for p in api.validate(payload))
 
 
+def test_validate_refuses_a_claimed_expansion_with_nothing_to_show_for_it():
+    """The one field an external tool must not set: a run that believes it follows no relations, so the
+    extract would hold less than intended rather than more. Under-disclosure looks like nothing wrong."""
+    payload = {"schema": 2, "expanded": {"selected": 1, "added": 9},
+               "selections": {"mem": {f"mem-{SNAP}": {"snap": SNAP}}}}
+
+    problems = api.validate(payload)
+
+    assert any("no row records being added by a relation" in p for p in problems)
+
+
+def test_validate_accepts_a_real_expansion():
+    """The one Snapchat Auto's own --expand-selection writes: every added row says so."""
+    payload = {"schema": 2, "expanded": {"selected": 1, "added": 1}, "relations": "minimal",
+               "selections": {"mem": {f"mem-{SNAP}": {"snap": SNAP},
+                                      "mem-OTHER": {"why": "Included because … (relation: mem_group)"}}}}
+
+    assert api.validate(payload) == []
+
+
 def test_validate_catches_a_malformed_key_record_and_a_wrong_prefix():
     payload = {"schema": 2, "selections": {"mem": {f"mem-{SNAP}": "not an object",
                                                    "oops-1": 1}}}

@@ -1524,8 +1524,25 @@ def relation_spec(relations, transitive=False):
 
 
 def is_expanded(payload):
-    """True when *payload* was produced by :func:`expanded_selection` — its ticks are already a closure."""
-    return isinstance((payload or {}).get(EXPANDED_KEY), dict)
+    """True when *payload* really is a closure this tool expanded — so the relations must not run again.
+
+    The marker alone is not enough. It is checked together with the evidence for it: at least one row
+    recording, in its own key record, that a relation put it there. A file carrying the marker and no
+    such row has not been expanded by anything, and honouring the marker would build it with
+    containment only — an extract **smaller** than the examiner asked for, silently, because the
+    related items they wanted would never be followed. Under-disclosure is as much a defect as
+    over-disclosure, and this is the one that looks like nothing went wrong.
+
+    docs/selection_format.md tells an external tool not to set the marker for exactly this reason;
+    this is what makes ignoring it safe when one does.
+    """
+    if not isinstance((payload or {}).get(EXPANDED_KEY), dict):
+        return False
+    for rows in ((payload.get("selections") or {}).values()):
+        for keys in (rows or {}).values():
+            if isinstance(keys, dict) and keys.get("why"):
+                return True
+    return False
 
 
 def load_selection(path):
