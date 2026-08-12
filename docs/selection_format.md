@@ -200,8 +200,14 @@ id shaped like a snap id that no row carries would read as "this Memory is missi
 
 **A cache key names a file, and one file can belong to several Memories** — a grouped media object is
 exactly that, and it is why the Memories report folds a group into one row. So this alternate is tried
-**last**, and when it does not identify a single Memory the run refuses and names it rather than picking
-one.
+**last**, and it never picks one of several rows.
+
+When the rows it names are **all one group**, that is not a doubt to refuse over: a group *is* the snap
+rows that share one media object, so the key has identified which rows that file belongs to. All of them
+are included, and the provenance says so — *"a cache key its media was recovered from …, which 2
+Memories of one group share — all 2 included"*. It applies only as a last resort: if the selection also
+carries an identifier that names a single row, that one wins, because a selection carrying both meant
+the specific one. Rows that are **not** one group are still a genuine doubt, and the run refuses.
 
 **`media_id` and `entry_id` are not a way round that, so not having them costs little.** Of the three
 `scdb-27` identifiers only `ZSNAPID` is unique to one Memory row. `ZMEDIAID` names the media *object*
@@ -212,9 +218,8 @@ that cannot read `scdb-27` lacks all three equally, and `cache_keys` is its answ
 
 **Send every cache key you can derive, not one.** Verified across four devices: a cache key names more
 than one Memory in a small minority of cases, but the large majority of Memories carry at least one key
-that names only them — so a selection sending every key it has resolves where one sending a single key
-may refuse. A Memory whose *every* key is shared with a grouped sibling cannot be named this way at all;
-the run names it and refuses, and it has to be ticked in the reports instead.
+that names only them — so a selection sending every key it has names the exact row where one sending a
+single shared key gets that row's whole group.
 
 Gate on it rather than assuming: `describe()["kinds"]["mem"]["alternates"]` lists `cache_keys` on a
 build that supports it.

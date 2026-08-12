@@ -55,12 +55,19 @@ def build_indexes():
     conv.link(pr.EDGE_CONV_PARTICIPANT, f"conv-{CONV_A}", "ct", "ct-u-alice")
     conv.link(pr.EDGE_CONV_PARTICIPANT, f"conv-{CONV_A}", "ct", "ct-u-bob")
     conv.link(pr.EDGE_CONV_PARTICIPANT, f"conv-{CONV_B}", "ct", "ct-u-bob")
+    # who sent each message, as the Conversations index records it: the sender's own Contacts row,
+    # taken from the anchor that report emits rather than derived a second time
+    for n in (1, 2):
+        msg.link(pr.EDGE_MESSAGE_SENDER, f"conv-{CONV_A}|msg-{n}.0", "ct", "ct-u-alice")
+        msg.link(pr.EDGE_MESSAGE_SENDER, f"conv-{CONV_B}|msg-{n}.0", "ct", "ct-u-bob")
 
     mem = Index("mem")
     mem.add("mem-SNAP-0001", snap="SNAP-0001", mediaid="MEDIA-1")
     mem.add("mem-SNAP-0002", snap="SNAP-0002", mediaid="MEDIA-1")
-    # grouped: same media under two snap rows, sharing one detail page
+    # grouped: same media under two snap rows, sharing one detail page. `groups` is what the Memories
+    # index records so resolution can tell "these rows are one group" from "these rows are a doubt".
     mem.link(pr.EDGE_MEMORY_GROUP, "mem-SNAP-0001", "mem", "mem-SNAP-0002")
+    mem.groups["mem-SNAP-0001"] = mem.groups["mem-SNAP-0002"] = "group-1"
 
     cc = Index("cc")
     cc.add(f"ck-{KEY_1}", key=KEY_1)
@@ -177,15 +184,38 @@ def test_with_every_relation_off_a_message_pulls_in_only_its_conversation():
 
 
 def test_conv_messages_brings_a_whole_conversation_and_only_that_one():
-    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]))
+    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]),
+                          relations={**pr.PRESETS["recommended"], "conv_messages": True})
     assert closure.included["msg"] == {f"conv-{CONV_A}|msg-1.0", f"conv-{CONV_A}|msg-2.0"}
     assert closure.included["conv"] == {f"conv-{CONV_A}"}
 
 
-def test_conv_messages_off_leaves_the_messages_out():
-    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]),
-                          relations={**pr.PRESETS["recommended"], "conv_messages": False})
+def test_conv_messages_is_off_by_default_so_a_conversation_discloses_no_message():
+    """A conversation can hold thousands of messages, and ticking it asks for the conversation. The
+    messages are a click away in the same report, which is the finer instrument."""
+    assert pr.PRESETS["recommended"]["conv_messages"] is False
+
+    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]))
+
     assert not closure.included["msg"]
+    assert closure.included["conv"] == {f"conv-{CONV_A}"}
+
+
+def test_msg_sender_brings_the_contact_record_of_whoever_sent_it():
+    """On by default, and it is what `conv_messages` being off makes important: a message with no
+    sender row shows a name the extract cannot say anything about."""
+    assert pr.PRESETS["recommended"]["msg_sender"] is True
+
+    closure = closure_for(selection(msg=[f"conv-{CONV_A}|msg-1.0"]))
+
+    assert closure.included["ct"] == {"ct-u-alice"}
+    assert "msg_sender" in closure.reasons[("ct", "ct-u-alice")][0]
+
+
+def test_msg_sender_off_leaves_the_sender_out():
+    closure = closure_for(selection(msg=[f"conv-{CONV_A}|msg-1.0"]),
+                          relations={**pr.PRESETS["recommended"], "msg_sender": False})
+    assert not closure.included["ct"]
 
 
 def test_participants_brings_the_contacts_of_an_included_conversation():
@@ -274,7 +304,8 @@ def test_every_row_says_whether_it_was_ticked_or_pulled_in():
 
 
 def test_the_counts_are_selected_pulled_in_and_the_extractions_own_total():
-    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]))
+    closure = closure_for(selection(conv=[f"conv-{CONV_A}"]),
+                          relations={**pr.PRESETS["recommended"], "conv_messages": True})
     counts = closure.counts()
     assert counts["conv"] == {"selected": 1, "pulled_in": 0, "total": 2}
     assert counts["msg"] == {"selected": 0, "pulled_in": 2, "total": 4}
@@ -431,15 +462,63 @@ def test_a_non_discriminating_alternate_is_skipped_for_one_that_names_a_single_r
 
 
 def test_an_id_with_only_non_discriminating_alternates_is_named_ambiguous_with_what_was_tried():
+    """What the refusal *reports*: a dead end has to be able to say what it tried, or the examiner
+    cannot tell a wrong extraction from a moved id."""
     indexes = build_indexes()
-    sel = selection(mem=[("mem-SNAP-GONE", {"mediaid": "MEDIA-1"})])
+    indexes["cm"].add(f"cm-{SHA_2}", sha=SHA_2, raw="raw-aaa")     # same raw bytes as cm-SHA_1
+    sel = selection(cm=[(f"cm-{'9' * 64}", {"raw": ["raw-aaa"]})])
     with pytest.raises(pr.AmbiguousSelection, match="ambiguous"):
         pr.resolve(indexes, sel)
 
     res = pr.Resolution()
-    row_id, _how, weak = pr._resolve_one(indexes["mem"], "mem", "mem-SNAP-GONE",
-                                         {"mediaid": "MEDIA-1"})
-    assert row_id is None
-    assert weak and weak[0]["matches"] == ["mem-SNAP-0001", "mem-SNAP-0002"]
-    assert "mediaid" in weak[0]["by"]
+    row_ids, _how, weak = pr._resolve_one(indexes["cm"], "cm", f"cm-{'9' * 64}",
+                                          {"raw": ["raw-aaa"]})
+    assert row_ids == []
+    assert weak and weak[0]["matches"] == [f"cm-{SHA_1}", f"cm-{SHA_2}"]
+    assert "raw" in weak[0]["by"].lower()
     assert res.ok                              # a fresh Resolution is unaffected by the probe
+
+
+# ------------------------------------------------- several rows of one group are the group
+
+def test_a_cache_key_naming_a_whole_group_resolves_to_all_of_it():
+    """A cache key names a media *file*, and a group is by definition the snap rows that share one
+    media object — so a key naming every member of one group has identified the rows that file belongs
+    to. Refusing there stopped the entire build over a row the key had actually found, and it is the
+    case an external tool cannot avoid: with no snap id a cache key is its only `mem` identifier.
+    """
+    indexes = build_indexes()
+    for row in ("mem-SNAP-0001", "mem-SNAP-0002"):
+        indexes["mem"].keys[("cachekeys", KEY_1)].add(row)
+    sel = selection(mem=[(f"mem-by-cachekey-{KEY_1}", {"cachekeys": [KEY_1]})])
+
+    res = pr.resolve(indexes, sel)
+
+    assert res.seeds["mem"] == {"mem-SNAP-0001", "mem-SNAP-0002"}
+    assert res.ok and not res.ambiguous
+    how = res.how[("mem", "mem-SNAP-0001")]
+    assert "2 Memories of one group share" in how and "all 2 included" in how
+    # and both are reported as found under a different id than the selection recorded
+    assert {m["now"] for m in res.moved} == {"mem-SNAP-0001", "mem-SNAP-0002"}
+
+
+def test_rows_that_are_not_one_group_still_refuse():
+    """The rule is "these rows are one group", not "several is fine". Two Memories in different groups
+    sharing a key is a genuine doubt about which was meant."""
+    indexes = build_indexes()
+    indexes["mem"].add("mem-SNAP-0003", snap="SNAP-0003")
+    indexes["mem"].groups["mem-SNAP-0003"] = "group-2"
+    for row in ("mem-SNAP-0001", "mem-SNAP-0003"):
+        indexes["mem"].keys[("cachekeys", KEY_2)].add(row)
+    sel = selection(mem=[(f"mem-by-cachekey-{KEY_2}", {"cachekeys": [KEY_2]})])
+
+    with pytest.raises(pr.AmbiguousSelection, match="ambiguous"):
+        pr.resolve(indexes, sel)
+
+
+def test_a_row_with_no_group_recorded_is_never_treated_as_one():
+    """`groups` is empty for every index but Memories, so an absent group must not read as a shared
+    one — that would turn every non-discriminating alternate into a silent multi-row match."""
+    indexes = build_indexes()
+    assert pr._one_group(indexes["cm"], [f"cm-{SHA_1}", f"cm-{SHA_2}"]) is False
+    assert pr._one_group(indexes["mem"], ["mem-SNAP-0001", "mem-SNAP-0002"]) is True

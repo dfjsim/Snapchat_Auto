@@ -1916,6 +1916,13 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
                 sel_msg.keys[("ts_sender", ts_sender)].add(msg_row)
             sel_msg.contains(msg_row, conv_row)
             sel_conv.link(partial_report.EDGE_CONV_MESSAGE, conv_row, "msg", msg_row)
+            # Who sent it, as a Contacts row (the `msg_sender` relation). Taken from contact_links,
+            # which carries the anchor the Contacts report itself emits, so this cannot derive a
+            # different id for the same person. Keyed on the permanent user id: a message whose sender
+            # id was not recovered links to no contact rather than to one matched on a display name.
+            sender_ct = (contact_links.get(str(msg.get("sender_uid") or "").lower()) or {}).get("anchor")
+            if sender_ct:
+                sel_msg.link(partial_report.EDGE_MESSAGE_SENDER, msg_row, "ct", sender_ct)
             for att in msg.get("atts") or ():
                 if att and att.get("cache_key"):
                     sel_msg.link(partial_report.EDGE_MESSAGE_CACHE, msg_row, "cc",

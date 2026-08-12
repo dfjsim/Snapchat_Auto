@@ -114,6 +114,32 @@ Two need care:
   not found with that explanation. Refusing to name a message is a bad outcome; naming the wrong one is
   worse.
 
+  That triple is spelled by **one** function, `partial_report.ts_sender_key`, called by the index that
+  registers it and the lookup that resolves it. The two have disagreed twice — once over the case of the
+  sender, once over `created_unix` being a float where an external tool sends the integer the format
+  documents — and each time the result was a key that matched nothing, which is indistinguishable from a
+  key that was never sent. A key spelled in two places is a key that will differ again.
+
+### Several rows of one group are the group, not a doubt
+
+An alternate that names several rows normally means the run refuses, because picking one would hand over
+a row the examiner did not tick. There is one exception, and it is a statement rather than a guess: when
+**every** row a key names belongs to one **group**, the key has identified which rows that media file
+belongs to — a group *is* the snap rows that share one media object. All of them become seeds, and each
+carries the reason *"…, which 2 Memories of one group share — all 2 included"*.
+
+It is a **last resort**: `_resolve_one` tries every alternate for a single-row match first, so a
+selection carrying both a group-wide identifier and a row-specific one resolves on the specific one.
+Rows that are not one group still refuse.
+
+This matters for one caller in particular. A tool that never read `scdb-27` has no snap id, so a cache
+key is its only `mem` identifier — and `ZMEDIAID` would not have rescued it, being shared by a group's
+members by design (which is what made every grouped Memory resolve as ambiguous before `0568f39`).
+Refusing there stopped the whole build over a row the key had actually found. With `mem_group` on — the
+default — the closure would have pulled the siblings in anyway, so in the usual case this changes the
+record rather than the output. `Index.groups`, filled in by the Memories index from `assign_groups`, is
+what tells the two cases apart.
+
 ---
 
 ## Source fingerprints and the version gate
@@ -414,6 +440,28 @@ both belong to one case and carrying a case reference onto the next one is a rea
 The GUI converts its dialog into the CLI's own `--relations` spec and parses it back with the same
 code (`partial_report.parse_relations` / `parse_policy`). That round trip is a test: two front ends that
 can drift are two different tools.
+
+### What `recommended` follows, and two defaults worth explaining
+
+`Relation.default` in `partial_report.RELATIONS` is the single source of the `recommended` preset, so the
+CLI, the GUI dialog and `describe()` cannot disagree about it. Two are set the way they are on purpose:
+
+* **`conv_messages` is off.** A conversation can hold thousands of messages, and ticking the conversation
+  asks for the conversation — its detail page, its participants, its activity — not for every message in
+  it to be disclosed. Messages are individually tickable in the same report, which is the finer
+  instrument, so the default is the narrower reading of the click.
+* **`msg_sender` is on**, and it is what makes the above safe: a message whose sender has no Contacts row
+  in the extract shows a display name the reader can learn nothing else about. It is keyed on the
+  sender's permanent user id and takes the anchor from `contact_link_index`, the same row every other
+  report links that person by — a message whose sender id was not recovered links to no contact rather
+  than to one matched on a name.
+
+`transitive` follows **only the relations that are switched on** — the enabled list is computed once and
+each pass reuses it. That does not make it a safe default, because the recommended set already contains a
+cycle: a message reaches its cache entry (`msg_cache`), that entry's Memory (`cache_memory`), that
+Memory's other entries (`mem_cache`), and their messages (`cache_message`), and round again. So it grows
+with the size of the connected component in the evidence rather than with the selection, which is why one
+hop is the default and the dialog says so.
 
 ### Where the relation policy comes from
 
