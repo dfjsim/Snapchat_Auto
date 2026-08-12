@@ -1444,6 +1444,84 @@ def _pack_completeness(payload, declared):
     return True, ""
 
 
+def _add_posters(memories, outdir, published):
+    """A generated still for every video Memory with no cached one. Never evidence.
+
+    Split out so :func:`collect_media` can call it inside a guard, and so the read-once rule
+    below has one owner: the worker's output survives only until ``_save_media`` has seen it.
+    """
+    # for video memories with a recovered .mp4 but no still, derive a poster frame from the video
+    t0 = time.monotonic()
+    todo = []
+    for sid, m in memories.items():
+        if _best_still(m["media_files"]):
+            continue
+        # A complete video makes the better poster (we can seek into it), so prefer one; among
+        # equals the largest file has the most of the media in it.
+        vids = sorted((f for f in m["media_files"] if f["ext"] in VIDEO_EXTS),
+                      key=lambda f: (f.get("complete") is False, -f["bytes"]))
+        if vids:
+            todo.append((sid, m, vids[0]))
+    # One poster per distinct video, not per Memory: grouped Memories share one published video file,
+    # so decoding it once per Memory would spend the time twice to produce two identical stills. The
+    # first Memory that needs it names the poster, and every Memory sharing that video links to it.
+    # A video only counts as complete for the frame if it is complete for every Memory referencing it.
+    posters = {}                                           # video path -> [poster name, complete]
+    for sid, m, vid in todo:
+        src = os.path.join(outdir, vid["out"])
+        shared = posters.setdefault(src, [f"{sid}_poster.jpg", True])
+        shared[1] = shared[1] and vid.get("complete") is not False
+    logger.info(f"Media: extracting poster frames from {len(posters)} video(s) with no cached still"
+                + (f" ({len(todo)} memories — some share a video)" if len(todo) != len(posters) else ""))
+    # Run in a killable subprocess, one video at a time. A video that cannot be decoded does not
+    # fail — it blocks the decoder for good — and these are decrypted from a cache, so some of them
+    # are truncated. See scripts/data/poster_worker.py.
+    jobs = [(src, os.path.join(outdir, name), complete)
+            for src, (name, complete) in posters.items() if has_video_track(src)]
+    done_by_src, stderr_chunks = poster_worker.run_jobs(jobs)
+    made = 0
+    # Publish each frame ONCE, per video, before any Memory is given one. The worker's output only
+    # exists until _save_media has seen it: two different videos can yield byte-identical frames (two
+    # cached copies of one video, one of them truncated, is the ordinary case), and the second is then
+    # de-duplicated away — the file removed, the entry pointing at the first. A second Memory sharing
+    # that video used to come round this loop and read a file that had just been deleted, which raised
+    # out of the whole report. Reading per video instead of per Memory is what makes that impossible.
+    frames = {}                                            # video path -> (published entry, bytes)
+    for src, (poster_name, _complete) in posters.items():
+        if not done_by_src.get(src):
+            continue
+        try:
+            with open(os.path.join(outdir, poster_name), "rb") as fh:
+                data = fh.read()
+        except OSError as error:                           # a frame we cannot read costs a thumbnail
+            logger.warning(f"Media: poster frame {poster_name} could not be read ({error}); the "
+                           f"Memory it was for is reported without one")
+            continue
+        frames[src] = (_save_media(outdir, poster_name, data, published), data)
+    for sid, m, vid in todo:
+        video_out = os.path.join(outdir, vid["out"])
+        if video_out not in frames:
+            continue
+        made += 1
+        base, data = frames[video_out]
+        # a copy per Memory: the file on disk is shared, the provenance never is
+        entry = dict(base)
+        partial = (" The video it came from is only partially cached, so the frame is from the "
+                   "part that is present." if vid.get("complete") is False else "")
+        entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
+                      "src": ["(generated from the decrypted video — not original device data)"]
+                             + vid["src"],
+                      "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": "",
+                      "complete": None, "why_incomplete": "",
+                      "how": ("Derived artifact: this Memory is a video with no cached still, so a "
+                              "poster frame was extracted from the decrypted .mp4. It is NOT "
+                              "original device data." + partial)})
+        m["media_files"].append(entry)
+    ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
+    logger.info(f"Media: posters done — {made} of {len(todo)} extracted "
+                f"in {time.monotonic() - t0:.0f}s")
+
+
 def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None):
     """Decrypt SCContent + caching-media for all memories; write files, fill m['media_files'].
 
@@ -1628,60 +1706,18 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
         if packs:
             packs[0]["role"] = "preview"
 
-    # for video memories with a recovered .mp4 but no still, derive a poster frame from the video
-    t0 = time.monotonic()
-    todo = []
-    for sid, m in memories.items():
-        if _best_still(m["media_files"]):
-            continue
-        # A complete video makes the better poster (we can seek into it), so prefer one; among
-        # equals the largest file has the most of the media in it.
-        vids = sorted((f for f in m["media_files"] if f["ext"] in VIDEO_EXTS),
-                      key=lambda f: (f.get("complete") is False, -f["bytes"]))
-        if vids:
-            todo.append((sid, m, vids[0]))
-    # One poster per distinct video, not per Memory: grouped Memories share one published video file,
-    # so decoding it once per Memory would spend the time twice to produce two identical stills. The
-    # first Memory that needs it names the poster, and every Memory sharing that video links to it.
-    # A video only counts as complete for the frame if it is complete for every Memory referencing it.
-    posters = {}                                           # video path -> [poster name, complete]
-    for sid, m, vid in todo:
-        src = os.path.join(outdir, vid["out"])
-        shared = posters.setdefault(src, [f"{sid}_poster.jpg", True])
-        shared[1] = shared[1] and vid.get("complete") is not False
-    logger.info(f"Media: extracting poster frames from {len(posters)} video(s) with no cached still"
-                + (f" ({len(todo)} memories — some share a video)" if len(todo) != len(posters) else ""))
-    # Run in a killable subprocess, one video at a time. A video that cannot be decoded does not
-    # fail — it blocks the decoder for good — and these are decrypted from a cache, so some of them
-    # are truncated. See scripts/data/poster_worker.py.
-    jobs = [(src, os.path.join(outdir, name), complete)
-            for src, (name, complete) in posters.items() if has_video_track(src)]
-    done_by_src, stderr_chunks = poster_worker.run_jobs(jobs)
-    made = 0
-    for sid, m, vid in todo:
-        video_out = os.path.join(outdir, vid["out"])
-        if not done_by_src.get(video_out):
-            continue
-        made += 1
-        poster_name = posters[video_out][0]
-        data = open(os.path.join(outdir, poster_name), "rb").read()
-        # Already written by the worker; this recomputes size/dim and, for a shared video, returns the
-        # one poster already published rather than a second copy of the same frame.
-        entry = _save_media(outdir, poster_name, data, published)
-        partial = (" The video it came from is only partially cached, so the frame is from the "
-                   "part that is present." if vid.get("complete") is False else "")
-        entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
-                      "src": ["(generated from the decrypted video — not original device data)"]
-                             + vid["src"],
-                      "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": "",
-                      "complete": None, "why_incomplete": "",
-                      "how": ("Derived artifact: this Memory is a video with no cached still, so a "
-                              "poster frame was extracted from the decrypted .mp4. It is NOT "
-                              "original device data." + partial)})
-        m["media_files"].append(entry)
-    ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
-    logger.info(f"Media: posters done — {made} of {len(todo)} extracted "
-                f"in {time.monotonic() - t0:.0f}s")
+    # for video memories with a recovered .mp4 but no still, derive a poster frame from the video.
+    # Guarded as a whole: a poster is a DERIVED artifact -- it is not device data, the report says so
+    # wherever one appears, and every Memory works without it. Letting a failure in it raise cost the
+    # examiner the entire Memories report (one unreadable frame, one logged line, no report), which is
+    # the wrong trade by a wide margin. Decryption and publishing are not guarded like this, because
+    # losing those silently WOULD change what the report says about the evidence.
+    try:
+        _add_posters(memories, outdir, published)
+    except Exception as error:                             # noqa: BLE001 - see above
+        logger.error(f"Media: poster-frame extraction failed ({error}); the Memories report is "
+                     f"complete apart from generated stills for videos with no cached one",
+                     exc_info=True)
 
     files = [f for m in memories.values() for f in m["media_files"]]
     partial = sum(1 for f in files if f.get("complete") is False)
