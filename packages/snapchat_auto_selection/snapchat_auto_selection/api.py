@@ -40,7 +40,8 @@ IDENTIFIERS = {
              "note": "arroyo.db client_conversation_id — a device-assigned UUID."},
     "msg": {"primary": ("conversation_id", "server_message_id"), "alternates": ("ts", "sender"),
             "note": "A server message id is a per-conversation ordinal, so it is only meaningful "
-                    "together with its conversation. ts is a unix timestamp. sender is the sender's "
+                    "together with its conversation. ts is unix SECONDS — arroyo.db stores "
+                    "creation_timestamp in milliseconds, so divide it. sender is the sender's "
                     "permanent user id (arroyo.db conversation_message.sender_id), matched "
                     "case-insensitively and the only accepted spelling — the displayed name is not a "
                     "key, being only what the device knew at extraction time. ts and sender matter "
@@ -153,8 +154,14 @@ class SelectionBuilder:
         return self._add("conv", anchor, {"conv": conversation_id, "server": server_id})
 
     def add_message(self, conversation_id, server_message_id, *, ts=None, sender=None):
-        """One message. ``ts`` (unix seconds) and ``sender`` let it be found again if the report's own
-        anchor for it moves, which happens to messages that carry no server id.
+        """One message. ``ts`` and ``sender`` let it be found again if the report's own anchor for it
+        moves, which happens to messages that carry no server id.
+
+        ``ts`` is unix **seconds**, and is recorded as whole seconds however it is given: the report's
+        own value is a float, so a selection carrying ``1700000000`` and one carrying
+        ``1700000000.0`` have to mean the same row. Note that ``arroyo.db`` stores
+        ``creation_timestamp`` in *milliseconds* — :func:`validate` names a ``ts`` that still looks
+        like one, because a timestamp that does not match is indistinguishable from one never sent.
 
         ``sender`` is the sender's **permanent user id** (``conversation_message.sender_id``), matched
         case-insensitively and the only accepted spelling. The report displays the sender's *name*
@@ -168,7 +175,7 @@ class SelectionBuilder:
         anchor = anchor_for("msg", conversation_id=conversation_id,
                             server_message_id=server_message_id)
         return self._add("msg", anchor, {"conv": conversation_id, "smid": server_message_id,
-                                         "ts": ts, "sender": sender})
+                                         "ts": _seconds(ts), "sender": sender})
 
     def add_contact(self, user_id=None, *, username=None, conversation_id=None):
         anchor = anchor_for("ct", user_id=user_id, username=username,
@@ -300,6 +307,8 @@ def validate(payload):
             if keys != 1 and not isinstance(keys, dict):
                 problems.append(f"'{row_id}' should map to an object of identifiers, or to 1 when "
                                 f"none were recorded — not {keys!r}")
+            if kind == "msg" and isinstance(keys, dict) and keys.get("ts") is not None:
+                problems += _ts_problems(row_id, keys["ts"])
             if kind == "msg" and "|msg-" not in row_id:
                 problems.append(f"'{row_id}' is not qualified with its conversation. A server message "
                                 f"id is a per-conversation ordinal, so a bare 'msg-<n>' names a "
@@ -311,6 +320,33 @@ def validate(payload):
 
 
 _PREFIX = {"conv": "conv-", "msg": "conv-", "ct": "ct-", "mem": "mem-", "cc": "ck-", "cm": "cm-"}
+
+#: Roughly 1973 in seconds, and below any plausible date in milliseconds -- so a `ts` at or above it
+#: is a millisecond value, which is what `arroyo.db` itself stores.
+_MILLIS_FLOOR = 100_000_000_000
+
+
+def _seconds(value):
+    """A ``ts`` as whole unix seconds. Anything unusable is left alone for :func:`validate` to name,
+    rather than being silently dropped here."""
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _ts_problems(row_id, ts):
+    try:
+        seconds = float(ts)
+    except (TypeError, ValueError):
+        return [f"'{row_id}' has a 'ts' that is not a number ({ts!r}) — it is unix seconds"]
+    if seconds >= _MILLIS_FLOOR:
+        return [f"'{row_id}' has a 'ts' of {ts}, which looks like milliseconds. arroyo.db stores "
+                f"creation_timestamp in milliseconds; divide by 1000. A ts that does not match is "
+                f"indistinguishable from one that was never sent, so this fails silently"]
+    return []
 
 
 def describe():

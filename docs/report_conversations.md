@@ -176,6 +176,13 @@ deliberately not a second spelling: a key that cannot be trusted is worse than n
 whose sender id was not recovered simply has no `ts_sender` key. Nothing needs the old spelling — a
 selection older than this change is re-ticked, which takes seconds.
 
+Both sides of that key are spelled by one function, `partial_report.ts_sender_key`, and the time in it
+is folded to **whole seconds**. `created_unix` comes from `datetime.timestamp()` and is a float, so the
+index registered `…|1700000000.0|…` while a tool sending the integer the format documents looked up
+`…|1700000000|…` — the third time this one key has been spelled two ways, after the display name and
+the case of the sender. A key written in two places is a key that will differ again, and each time it
+fails silently, a non-matching alternate being indistinguishable from an absent one.
+
 Confirmed on all four corpus devices that `sender_id` really is a user id (every message's is a UUID).
 No device in the corpus has a message *without* a server message id, so the fallback itself is held by
 `tests/test_message_sender_identity.py` rather than by the corpus. It is still worth having: the parser

@@ -172,6 +172,11 @@ promise a stable identifier and deliver a label. A message whose sender id was n
 Since the report *shows* the name, this is the one identifier you cannot read off a page — it comes
 from `arroyo.db`.
 
+**`ts` is unix seconds**, matched as whole seconds on both sides, so `1700000000` and `1700000000.0`
+name the same instant. Watch the unit: `arroyo.db` stores `creation_timestamp` in **milliseconds**, so
+divide it. `validate()` names a `ts` that still looks like a millisecond value, because a timestamp
+that does not match is indistinguishable from one that was never sent.
+
 This alternate exists for one case: a message with **no server message id yet** (one the app had not
 sent when the extraction was taken — the parser labels those *"Sending Message"*). Those are anchored
 on their **position** in the conversation, which recovering one more message shifts, so the
@@ -228,7 +233,7 @@ and that reaches the report's provenance and `partial_manifest.json`.
 
 | kind | order |
 |---|---|
-| `mem` | snap id → `ZMEDIAID` → `ZENTRYID` |
+| `mem` | snap id → `ZMEDIAID` → `ZENTRYID` → any `cache_keys` entry |
 | `cc` | cache key → SHA-256 of the stored bytes |
 | `conv` | client conversation id → server conversation id |
 | `msg` | conversation + server message id → conversation + timestamp + sender |

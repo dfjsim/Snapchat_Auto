@@ -388,6 +388,40 @@ class Resolution:
                 "ambiguous": self.ambiguous, "notes": self.notes}
 
 
+def ts_token(value):
+    """A timestamp as whole seconds, so one spelling of an instant matches another. ``""`` if unusable.
+
+    The report's own ``created_unix`` comes from ``datetime.timestamp()`` and is therefore a **float**,
+    so the index registered ``…|1700000000.0|…`` while a tool exporting the integer the format asks for
+    looked up ``…|1700000000|…``. That is a non-matching alternate, and a non-matching alternate is
+    indistinguishable from an absent one -- the same silent failure as the display-name key and the bare
+    server message id, by a third route.
+
+    Nothing is lost by rounding: ``getChats`` formats the arroyo millisecond timestamps through
+    SQLite's ``datetime(…,'unixepoch')``, so a message's time is already whole seconds. An alternate is
+    a way of finding a row again, not a statement of precision.
+    """
+    try:
+        return str(int(float(value)))
+    except (TypeError, ValueError):
+        return ""
+
+
+def ts_sender_key(conv_id, ts, sender):
+    """The ``ts_sender`` alternate's one spelling, or ``""`` when a part of it is missing.
+
+    Both the index that registers it and the lookup that resolves it call this, because the two have
+    now disagreed twice -- once over the case of the sender, once over the float. A key whose two sides
+    are spelled in two places is a key that will differ again, and it fails silently every time.
+    """
+    token = ts_token(ts)
+    if not (conv_id and token and sender):
+        return ""
+    # Case-folded: a sender arrives either as the permanent user id or, from a tool that read it off a
+    # page, in whatever case the page had -- and some tools print a UUID upper-case.
+    return f"{conv_id}|{token}|{str(sender).lower()}"
+
+
 def _lookups(kind, name, keys):
     """The ``((key name, value), how)`` pairs one alternate is looked up by. Usually one; ``raw`` many."""
     if name == "raw":
@@ -417,15 +451,9 @@ def _lookups(kind, name, keys):
             return [(("smid", f"{conv}|{smid}"), "its conversation and server message id")]
         return []
     if name == "ts_sender":
-        conv, ts, sender = keys.get("conv"), keys.get("ts"), keys.get("sender")
-        if conv and ts and sender:
-            # Case-folded, because the index stores it that way. A sender arrives either as the
-            # permanent user id or as the name the report displayed, and neither is under our control:
-            # "Alice Test" from a tool that read the name off a page, and an upper-case UUID from one
-            # that got the id from a tool that prints them that way, both used to match nothing at
-            # all — silently, since a non-matching alternate is indistinguishable from an absent one.
-            return [(("ts_sender", f"{conv}|{ts}|{str(sender).lower()}"),
-                     "its conversation, time and sender")]
+        key = ts_sender_key(keys.get("conv"), keys.get("ts"), keys.get("sender"))
+        if key:
+            return [(("ts_sender", key), "its conversation, time and sender")]
         return []
     value = keys.get(name)
     if not value:

@@ -72,13 +72,6 @@ def test_a_frame_from_an_older_build_has_no_id_and_still_parses(tmp_path):
 
 # --------------------------------------------------------------- both spellings resolve
 
-def _index(tmp_path, **over):
-    """The `msg` index the closure resolves against, built from one conversation."""
-    stage = cr.index(_frame(**over), str(tmp_path / "out"), str(tmp_path / "cache"),
-                     tz_label="UTC", run_id="RUN-1")
-    return stage.sel_msg if hasattr(stage, "sel_msg") else stage
-
-
 def test_the_time_and_sender_key_is_registered_under_the_user_id(tmp_path):
     """What an external tool sends, because the format spec says `sender` is a user id."""
     frame = _frame(**{cr.COL_SMID: ""})            # no server id: the positional-anchor case
@@ -87,7 +80,7 @@ def test_the_time_and_sender_key_is_registered_under_the_user_id(tmp_path):
 
     keys = _ts_sender_keys(CONV, msg)
 
-    assert f'{CONV}|{msg["created_unix"]}|{UID.lower()}' in keys
+    assert f'{CONV}|{int(msg["created_unix"])}|{UID.lower()}' in keys
 
 
 def test_the_display_name_is_not_a_key(tmp_path):
@@ -99,7 +92,7 @@ def test_the_display_name_is_not_a_key(tmp_path):
 
     keys = _ts_sender_keys(CONV, msg)
 
-    assert f'{CONV}|{msg["created_unix"]}|alice test' not in keys
+    assert f'{CONV}|{int(msg["created_unix"])}|alice test' not in keys
     assert len(keys) == 1
 
 
@@ -113,13 +106,18 @@ def test_a_sender_with_no_recovered_id_gets_no_key_at_all(tmp_path):
 
 
 def _ts_sender_keys(conv_id, msg):
-    """The `ts_sender` keys the index registers for one message, built the same way `index` does."""
+    """The `ts_sender` keys the index registers for one message.
+
+    The key is spelled by `partial_report.ts_sender_key`, which is also what the *lookup* uses -- never
+    rebuilt here. Rebuilding it in the test is what hid the float: both sides of the comparison were
+    written the same way, so they agreed with each other and with nothing an external tool sends.
+    """
     index = partial_report.Index("msg")
     row = f'conv-{conv_id}|{msg["anchor"]}'
     index.add(row, msg, smid="")
-    if msg.get("created_unix") and msg.get("sender_uid"):
-        index.keys[("ts_sender", f'{conv_id}|{msg["created_unix"]}'
-                                 f'|{str(msg["sender_uid"]).lower()}')].add(row)
+    key = partial_report.ts_sender_key(conv_id, msg.get("created_unix"), msg.get("sender_uid"))
+    if key:
+        index.keys[("ts_sender", key)].add(row)
     return {key for kind, key in index.keys if kind == "ts_sender"}
 
 
@@ -222,7 +220,8 @@ def test_a_selection_carrying_the_user_id_finds_the_message(tmp_path):
     index = partial_report.Index("msg")
     row = f'conv-{CONV}|{msg["anchor"]}'
     index.add(row, msg, smid="")
-    index.keys[("ts_sender", f'{CONV}|{msg["created_unix"]}|{UID.lower()}')].add(row)
+    index.keys[("ts_sender",
+                partial_report.ts_sender_key(CONV, msg["created_unix"], UID))].add(row)
 
     # Either case: the index case-folds what it stores, so the lookup has to fold too — some tools
     # print a UUID upper-case, and a capital silently matching nothing is the worst kind of failure.
@@ -231,6 +230,41 @@ def test_a_selection_carrying_the_user_id_finds_the_message(tmp_path):
             "conv": CONV, "ts": msg["created_unix"], "sender": sender}}}}
         resolution = partial_report.resolve({"msg": index}, selection)
         assert resolution.seeds["msg"] == {row}, sender
+
+
+def test_a_whole_second_and_a_float_are_the_same_instant(tmp_path):
+    """The report's own time is a float (datetime.timestamp()), and a tool exporting the integer the
+    format documents is doing exactly as it is told. Both have to reach the same row: this failed
+    silently, because a non-matching alternate looks exactly like one that was never sent."""
+    frame = _frame(**{cr.COL_SMID: ""})
+    by_conv, _ = cr.build_messages(frame, str(tmp_path / "c"), str(tmp_path / "m"), lambda ts: "")
+    msg = by_conv[CONV][0]
+    assert isinstance(msg["created_unix"], float), "the premise: the report's value is a float"
+
+    index = partial_report.Index("msg")
+    row = f'conv-{CONV}|{msg["anchor"]}'
+    index.add(row, msg, smid="")
+    index.keys[("ts_sender",
+                partial_report.ts_sender_key(CONV, msg["created_unix"], UID))].add(row)
+
+    for ts in (msg["created_unix"], int(msg["created_unix"]), str(int(msg["created_unix"]))):
+        selection = {"schema": 2, "selections": {"msg": {f"conv-{CONV}|msg-row99": {
+            "conv": CONV, "ts": ts, "sender": UID}}}}
+        assert partial_report.resolve({"msg": index}, selection).seeds["msg"] == {row}, ts
+
+
+def test_the_key_carries_no_fractional_second():
+    """Pinned on the spelling itself, so the float cannot come back through either side."""
+    assert partial_report.ts_sender_key(CONV, 1700000000.0, UID) == f"{CONV}|1700000000|{UID.lower()}"
+    assert partial_report.ts_sender_key(CONV, 1700000000, UID) == f"{CONV}|1700000000|{UID.lower()}"
+
+
+def test_a_key_with_a_missing_or_unusable_part_is_no_key():
+    """No key is honest; a key that cannot be trusted is not."""
+    assert partial_report.ts_sender_key(CONV, None, UID) == ""
+    assert partial_report.ts_sender_key(CONV, "Unknown", UID) == ""
+    assert partial_report.ts_sender_key(CONV, 1700000000, "") == ""
+    assert partial_report.ts_sender_key("", 1700000000, UID) == ""
 
 
 def test_the_sender_is_matched_case_insensitively():
