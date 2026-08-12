@@ -244,6 +244,22 @@ therefore gives the same file a different id, and can merge two rows into one or
 
 ---
 
+## Two fields a run may add, and an external tool should not
+
+Both are additive within schema 2, so a reader that does not know them ignores them safely.
+
+| field | where | meaning |
+|---|---|---|
+| `why` | inside a row's key record | this row is in the selection because a **relation** put it there, not because someone ticked it. The value is the sentence the report and `partial_manifest.json` both show. |
+| `expanded` | top level | this whole file is the output of `--expand-selection`: its ticks are already a closure. It records when, under which relation policy, and how many rows were ticked versus added. |
+
+A run that is handed such a file builds it with **containment only** — following the relations again
+would add a second hop from every row that was already pulled in. The file also records
+`relations: "minimal"` itself for the same reason.
+
+**An external tool should set neither.** They describe what a Snapchat Auto run derived, and a selection
+that claims rows were added by relations that never ran would misdescribe itself.
+
 ## How a row is found in the run that consumes the file
 
 Primary id first, then the recorded alternates in a fixed order. Every match records *how* it matched,

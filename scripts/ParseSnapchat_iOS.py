@@ -21,6 +21,7 @@ from scripts import DecryptLocalMemories_iOS
 from scripts import report_ui
 from scripts import source_fingerprint
 from scripts import partial_report
+from scripts import selection_file
 import math
 import logging
 import numpy as np
@@ -2328,8 +2329,22 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         logger.info("Partial report — what this extract would contain:")
         for line in partial_report.dry_run_text(partial.closure).splitlines():
             logger.info("  " + line)
+        if partial.expand_to:
+            # The closure as a selection file, to load into the full report and check row by row before
+            # anything is built. It is stamped with the FULL report's identity, since that is where it
+            # is meant to be loaded — see partial_report.expanded_selection.
+            full = partial.links_dir if os.path.isdir(partial.links_dir or "") else ""
+            expanded = partial_report.expanded_selection(
+                partial.closure, partial.selection,
+                run_id=report_ui.run_id(full) if full else "",
+                sources=source_fingerprint.compact(source_fingerprint.read_sources(full))
+                if full and source_fingerprint.read_sources(full) else None)
+            with open(partial.expand_to, "w", encoding="utf-8") as fh:
+                fh.write(selection_file.selection_json_text(expanded))
+            logger.info(f"Expanded selection written to {partial.expand_to} — load it in the full "
+                        f"report to check what the relations added, then build from what you save.")
         if partial.dry_run:
-            logger.info("--dry-run: nothing was written")
+            logger.info("--dry-run: no report was written")
             return
         legacy_memories_report()
         _render_partial(partial, report_dir, args, stages)

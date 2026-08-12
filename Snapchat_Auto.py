@@ -439,7 +439,14 @@ def print_usage():
           "                          and in the report's provenance.\n"
           "  --case-ref <text>       Case / exhibit reference, stamped on every page.\n"
           "  --dry-run yes           Resolve the selection, work out what the extract would hold,\n"
-          "                          print it, and write nothing.\n"
+          "                          print it row by row, and write nothing.\n"
+          "  --expand-selection <file>   Write what the extract would hold back out as a selection\n"
+          "                          file, and build nothing (implies --dry-run). Load it in the\n"
+          "                          full report to see the examiner's own ticks and what the\n"
+          "                          relations added, adjust, save, and build from that. It records\n"
+          "                          'minimal' as its own policy, since its ticks are already an\n"
+          "                          expansion and following the relations again would add a second\n"
+          "                          hop.\n"
           "  --unresolved refuse|drop    A ticked row this run has no match for. Default refuse:\n"
           "                          an extract quietly missing evidence is worse than one that\n"
           "                          will not build.\n"
@@ -490,7 +497,9 @@ _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz"
                 # a partial run: the same pipeline, rendering only the rows a selection names
                 "selection": True, "relations": True, "case-ref": True, "unresolved": True,
                 "sources-mismatch": True, "version-mismatch": True, "no-reuse": True,
-                "max-rows": True, "links-dir": True, "dry-run": True}
+                "max-rows": True, "links-dir": True, "dry-run": True,
+                # expand the selection and write it back out for checking, instead of building
+                "expand-selection": True}
 
 
 def _yes(value):
@@ -528,6 +537,17 @@ def _partial_request(values):
         spec, source = str(payload["relations"]), "the selection file"
     elif not spec:
         source = "the built-in defaults"
+    # An already-expanded selection: its ticks ARE a closure. Following the relations again would add a
+    # second hop from every row that was pulled in, so the extract would be bigger than the one the
+    # examiner reviewed. The file records its own policy as `minimal`, which the branch above picks up —
+    # this is the belt for the case where that field did not survive a round trip through the browser.
+    if partial_report.is_expanded(payload):
+        if not values.get("relations"):
+            spec, source = partial_report.EXPANDED_RELATIONS, "the selection being already an expansion"
+        else:
+            logger.warning(f"{os.path.basename(path)} is an expanded selection — its ticks already "
+                           f"include the related items. --relations {spec} will expand it a second "
+                           f"time, so the extract will hold more than was reviewed.")
     try:
         options["relations"] = partial_report.parse_relations(spec)
     except ValueError as error:
@@ -564,7 +584,10 @@ def _partial_request(values):
                           "exported": payload.get("exported") or "",
                           "schema": payload.get("schema"),
                           "tool_version": payload.get("tool_version") or "",
-                          "counts": counts},
+                          "counts": counts,
+                          # present only when the file is itself an expansion (see is_expanded):
+                          # the extract's provenance says so rather than calling every tick a choice
+                          "expanded": payload.get(partial_report.EXPANDED_KEY) or None},
             "case_ref": (values.get("case-ref") or "").strip(),
             "tool_version": get_version()}
     logger.info(f"Selection {os.path.basename(path)}: "
@@ -579,8 +602,12 @@ def _partial_request(values):
         if links_dir:
             logger.info(f"Cross-report links will be resolved against {links_dir} "
                         f"(the report folder this selection was saved from)")
+    # Writing the expansion out is not building a report, so it implies --dry-run: the file is there
+    # to be checked first, and a run that both wrote it and built from it would defeat the point.
+    expand_to = (values.get("expand-selection") or "").strip()
     return partial_report.Request(payload, options, prov, links_dir=links_dir,
-                                  dry_run=_yes(values.get("dry-run"))), None
+                                  dry_run=_yes(values.get("dry-run")) or bool(expand_to),
+                                  expand_to=expand_to), None
 
 
 def _parse_cli(args):
@@ -1104,6 +1131,12 @@ def main(args):
                'the rows it names plus the related items you choose, into its own '
                'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
                'for a normal, complete run.')],
+        [sg.Checkbox('Expand and check first — write the expanded selection, build nothing',
+                     key="expand_only")],
+        [_hint('Writes <selection>.expanded.json beside the selection file: every row the extract '
+               'would hold, with the ones the relations added marked. Load it in the full report '
+               '(Load…), see what came in and why, untick anything you do not want, save, and '
+               'build from that file. Nothing is built by this run.')],
         [sg.Text('', key="selection_note", font=("", 9), text_color="#eef3fa")],
         [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
         [sg.In("", key="case_ref")],
@@ -1219,6 +1252,10 @@ def main(args):
                       "relations": _relations_spec(relation_state),
                       "case-ref": values.get("case_ref", "").strip(),
                       "sources-mismatch": "proceed", "version-mismatch": "resolve"}
+        if values.get("expand_only"):
+            # Beside the selection it expands, because that is where the examiner will look for it.
+            base = os.path.splitext(values["selection"].strip())[0]
+            cli_values["expand-selection"] = base + ".expanded.json"
         partial, error = _partial_request(cli_values)
         if error:
             logger.error(error)

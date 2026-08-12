@@ -1465,6 +1465,7 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         'else{k.ts=r[3]["1"];if(m.uid)k.sender=m.uid;k.anchor=r[0];}return k;},'
         f'rowHeight:{MSG_ROW_H},estDetail:300,cols:"{MSG_COLS}",'
         f'detailBase:"data/{key}/detail-",'
+        + partial_report.pulled_config(closure, "msg", prefix=f'conv-{conv["id"]}|') +
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var d=document.getElementById("dir").value,'
         't=document.getElementById("type").value,a=document.getElementById("att").value,'
@@ -1719,6 +1720,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         'selKeys:function(r){var m=r[5]||{},k={conv:r[0].slice(5)};'
         'if(m.sid)k.server=m.sid;return k;},'
         f'rowHeight:{CONV_ROW_H},estDetail:200,cols:"{CONV_COLS}",detailBase:"data/detail-",'
+        + partial_report.pulled_config(closure, "conv") +
         'query:function(){return document.getElementById("q").value;},'
         'match:function(m,r){var k=document.getElementById("kind").value,'
         'g=document.getElementById("msg").value,a=document.getElementById("att").value,'
@@ -1728,16 +1730,15 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         # ever show more than either alone — the safe default for a filter, since a filter that
         # under-includes hides evidence. The other two are exact about which claim they are matching.
         '&&scTimeHit(scTimeWin("t"),scConvTimes(m))'
-        '&&(!document.getElementById("selonly").checked||SCSel.get("conv",SCV.selId(r[0])));},'
-        'selectedOnly:function(){return document.getElementById("selonly").checked;},'
-        'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
-        'scSelNote();},'
+        '&&scSelPass("conv",SCV.selId(r[0]));},'
+        'selectedOnly:scSelOnly,'
+        'selCount:scSelCount,'
         'count:function(n,t){document.getElementById("count").textContent='
         'n===t?(n+" conversations"):(n+" of "+t+" shown");},'
         'reset:function(){document.getElementById("q").value="";'
         'document.getElementById("kind").value="";document.getElementById("msg").value="";'
         'document.getElementById("att").value="";scFvReset("wal");scTimeReset("t");'
-        'document.getElementById("selonly").checked=false;}});'
+        'document.getElementById("selonly").value="";}});'
         'scSelNote();scConsumeHash();'
         '</script></body></html>')
 

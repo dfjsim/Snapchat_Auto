@@ -17,6 +17,8 @@ sections appear here as the feature is built.
   a full report is byte-identical to one built before any of this existed.
 * [What must not be left behind](#what-must-not-be-left-behind) — pruning media the filter orphaned.
 * [Memory groups rendered in part](#memory-groups-rendered-in-part) — stating a group's real size.
+* [Checking an expansion before anything is built](#checking-an-expansion-before-anything-is-built) —
+  the row listing, the closure written back out as a selection, and the marker in the tables.
 * [Running one](#running-one) — the CLI, the GUI, the exit codes, and where the mismatch questions
   get asked.
 * [The index pass](#the-index-pass-and-the-cross-report-manifests) — why every report is indexed
@@ -462,6 +464,38 @@ cycle: a message reaches its cache entry (`msg_cache`), that entry's Memory (`ca
 Memory's other entries (`mem_cache`), and their messages (`cache_message`), and round again. So it grows
 with the size of the connected component in the evidence rather than with the selection, which is why one
 hop is the default and the dialog says so.
+
+### Checking an expansion before anything is built
+
+The examiner ticks rows; the relations add more. Which is which is the first thing a reader of a
+disclosure bundle needs, and it used to be answerable only from a count in a header and a JSON file.
+Three things close that, and the workflow they make is in
+[guide_partial_reports.md](guide_partial_reports.md):
+
+* **`--dry-run yes`** lists every row it *would* add with the reason for each (capped, then pointing at
+  the manifest), instead of only tallying them per relation.
+* **`--expand-selection <file>`** writes the closure back out **as a selection file** and builds nothing
+  (it implies `--dry-run`). Loaded into the full report, it ticks every row the extract would hold; the
+  rows a relation added carry `why` in their key record, so the report can shade them, count them
+  separately and filter to them. The examiner unticks what should not go out and saves an ordinary
+  selection to build from. `partial_report.expanded_selection` writes it, and stamps it with the **full
+  report's** `run_id` and fingerprints rather than the expanding run's — it is the folder the file is
+  meant to be loaded into, and a mismatch on every install teaches an examiner to force past the check
+  that stops a selection landing on the wrong case.
+* **`partial_report.pulled_config`** marks the same rows in the extract's own tables (`.vr.pulled`, the
+  reason in the row's `title`), with the legend in the banner. `closure=None` emits nothing, so a full
+  report is untouched.
+
+**The trap, and why the file records its own policy.** An expanded selection's ticks *are* a closure.
+Building it under the relations again adds a second hop from every row that was pulled in, so the extract
+holds more than was reviewed — precisely what one hop exists to prevent. So the file records
+`relations: minimal`, which the precedence below picks up; and because that field can be lost if the file
+is round-tripped through something that does not carry it, `is_expanded()` is checked as well and the run
+falls back to containment only, naming that as where the policy came from. An explicit `--relations` still
+wins — with a warning that says what it will do.
+
+The provenance states which it was: a hand-ticked selection and a reviewed expansion are different
+provenances, and *"selected by the examiner"* claims more than it should for the second.
 
 ### Where the relation policy comes from
 
