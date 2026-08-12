@@ -119,7 +119,14 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a
   later run is looking at the same evidence and may reuse anything of it, and what an extract must state
   about itself: the banner, the "N of M" figures, the provenance block, `partial_manifest.json`, the
-  `xref` marking of links whose target is absent, and the media a partial run has to prune.
+  `xref` marking of links whose target is absent, and the media a partial run has to prune. Also the
+  review loop — `--dry-run` listing the rows it would add, `--expand-selection` writing the closure back
+  out as a selection file to check in the full report, the `.vr.pulled` marker, and why an already-expanded
+  selection is built with containment only.
+- [Partial reports — a short guide](docs/guide_partial_reports.md) — the **user-facing** walkthrough of
+  the whole workflow: full run, choose rows (in the reports or from another tool), expand and check,
+  review the expansion in the full report, build, and what the extract states about itself. Written for
+  an examiner, not for us; keep it that way.
 - Per-report internals and the cross-report linking scheme:
   [cross_report_linking.md](docs/cross_report_linking.md) (anchors + how every link is derived),
   [report_conversations.md](docs/report_conversations.md),

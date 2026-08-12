@@ -424,3 +424,31 @@ def test_the_keys_of_a_row_are_sorted_deduplicated_and_drop_the_empties():
                              "2026-01-03 00:00:00 UTC", "no date recorded")
 
     assert keys == sorted(keys) and len(keys) == 2
+
+# --------------------------------------------------------------------------- the pulled-in marker
+
+@needs_node
+def test_a_row_the_examiner_did_not_tick_is_marked_with_the_reason():
+    """In a partial report every row is included, so the only thing that distinguishes the examiner's
+    own choices is this marker. It carries the reason as a title, which is the same sentence
+    partial_manifest.json records."""
+    rows = [_row("mem-A"), _row("mem-B")]
+    out = _run(rows, "report({html:document.getElementById('vwin').innerHTML});", folded=False,
+               opts="pulled:{'mem-B':'Included because mem mem-A was selected'},")
+
+    html = out[0]["html"]
+    marked = [chunk for chunk in html.split('<div class="vr') if "mem-B" in chunk]
+    plain = [chunk for chunk in html.split('<div class="vr') if "mem-A" in chunk]
+    assert marked and "pulled" in marked[0]
+    assert "Included because mem mem-A was selected" in marked[0]
+    assert plain and "pulled" not in plain[0]
+
+
+@needs_node
+def test_the_marker_is_absent_from_a_full_report():
+    """No closure, no `pulled` config, nothing added to any row — which is what keeps the corpus
+    byte-diff meaningful as a drift detector."""
+    out = _run([_row("mem-A")], "report({html:document.getElementById('vwin').innerHTML});",
+               folded=False)
+
+    assert "pulled" not in out[0]["html"]

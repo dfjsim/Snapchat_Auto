@@ -275,6 +275,15 @@ PARTIAL_CSS = """
  .xout .xno{margin-left:5px;opacity:.8;font-weight:600}
  .psib{background:#eef0ff;border:1px solid #c4c8ee;color:#2d2d71;border-radius:4px;
    padding:1px 5px;font-size:11.5px;margin-left:6px}
+ /* A row that is in this extract because of another row, not because it was ticked. The examiner's
+    own choices are what a reader needs to be able to pick out, so the difference is on every row of
+    every table and not only in the counts; the banner says what the marker means, and the row's
+    title carries the reason (the same sentence partial_manifest.json records). */
+ .vr.pulled{background:#f7f8ff}
+ .vr.pulled>.vcells{box-shadow:inset 3px 0 0 #8f96d8}
+ .vr.pulled:hover{background:#eef0ff}
+ .pbanner .plegend{display:inline-block;width:11px;height:11px;background:#f7f8ff;
+   border:1px solid #8f96d8;border-left-width:3px;vertical-align:-1px;margin:0 3px}
  .prov{margin:0;background:#fff;border-bottom:1px solid #dcdce8;font-size:12.5px}
  .prov>summary{cursor:pointer;padding:8px 24px;font-weight:600;color:#2d2d71}
  .prov .provbody{padding:2px 24px 14px}
@@ -362,6 +371,12 @@ var SCSel=(function(){
  var SCHEMA=__SCHEMA__;
  var KEY='scauto-sel:'+(window.SCAUTO_RUN||'default');
  var data={},legacy={},subs=[],dirty=false,loadedStamp='',loadedSchema=SCHEMA;
+ /* Carried straight through a load -> save round trip, because both are load-bearing and neither can
+    be re-derived here. `relations` is the policy the file was built for -- a partial run takes it as
+    its default, so dropping it on save would build the extract under a policy nobody chose. `expanded`
+    says the ticks in this file are already a closure, which is what stops a build expanding them a
+    second time. */
+ var loadedRelations='',loadedExpanded=null;
  function bag(kind){if(!data[kind])data[kind]={};return data[kind];}
  function notify(){subs.forEach(function(f){try{f();}catch(e){}});}
  function stash(){                                  // same-tab safety net only (see above)
@@ -397,6 +412,8 @@ var SCSel=(function(){
   data=parts.data;legacy=parts.legacy;
   loadedSchema=(o&&o.schema)||1;
   loadedStamp=(o&&o.exported)||'';
+  loadedRelations=(o&&o.relations)||'';
+  loadedExpanded=(o&&o.expanded)||null;
   dirty=false;}
  // Reports/selection.js calls this before the page initialises; it is the durable state.
  function preload(o){apply(o);restash();notify();}
@@ -446,11 +463,21 @@ var SCSel=(function(){
   touched();}
  function isDirty(){return dirty;}
  function payload(){
-  return {tool:'Snapchat_Auto',schema:SCHEMA,
-          tool_version:(window.SCAUTO_VERSION||''),
-          run_id:(window.SCAUTO_RUN||'default'),
-          sources:(window.SCAUTO_SOURCES||null),
-          exported:new Date().toISOString(),selections:data};}
+  var o={tool:'Snapchat_Auto',schema:SCHEMA,
+         tool_version:(window.SCAUTO_VERSION||''),
+         run_id:(window.SCAUTO_RUN||'default'),
+         sources:(window.SCAUTO_SOURCES||null),
+         exported:new Date().toISOString(),selections:data};
+  if(loadedRelations)o.relations=loadedRelations;
+  if(loadedExpanded)o.expanded=loadedExpanded;
+  return o;}
+ /* How many of the ticked rows came from an expansion rather than from the examiner. A row pulled in
+    by a relation carries `why` in its key record, which is what an expanded selection writes. */
+ function pulled(kind,prefix){
+  var b=bag(kind),n=0;
+  ids(kind,prefix).forEach(function(id){var v=b[id];if(v&&v!==1&&v.why)n++;});
+  return n;}
+ function whyPulled(kind,id){var v=bag(kind)[id];return (v&&v!==1&&v.why)?v.why:'';}
  /* Two forms of the same payload. ".json" is the default because browsers flag a ".js" download as
     dangerous and may refuse it outright; ".js" is the drop-in the reports auto-load. A bare .json
     renamed to selection.js is a *silent* failure — JSON at statement position is a syntax error the
@@ -518,6 +545,7 @@ var SCSel=(function(){
   set(el.getAttribute('data-kind'),el.getAttribute('data-id'),el.checked,keys);});
  return {get:get,set:set,setMany:setMany,ids:ids,keys:keys,count:count,total:total,clear:clear,
          preload:preload,onChange:function(f){subs.push(f);},saveFile:saveFile,loadFile:loadFile,
+         pulled:pulled,whyPulled:whyPulled,
          dirty:isDirty,legacy:legacyIds,schema:schema};
 })();
 // Reflect the stored state onto every checkbox the virtual table does not draw itself — the ones on
@@ -598,6 +626,28 @@ function scSelLoad(input){
   if(total===null)return;                  // the examiner cancelled a cross-run load
   scSelNote();
   alert(total+' selection(s) loaded.');});}
+/* "12 selected", or "12 selected - 47 pulled in" when an expanded selection is loaded: a row a
+   relation added carries `why` in its key record, and telling the two apart is the whole point of
+   loading an expansion into the full report. One shared function rather than five copies of the same
+   line, so every report says it the same way. */
+/* The "show me" control: any row / only the ones selected / only the ones an expansion pulled in.
+   One implementation, called from every report's match() -- it was the same expression written five
+   times, and a tri-state written five times is four chances to disagree. */
+function scSelMode(){var e=document.getElementById('selonly');return e?(e.value||''):'';}
+function scSelOnly(){return scSelMode()!=='';}
+function scSelPass(kind,id){
+ var mode=scSelMode();
+ if(!mode)return true;
+ if(mode==='pull')return !!(SCSel.whyPulled&&SCSel.whyPulled(kind,id));
+ return SCSel.get(kind,id);}
+function scSelCountText(n){
+ var k=window.SCAUTO_SELKIND,p=window.SCAUTO_SELPREFIX||'',
+     e=(k&&SCSel.pulled)?SCSel.pulled(k,p):0;
+ return e?((n-e)+' selected · '+e+' pulled in'):(n+' selected');}
+function scSelCount(n){
+ var el=document.getElementById('selcount');
+ if(el)el.textContent=scSelCountText(n);
+ scSelNote();}
 function scSelNote(){
  var e=document.getElementById('selnote');
  if(e)e.textContent=SCSel.dirty()?'unsaved \\u2014 use "Save selections"':'';
@@ -820,8 +870,12 @@ def selection_toolbar(noun):
     """The selection controls both index reports put in their toolbar."""
     return (
         '<span class="selbar">'
-        '<label class="sellabel" title="Show only the rows you have selected">'
-        '<input type="checkbox" id="selonly" onchange="flt()">Selected only</label>'
+        '<label class="sellabel" title="Narrow the table to your own selections, or to the rows '
+        'an expanded selection brought in with them">Show '
+        '<select id="selonly" onchange="flt()">'
+        '<option value="">all rows</option>'
+        '<option value="sel">selected only</option>'
+        '<option value="pull">pulled in only</option></select></label>'
         '<span id="selcount">0 selected</span>'
         f'<button onclick="SCV.selectShown(true)" title="Select every {noun} matching the current '
         'filters (not only the ones on this page)">Select all shown</button>'
@@ -1299,8 +1353,18 @@ function rowHtml(i){
  var r=rows[i],id=r[0],op=!!exp[id],cells=r[1],s='';
  /* optional per-row class from the row's own filter metadata, e.g. marking outgoing messages */
  var extra=C.rowClass?(' '+C.rowClass(r[5]||{},r)):'';
+ /* Why this row is here rather than being one the examiner ticked. Two sources, one appearance:
+    in a PARTIAL report the closure says so (C.pulled, keyed by the STORE id since a message's page
+    anchor is page-local); in a FULL report an expanded selection says so, through the `why` its key
+    record carries. Same class either way, so a reader learns one marker. */
+ var why=(C.pulled?C.pulled[selId(id)]:null)||
+   (C.selKind&&SCSel.whyPulled?SCSel.whyPulled(C.selKind,selId(id)):'');
+ if(why){extra+=' pulled';
+  /* C.pulled arrives attribute-escaped from Python; a reason read out of a loaded selection file has
+     not been through anything, and it lands in an attribute. */
+  if(why.indexOf('"')>=0)why=why.replace(/"/g,'&quot;');}
  s='<div class="vr'+(op?' open':'')+(C.detailBase?' clickable':'')+extra+
-   (hlId===id?' schl':'')+'" id="'+id+'" data-i="'+i+'" style="height:'+
+   (hlId===id?' schl':'')+'"'+(why?' title="'+why+'"':'')+' id="'+id+'" data-i="'+i+'" style="height:'+
    (op?'auto':C.rowHeight+'px')+'"><div class="vcells" style="height:'+C.rowHeight+
    'px;grid-template-columns:'+(C.selKind?(C.selWidth||'30px')+' ':'')+C.cols+'">';
  if(C.selKind){

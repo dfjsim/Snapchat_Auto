@@ -286,8 +286,27 @@ once).
 
 ## Selecting rows — and where a `file://` report can keep them
 
-The examiner can tick memories and cache entries as relevant to the case, filter to
-**Selected only**, and select/unselect everything matching the current filters at once.
+The examiner can tick memories and cache entries as relevant to the case, narrow the table with the
+**Show** control (all rows / selected only / pulled in only), and select or unselect everything matching
+the current filters at once. That control is one shared function, `scSelPass(kind, id)`, called from
+every report's `match()`: the same expression written five times is four chances for one report to
+disagree with the others about what "selected only" means.
+
+### A row nobody ticked
+
+Two situations put a row in front of the examiner that they did not choose, and both use one marker —
+`.vr.pulled`, a tint and a bar down the left, with the reason in the row's `title`:
+
+* a **partial report**, where every row is included and the only thing distinguishing the examiner's own
+  choices is this marker. The reasons come from the closure through
+  `partial_report.pulled_config(closure, kind, prefix)`, keyed by the **store** id because a message's
+  page anchor is page-local. With `closure=None` it emits nothing, so a full report is unchanged.
+* a **full report with an expanded selection loaded** (`--expand-selection`), where a row a relation
+  added carries `why` in its key record. `SCSel.whyPulled` reads it, `SCSel.pulled` counts them, and the
+  toolbar says *"12 selected · 47 pulled in"*.
+
+Reasons from Python are attribute-escaped before they are emitted; a reason read out of a loaded file is
+escaped in the browser, because it lands in an attribute and nothing else has vetted it.
 
 Keeping those ticks is the hard part, because a report opened from `file://` has almost nothing to
 store state in. Measured in Chrome (and this is the behaviour the design assumes):

@@ -1742,6 +1742,7 @@ SCV.init({{
  selKeys:function(r){{var m=r[5]||{{}},k={{sha:r[0].slice(3),rel:r[3]['2']}};
   if(m.raw&&m.raw.length)k.raw=m.raw;return k;}},
  rowHeight:{CM_ROW_H},estDetail:320,cols:'{CM_COLS}',detailBase:'data/detail-',
+ {partial_report.pulled_config(closure, 'cm')}
  query:function(){{return document.getElementById('q').value;}},
  match:function(m,r){{
   var cat=document.getElementById('cat').value,loc=document.getElementById('loc').value,
@@ -1749,9 +1750,9 @@ SCV.init({{
       assets=document.getElementById('assets').checked;
   return (!cat||m.cat===cat)&&(!loc||m.loc===loc)&&(!rec||m.rec===rec)&&(!lk||m.link===lk)
        &&(assets||m.cat!=={json.dumps(CAT_ASSET)})
-       &&(!document.getElementById('selonly').checked||SCSel.get('cm',SCV.selId(r[0])));}},
- selectedOnly:function(){{return document.getElementById('selonly').checked;}},
- selCount:function(n){{document.getElementById('selcount').textContent=n+' selected';scSelNote();}},
+       &&scSelPass('cm',SCV.selId(r[0]));}},
+ selectedOnly:scSelOnly,
+ selCount:scSelCount,
  count:function(n,t){{document.getElementById('count').textContent=
    n===t?(n+' files'):(n+' of '+t+' shown');}},
  reset:function(){{
@@ -1763,7 +1764,7 @@ SCV.init({{
      left every link to an app-asset row — an icon or a lens resource the cache_controller report
      matched — landing on nothing at all. */
   document.getElementById('assets').checked=true;
-  document.getElementById('selonly').checked=false;}}
+  document.getElementById('selonly').value='';}}
 }});
 scSelNote();
 scConsumeHash();

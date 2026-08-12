@@ -381,6 +381,11 @@ class Resolution:
         self.moved = []               # ids that matched on an alternate rather than themselves
         self.unresolved = []          # ids nothing in this run matches
         self.ambiguous = []           # ids that matched several rows
+        # (kind, resolved id) -> why, for a ticked row that arrived carrying one. An expanded selection
+        # ticks every row the extract would hold, so after the examiner reviews one, "ticked" no longer
+        # means "chosen" -- and which rows they chose is the thing a reader of the extract needs. The
+        # reason travels in the row's own key record (`why`), so it survives the round trip.
+        self.carried_why = {}
         self.notes = []
 
     @property
@@ -601,6 +606,8 @@ def resolve(indexes, selection, *, unresolved="refuse"):
             for row_id in row_ids:
                 result.seeds[kind].add(row_id)
                 result.how[(kind, row_id)] = how
+                if isinstance(keys, dict) and keys.get("why"):
+                    result.carried_why[(kind, row_id)] = str(keys["why"])
                 if row_id != ticked_id:
                     result.moved.append({"kind": kind, "was": ticked_id, "now": row_id, "how": how})
 
@@ -664,11 +671,27 @@ class Closure:
     def is_seed(self, kind, row_id):
         return row_id in self.seeds.get(kind, ())
 
+    def chosen(self, kind, row_id):
+        """Whether the **examiner** picked this row, as opposed to something bringing it in.
+
+        Not the same question as :meth:`is_seed`. A selection that is itself an expansion ticks every
+        row the extract would hold, so every row is a seed — but the rows a relation had added carry
+        `why`, and calling those "selected by the examiner" would claim more than happened. One
+        predicate, so the marker, the figures and the badge cannot disagree about it.
+        """
+        return (self.is_seed(kind, row_id)
+                and (kind, row_id) not in self.resolution.carried_why)
+
     def counts(self):
-        return {kind: {"selected": len(self.seeds.get(kind, ())),
-                       "pulled_in": len(self.included.get(kind, ())) - len(self.seeds.get(kind, ())),
-                       "total": self.totals.get(kind, 0)}
-                for kind in KINDS if self.included.get(kind) or self.totals.get(kind)}
+        out = {}
+        for kind in KINDS:
+            if not (self.included.get(kind) or self.totals.get(kind)):
+                continue
+            rows = self.included.get(kind, ())
+            picked = sum(1 for row_id in rows if self.chosen(kind, row_id))
+            out[kind] = {"selected": picked, "pulled_in": len(rows) - picked,
+                         "total": self.totals.get(kind, 0)}
+        return out
 
     def total(self):
         return sum(len(ids) for ids in self.included.values())
@@ -751,7 +774,10 @@ def expand(indexes, resolution, options=None):
     for kind, ids in resolution.seeds.items():
         for row_id in ids:
             how = resolution.how.get((kind, row_id), "its own id")
-            closure.reasons[(kind, row_id)].append(f"Selected by the examiner (matched {how})")
+            carried = resolution.carried_why.get((kind, row_id))
+            closure.reasons[(kind, row_id)].append(
+                f"{carried} - and kept when the expanded selection was reviewed" if carried
+                else f"Selected by the examiner (matched {how})")
 
     ends = _edge_map(indexes)
     # kept on the closure: a renderer whose link addresses a *set* of rows needs to know which rows
@@ -878,7 +904,7 @@ def sibling_badge(closure, kind, row_id):
     A grouped Memory is the case this exists for — a sibling shares its detail page with a selected
     one, so without a badge it is indistinguishable from something the examiner chose.
     """
-    if closure is None or closure.is_seed(kind, row_id) or not closure.has(kind, row_id):
+    if closure is None or closure.chosen(kind, row_id) or not closure.has(kind, row_id):
         return ""
     reasons = closure.reasons.get((kind, row_id)) or ()
     if not reasons:
@@ -904,6 +930,15 @@ def banner_html(closure, prov=None):
              'listed in <span class="mono">partial_manifest.json</span>.']
     if prov.get("case_ref"):
         parts.append(f'Case / exhibit reference: <b>{_esc(prov["case_ref"])}</b>')
+    pulled = sum(1 for kind in closure.included for row_id in closure.included[kind]
+                 if not closure.chosen(kind, row_id))
+    if pulled:
+        # Which rows the examiner chose is the first thing a reader of a disclosure bundle needs, and a
+        # count in the header does not answer it row by row.
+        parts.append(f'Rows shown like <span class="plegend"></span> this were <b>not</b> selected: '
+                     f'{pulled} of the {closure.total()} rows here came in because a row that was '
+                     f'selected needs them or names them. Hover one to see which, or read '
+                     f'<span class="mono">partial_manifest.json</span> for all of them.')
 
     problems = []
     for key, what in (("version", "the tool version that produced this extract differs from the one "
@@ -925,6 +960,28 @@ def banner_html(closure, prov=None):
         parts.append('<ul class="pmis"><li>' + "</li><li>".join(problems) + "</li></ul>")
     return ('<div class="pbanner">' + head
             + "".join(f"<div>{p}</div>" for p in parts) + "</div>")
+
+
+def pulled_config(closure, kind, prefix=""):
+    """The ``pulled:{store id: reason}`` fragment for a table's ``SCV.init``, or ``""`` in a full run.
+
+    Emitted here rather than per report so every table marks a pulled-in row the same way, and so a
+    full run provably adds nothing. ``prefix`` scopes it to one page's rows — a conversation page would
+    otherwise carry every conversation's messages.
+
+    The reason is attribute-escaped here, because it lands in the row's ``title``: the JS interpolates
+    it as it stands, which is the only way it can stay one shared line of code.
+    """
+    if closure is None:
+        return ""
+    out = {}
+    for row_id in sorted(closure.included.get(kind, ())):
+        if closure.chosen(kind, row_id) or (prefix and not row_id.startswith(prefix)):
+            continue
+        reasons = closure.reasons.get((kind, row_id)) or ()
+        if reasons:
+            out[row_id] = html.escape(reasons[0], quote=True)
+    return f"pulled:{json.dumps(out, sort_keys=True)}," if out else ""
 
 
 def page_chrome(closure, kind, prov=None):
@@ -994,6 +1051,18 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
              ("Selection saved", f'{_esc(sel.get("exported") or "not recorded")} '
                                  f'(schema {_esc(sel.get("schema") or "?")}, '
                                  f'{_esc(sel.get("tool_version") or "version not recorded")})')]
+    # A selection that is itself an expansion: its ticks include rows a relation added, which the
+    # examiner then had the chance to review and remove. That is a different provenance from a
+    # hand-ticked selection and the report has to say which it was, or "selected by the examiner"
+    # claims more than it should.
+    expanded = sel.get("expanded") or {}
+    if expanded:
+        rows.append(("Selection is an expansion",
+                     f'{expanded.get("selected", "?")} row(s) ticked in the reports plus '
+                     f'{expanded.get("added", "?")} added by the relations '
+                     f'<span class="mono">{_esc(expanded.get("relations") or "")}</span>, expanded '
+                     f'{_esc(expanded.get("when") or "")} and reviewed before this build. Rows kept '
+                     f'from an expansion are marked as such in the tables.'))
     reuse = prov.get("reuse") or {}
     if reuse:
         rows.append(("Reused from the full run",
@@ -1260,14 +1329,16 @@ class Request:
     ``dry_run``    resolve and expand, print what would be built, write nothing
     """
 
-    __slots__ = ("selection", "options", "prov", "links_dir", "dry_run", "closure")
+    __slots__ = ("selection", "options", "prov", "links_dir", "dry_run", "closure", "expand_to")
 
-    def __init__(self, selection, options=None, prov=None, links_dir="", dry_run=False):
+    def __init__(self, selection, options=None, prov=None, links_dir="", dry_run=False,
+                 expand_to=""):
         self.selection = selection or {}
         self.options = options or default_options()
         self.prov = prov or {}
         self.links_dir = links_dir
         self.dry_run = bool(dry_run)
+        self.expand_to = expand_to or ""            # write the closure back out as a selection file
         self.closure = None                        # filled in once the pipeline has decided it
 
     @property
@@ -1286,6 +1357,18 @@ def partial_dir(run_dir, stamp=None):
 
 
 # --------------------------------------------------------------------------- reporting
+
+#: How many added rows ``--dry-run`` lists before pointing at the manifest for the rest. Enough to scan
+#: in a terminal; the manifest is the complete record either way.
+_DRY_RUN_ROWS = 40
+
+
+def _ascii(text, limit=96):
+    """Console-safe and bounded. The Windows code page turned an em dash into a replacement character
+    in the middle of telling the examiner what went wrong, so nothing here leaves ASCII."""
+    text = str(text or "").encode("ascii", "replace").decode("ascii")
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
 
 def dry_run_text(closure):
     """What ``--dry-run`` prints: the closure, the reasons, and what was left out. ASCII only."""
@@ -1324,6 +1407,27 @@ def dry_run_text(closure):
         for key, n in sorted(by_relation.items(), key=lambda kv: -kv[1]):
             out.append(f"  {key:<22} {n}")
 
+    # The rows themselves, not only the tally. A count says how much a policy added; only the list says
+    # *what*, which is what an examiner has to be able to check before handing the extract over.
+    added = sorted((kind, row_id) for kind in closure.included
+                   for row_id in closure.included[kind] if not closure.is_seed(kind, row_id))
+    carried = len(res.carried_why)
+    if added:
+        out.append("")
+        out.append(f"Rows added ({len(added)}), and why:")
+        for kind, row_id in added[:_DRY_RUN_ROWS]:
+            reason = (closure.reasons.get((kind, row_id)) or [""])[0]
+            out.append(f"  {kind:<5} {_ascii(row_id, 46):<46} {_ascii(reason)}")
+        if len(added) > _DRY_RUN_ROWS:
+            out.append(f"  ... and {len(added) - _DRY_RUN_ROWS} more - "
+                       f"every one is listed in partial_manifest.json")
+    if carried:
+        # ticked, but not by the examiner: a relation added them and the examiner kept them when they
+        # reviewed the expansion. The extract marks them, so the dry run should not call them choices.
+        out.append("")
+        out.append(f"{carried} ticked row(s) came from an earlier expansion rather than being chosen, "
+                   f"and are marked as such in the extract.")
+
     came_from = closure.options.get("relations_from")
     if came_from:
         out.append("")
@@ -1336,6 +1440,92 @@ def dry_run_text(closure):
     for warning in closure.warnings:
         out.append(f"WARNING: {warning}")
     return "\n".join(out)
+
+
+#: What an expanded selection records about itself, so a build can tell it apart from a hand-ticked one.
+EXPANDED_KEY = "expanded"
+
+#: The policy an already-expanded selection should be built under: containment only. Its ticks *are* a
+#: closure, so following the relations again would add a second hop from every row that was pulled in --
+#: an extract larger than the one the examiner reviewed, which is exactly what one hop exists to prevent.
+EXPANDED_RELATIONS = "minimal"
+
+
+def expanded_selection(closure, source_payload=None, *, run_id="", sources=None, note=""):
+    """The closure written back out **as a selection file**, for checking in the full report.
+
+    The examiner's own ticks and the rows a relation added are both in it, and each added row carries
+    ``why`` — the same sentence ``partial_manifest.json`` records. So the file is both the thing the
+    reports load (every included row ticked, the added ones marked) and a plain record of what an
+    expansion did, filable as it is.
+
+    Three fields make it safe to load and to build from:
+
+    * ``run_id`` is the **full report's**, not this run's, because that is the folder the file is meant
+      to be loaded into. Stamping this run's id instead would make ``--install-selection`` report a
+      mismatch every time, which teaches an examiner to force past a check that exists to stop a
+      selection landing on the wrong case.
+    * ``sources`` is that report's fingerprints, so a later build can still verify the evidence.
+    * ``relations`` is :data:`EXPANDED_RELATIONS`, which the run picks up as the file's own policy.
+    """
+    payload = {
+        "tool": selection_file.TOOL,
+        "schema": selection_file.SCHEMA,
+        "tool_version": app_version.get_version(),
+        "run_id": run_id or "",
+        "sources": sources,
+        "exported": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "relations": EXPANDED_RELATIONS,
+        "note": note or "",
+        "selections": {},
+    }
+    resolution = closure.resolution
+    original = {}
+    for kind, rows in ((source_payload or {}).get("selections") or {}).items():
+        for ticked_id, keys in rows.items():
+            original[(kind, ticked_id)] = keys
+    # a ticked row can resolve to a different id than the selection recorded -- and to several, when a
+    # key named a whole group -- so its key record has to follow the id it landed on
+    was = {(move["kind"], move["now"]): move["was"] for move in resolution.moved}
+    selected = added = 0
+    for kind in KINDS:
+        rows = {}
+        for row_id in sorted(closure.included.get(kind, ())):
+            if closure.is_seed(kind, row_id):
+                keys = original.get((kind, row_id))
+                if keys is None:
+                    keys = original.get((kind, was.get((kind, row_id), "")), 1)
+                rows[row_id] = keys
+                selected += 1
+            else:
+                reasons = closure.reasons.get((kind, row_id)) or ()
+                rows[row_id] = {"why": reasons[0]} if reasons else 1
+                added += 1
+        if rows:
+            payload["selections"][kind] = rows
+    payload[EXPANDED_KEY] = {
+        "when": payload["exported"],
+        "tool_version": payload["tool_version"],
+        "relations": relation_spec(closure.options.get("relations") or {},
+                                   closure.options.get("transitive")),
+        "from_digest": selection_file.selection_digest(source_payload or {}),
+        "selected": selected,
+        "added": added,
+    }
+    return payload
+
+
+def relation_spec(relations, transitive=False):
+    """The ``--relations`` spec that names *relations* — the vocabulary the CLI and the GUI both use."""
+    on = [r.key for r in RELATIONS if relations.get(r.key)]
+    if transitive:
+        on.append("transitive")
+    return ",".join(on) if on else "minimal"
+
+
+def is_expanded(payload):
+    """True when *payload* was produced by :func:`expanded_selection` — its ticks are already a closure."""
+    return isinstance((payload or {}).get(EXPANDED_KEY), dict)
 
 
 def load_selection(path):

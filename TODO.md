@@ -187,9 +187,17 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 
 # Planned features
 - Integrate Snapchat_Download support with guardrails (reminding the user to have proper legal authorization).
-- Implement feature to recreate a partial report from the selected elements only.
-  - Ask the user if we also include all the elements related to the ones selected
-    (for example, the cache_controller and/or Libracy/Caches entries associated to a selected Memory).
+- ~~Implement feature to recreate a partial report from the selected elements only, asking whether to
+  include the elements related to the ones selected.~~ **Done** — `--selection` builds one, the relations
+  are the per-item choice, and the examiner can now expand, check and adjust before building
+  (`--expand-selection`, then review in the full report). See
+  [docs/guide_partial_reports.md](docs/guide_partial_reports.md) and
+  [docs/report_partial.md](docs/report_partial.md). Still open in this area:
+  - **The print / PDF view** (plan phase 8, on ice): one combined `print.html` per extract so the
+    examiner can produce a paginated PDF from the browser. Gated on it being clean and its in-document
+    links working.
+  - **Field-level exclusion** (plan phase 5): leaving named fields or whole blocks out of an extract,
+    with each stated as withheld rather than silently missing.
 - ~~Fix messages decoding from arroyo.db... we are currently missing many that are displayed by at
   least one other tool.~~ **Fixed in v1.5.2** — see DONE.md ("Snapchat conversations / contacts
   reports"). Still open in this area:

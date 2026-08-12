@@ -92,6 +92,38 @@ def test_the_relation_spec_reaches_the_options(tmp_path):
     assert request.options["transitive"] and request.options["legacy_reports"]
 
 
+def test_an_expanded_selection_is_built_with_containment_only(tmp_path):
+    """Its ticks are already a closure, so following the relations again adds a second hop from every
+    row that was pulled in — an extract bigger than the one the examiner reviewed. The file records
+    `minimal` itself; this is the belt for a file whose `relations` did not survive a browser save."""
+    path, _ = _selection(tmp_path, expanded={"selected": 1, "added": 4})
+    request, error = app._partial_request({"selection": path})
+
+    assert error is None
+    assert [k for k, on in request.options["relations"].items() if on] == []
+    assert request.options["relations_from"] == "the selection being already an expansion"
+
+
+def test_an_explicit_policy_still_overrules_an_expanded_selection(tmp_path, caplog):
+    """The examiner running the report keeps the last word — but is told what it means."""
+    path, _ = _selection(tmp_path, expanded={"selected": 1, "added": 4})
+    request, error = app._partial_request({"selection": path, "relations": "recommended"})
+
+    assert error is None and request.options["relations"]["mem_group"] is True
+    assert "a second time" in caplog.text
+
+
+def test_writing_the_expansion_out_builds_nothing(tmp_path):
+    """--expand-selection is for checking first, so it implies --dry-run: a run that both wrote the
+    file and built from it would defeat the point of writing it."""
+    path, _ = _selection(tmp_path)
+    out = str(tmp_path / "expanded.json")
+    request, error = app._partial_request({"selection": path, "expand-selection": out})
+
+    assert error is None
+    assert request.expand_to == out and request.dry_run is True
+
+
 def test_the_selection_files_own_spec_is_used_when_the_run_gives_none(tmp_path):
     """A selection built by another tool carries the policy it was made for, so running it needs one
     flag instead of two — and the report has to say where the policy came from, because a reader

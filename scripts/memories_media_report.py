@@ -3389,6 +3389,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'if(s[0])k.mediaid=s[0];return k;},'
            f'rowHeight:{MEM_ROW_H},estDetail:180,cols:"{MEM_COLS}",'
            'detailBase:"data/detail-",'
+           + partial_report.pulled_config(closure, "mem") +
            'folded:function(){return document.getElementById("fold").checked;},'
            'query:function(){return document.getElementById("q").value;},'
            'match:function(m,r){var u=document.getElementById("user").value,'
@@ -3396,10 +3397,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
            '&&(!wa||m.wal===wa)&&scTimeHit(scTimeWin("t"),m.ts)'
-           '&&(!document.getElementById("selonly").checked||SCSel.get("mem",SCV.selId(r[0])));},'
-           'selectedOnly:function(){return document.getElementById("selonly").checked;},'
-           'selCount:function(n){document.getElementById("selcount").textContent=n+" selected";'
-           'scSelNote();},'
+           '&&scSelPass("mem",SCV.selId(r[0]));},'
+           'selectedOnly:scSelOnly,'
+           'selCount:scSelCount,'
            # n rows on screen, t memories in the report, k memories the filters match. n and k differ
            # only while a fold is in effect, and reporting one as the other would count a group of
            # three as one memory.
@@ -3414,7 +3414,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
            # reset() when its target is not in the view).
            'document.getElementById("fold").checked=false;'
-           'document.getElementById("selonly").checked=false;}});'
+           'document.getElementById("selonly").value="";}});'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
 

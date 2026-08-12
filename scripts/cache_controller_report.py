@@ -1914,6 +1914,7 @@ SCV.init({{
     bytes on disk is recorded as a fallback match. */
  selKeys:function(r){{var m=r[5]||{{}},k={{key:r[0].slice(3)}};if(m.sha)k.sha=m.sha;return k;}},
  rowHeight:{CC_ROW_H},estDetail:320,cols:'{CC_COLS}',detailBase:'data/detail-',
+ {partial_report.pulled_config(closure, 'cc')}
  query:function(){{return document.getElementById('q').value;}},
  match:function(m,r){{
   var cat=document.getElementById('cat').value,disk=document.getElementById('disk').value,
@@ -1921,10 +1922,9 @@ SCV.init({{
       wal=document.getElementById('wal').value,enc=document.getElementById('enc').value;
   return (!cat||m.cat===cat)&&(!disk||m.disk===disk)&&(!lk||(m.link||'').indexOf(lk)>-1)
        &&(!xs||m.xs==='yes')&&(!wal||m.wal===wal)&&(!enc||m.enc===enc)
-       &&(!document.getElementById('selonly').checked||SCSel.get('cc',SCV.selId(r[0])));}},
- selectedOnly:function(){{return document.getElementById('selonly').checked;}},
- selCount:function(n){{document.getElementById('selcount').textContent=n+' selected';
-   scSelNote();}},
+       &&scSelPass('cc',SCV.selId(r[0]));}},
+ selectedOnly:scSelOnly,
+ selCount:scSelCount,
  count:function(n,t){{document.getElementById('count').textContent=
    n===t?(n+' entries'):(n+' of '+t+' shown');}},
  reset:function(){{
@@ -1932,7 +1932,7 @@ SCV.init({{
   document.getElementById('disk').value='';document.getElementById('link').value='';
   document.getElementById('xscope').checked=false;document.getElementById('wal').value='';
   document.getElementById('enc').value='';
-  document.getElementById('selonly').checked=false;}}
+  document.getElementById('selonly').value='';}}
 }});
 scSelNote();
 scConsumeHash();
