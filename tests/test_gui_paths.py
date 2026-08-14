@@ -117,6 +117,41 @@ def test_each_setting_says_what_it_is():
     assert app.appearance_label("who knows") == "Theme: follow OS"
 
 
+def test_a_question_mark_keeps_its_text_and_shows_it_on_demand(monkeypatch):
+    """Every explanation used to be printed under its field, which is accurate and unreadable: a form
+    of twenty settings became a wall of prose. The text is the same; where it lives is not."""
+    shown = {}
+    monkeypatch.setattr(app.sg, "popup", lambda body, **kw: shown.update(body=body, kw=kw))
+    monkeypatch.setattr(app.sg, "popup_scrolled", lambda body, **kw: shown.update(body=body, kw=kw))
+
+    mark = app._help("The keychain is only needed for iOS.", title="Keychain")
+
+    assert app._handle_help(mark.Key) is True
+    assert "keychain is only needed" in shown["body"]
+    assert shown["kw"]["title"] == "Keychain"
+    # and on hover, without a click (the live TooltipObject only exists once it is in a window)
+    assert "keychain is only needed" in mark.Tooltip
+
+
+def test_an_ordinary_event_is_not_swallowed():
+    """The loops call this first, so anything that is not a "?" has to fall straight through."""
+    assert app._handle_help("Ok") is False
+    assert app._handle_help(None) is False
+
+
+def test_a_long_explanation_gets_a_scrollable_popup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(app.sg, "popup", lambda body, **kw: calls.append("popup"))
+    monkeypatch.setattr(app.sg, "popup_scrolled", lambda body, **kw: calls.append("scrolled"))
+
+    short = app._help("Two words.")
+    long = app._help("word " * 400)
+    app._handle_help(short.Key)
+    app._handle_help(long.Key)
+
+    assert calls == ["popup", "scrolled"]
+
+
 def test_a_hint_is_a_point_smaller_than_the_body_text():
     """They move together: the size difference is what marks a hint as secondary."""
     assert app.HINT_FONT[1] == app.BASE_FONT[1] - 1

@@ -99,6 +99,32 @@ def test_the_relation_policy_starts_at_the_recommended_set(window):
     assert relations["transitive"] is False
 
 
+def test_the_form_carries_no_walls_of_prose(window):
+    """What "too crammed" was: six explanations printed under their fields, each two to four wrapped
+    lines. They are behind "?" marks now — same words, on request. This is the guard against the
+    next one being pasted straight back onto the form."""
+    win = window[0]
+    form = win["form"]
+
+    texts = [str(getattr(el, "DisplayText", "") or "")
+             for row in form.Rows for el in row if el.__class__.__name__ == "Text"]
+    longest = max(texts, key=len)
+
+    assert len(longest) <= 120, f"a paragraph is back on the form: {longest[:90]!r}"
+    marks = [k for k in win.AllKeysDict if isinstance(k, str) and k.startswith("help:")]
+    assert len(marks) >= 6, "the explanations should be reachable, not deleted"
+
+
+def test_the_form_fits_the_window_it_opens_at(window):
+    """It scrolls when it has to, but opening already scrolled is what made it feel crammed."""
+    win = window[0]
+    win.TKroot.update_idletasks()
+    inner = win["form"].TKColFrame
+    inner = getattr(inner, "TKFrame", inner)
+
+    assert inner.winfo_reqheight() <= 640
+
+
 # --------------------------------------------------------------------------- the appearance button
 
 def test_the_button_shows_the_saved_setting(window):
