@@ -86,6 +86,30 @@ _THEME = {"dark": "DarkGrey13", "light": "SystemDefaultForReal"}
 _HINT_COLOR = {"dark": "#b9bec7", "light": "#4a4a4a"}
 _appearance = "light"
 
+#: What the examiner can choose, in the order the button cycles them. "os" is the default because it
+#: is the only one that stays right when they change the OS setting.
+APPEARANCE_CHOICES = ("os", "light", "dark")
+_APPEARANCE_LABEL = {"os": "Theme: follow OS", "light": "Theme: light", "dark": "Theme: dark"}
+
+#: One point up from FreeSimpleGUI's default, which is small on a high-DPI laptop, and a hint one
+#: point below that: the size difference is what marks a hint as secondary, so they have to move
+#: together.
+BASE_FONT = ("Helvetica", 11)
+HINT_FONT = ("Helvetica", 10)
+
+
+def next_appearance(current):
+    """The next setting the theme button offers, wrapping round."""
+    order = APPEARANCE_CHOICES
+    try:
+        return order[(order.index(current) + 1) % len(order)]
+    except ValueError:                                      # an unknown value in a hand-edited config
+        return order[0]
+
+
+def appearance_label(setting):
+    return _APPEARANCE_LABEL.get(setting, _APPEARANCE_LABEL["os"])
+
 
 def os_appearance():
     """``"dark"`` or ``"light"``, from the OS where it can be read — Windows only, and never fatal.
@@ -105,11 +129,21 @@ def os_appearance():
         return "light"
 
 
-def apply_theme(appearance=None):
-    """Pick the window theme to match the OS, once, before any window is built."""
+def apply_theme(setting=None):
+    """Set the theme and the base font for windows built after this call. Returns what it resolved to.
+
+    *setting* is one of :data:`APPEARANCE_CHOICES`: ``"os"`` reads the OS, the other two are the
+    examiner overruling it — a light desktop with a dark-themed tool, or the reverse, is a normal
+    thing to want. A toolkit theme cannot be changed on a window that already exists, so switching
+    rebuilds the window; this is the one place that decides how it will look.
+    """
     global _appearance
-    _appearance = appearance or os_appearance()
+    if setting in ("light", "dark"):
+        _appearance = setting
+    else:
+        _appearance = os_appearance()
     sg.theme(_THEME[_appearance])
+    sg.set_options(font=BASE_FONT)
     return _appearance
 
 
@@ -200,6 +234,11 @@ DISCLAIMER_TEXT = (
     "original artifacts and corroborate them with other tools before relying on them.")
 
 
+def _wrapped_rows(text, width):
+    """How many rows *text* needs at *width* columns, blank lines included."""
+    return sum(max(1, len(textwrap.wrap(para, width))) for para in text.split("\n"))
+
+
 def show_disclaimer(cfg):
     """Show the one-time AS-IS disclaimer, unless the user ticked 'Don't display again'.
 
@@ -210,7 +249,9 @@ def show_disclaimer(cfg):
         return
     layout = [
         [sg.Text("Disclaimer — please read", font=("", 12, "bold"))],
-        [sg.Text(DISCLAIMER_TEXT, size=(78, 10))],
+        # Sized from the text, not a round number: at 78 columns it needs eleven rows, so a fixed
+        # ten clipped the last line of an AS-IS disclaimer — and a bigger base font needs more again.
+        [sg.Text(DISCLAIMER_TEXT, size=(78, _wrapped_rows(DISCLAIMER_TEXT, 78)))],
         [sg.Checkbox("Don't display this again", key="hide")],
         [sg.Push(), sg.Button("I understand", key="ok"), sg.Push()],
     ]
@@ -987,7 +1028,7 @@ def _hint(text, width=88):
     the window to fit one long line. The colour is a quieter shade of the theme's own text — it was
     near-white, which the old mid-blue theme forced and which read as washed-out on anything else.
     """
-    return sg.Text(textwrap.fill(text, width), font=("", 9), text_color=hint_color())
+    return sg.Text(textwrap.fill(text, width), font=HINT_FONT, text_color=hint_color())
 
 
 def _relations_spec(state):
@@ -1154,13 +1195,17 @@ def _relations_dialog(state):
         window.close()
 
 
-def build_settings_window(cfg):
+def build_settings_window(cfg, prefill=None, relations=None):
     """The settings window, its path bookkeeping and the relation policy it starts with.
 
     Returns ``(window, real, relation_state)``. Split out of ``main()`` so that it can be
     built and inspected without a person clicking anything: a mistyped element argument, a
     binding on a key that no longer exists or a theme that will not load are all things that
     otherwise surface only when an examiner opens the app.
+
+    *prefill* and *relations* carry a window's state across a rebuild. A toolkit theme only applies
+    to windows built after it is set, so switching appearance means building a new window — and
+    losing what the examiner had already filled in would make the button cost more than it is worth.
     """
     has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
     # The relation policy for a partial run, remembered between runs (the selection file and the case
@@ -1170,7 +1215,10 @@ def build_settings_window(cfg):
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
                       "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
     layout = [
-        [sg.Text("Select Settings")],
+        [sg.Text("Select Settings"), sg.Push(),
+         sg.Button(appearance_label(cfg.get("appearance", "os")), key="appearance_toggle",
+                   tooltip="Follow the OS setting, or force light or dark. Remembered "
+                           "between runs.")],
         [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
         [sg.Text('Extraction zip')],
         [sg.In("", key="zip", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True,
@@ -1214,7 +1262,7 @@ def build_settings_window(cfg):
                'would hold, with the ones the relations added marked. Load it in the full report '
                '(Load…), see what came in and why, untick anything you do not want, save, and '
                'build from that file. Nothing is built by this run.')],
-        [sg.Text('', key="selection_note", font=("", 9), text_color="#eef3fa")],
+        [sg.Text('', key="selection_note", font=HINT_FONT, text_color=hint_color())],
         [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
         [sg.In("", key="case_ref", size=(PATH_WIDTH, 1), expand_x=True)],
         [_hint('Not remembered between runs: carrying one case reference onto another case is a real '
@@ -1247,6 +1295,18 @@ def build_settings_window(cfg):
         window[key].bind("<FocusIn>", "+FOCUSIN")
         window[key].bind("<FocusOut>", "+FOCUSOUT")
         _show_path(window, real, key, focused=False)
+    if relations:
+        relation_state = relations
+    for key, value in (prefill or {}).items():
+        if key not in window.AllKeysDict or isinstance(value, (list, tuple)):
+            continue
+        if key in PATH_KEYS:
+            _set_path(window, real, key, value)             # keeps `real` and the elision in step
+        else:
+            try:
+                window[key].update(value)
+            except Exception as error:                      # noqa: BLE001 - a button, a Push, …
+                logger.debug(f"Could not restore {key!r} after the rebuild: {error}")
     return window, real, relation_state
 
 
@@ -1281,8 +1341,9 @@ def main(args):
     logger.info(f"Snapchat Auto v{get_version()}")
     # Before any window is built, including the update prompt and the disclaimer, so every one of
     # them matches the OS rather than the first one setting the tone for the rest.
-    logger.debug(f"GUI appearance: {apply_theme()}")
     cfg = load_config()
+    logger.debug(f"GUI appearance: {apply_theme(cfg.get('appearance', 'os'))} "
+                 f"(setting: {cfg.get('appearance', 'os')})")
     # Only for an examiner who pointed the tool at a folder of newer builds (GUI field below).
     # It runs before anything else because accepting an update launches the installer and ends
     # this process; a headless run never gets here, and must not — nobody is there to answer.
@@ -1350,6 +1411,14 @@ def main(args):
                 _describe_selection(window, picked, values)
         elif event == "selection":
             _describe_selection(window, values["selection"], values)
+        elif event == "appearance_toggle":
+            # Saved before the rebuild, so the choice survives even if the examiner then cancels.
+            cfg["appearance"] = next_appearance(cfg.get("appearance", "os"))
+            save_config(cfg)
+            apply_theme(cfg["appearance"])
+            window.close()
+            window, real, relation_state = build_settings_window(cfg, prefill=values,
+                                                                 relations=relation_state)
         elif event == "relations_edit":
             _relations_dialog(relation_state)
         elif event == "Ok":

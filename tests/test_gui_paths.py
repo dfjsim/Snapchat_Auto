@@ -95,3 +95,37 @@ def test_the_theme_follows_the_os_and_the_hint_stays_readable():
         assert app.apply_theme(appearance) == appearance
         assert app.hint_color() == app._HINT_COLOR[appearance]
     assert app.os_appearance() in ("dark", "light")          # never raises, never anything else
+    assert app.apply_theme("os") == app.os_appearance()      # and "os" resolves to whatever it says
+
+
+def test_the_button_cycles_all_three_and_comes_back():
+    """Forcing light or dark is a normal thing to want; following the OS is the one that stays right
+    when the OS changes, so it is where the cycle starts."""
+    assert app.APPEARANCE_CHOICES[0] == "os"
+    seen, setting = [], "os"
+    for _ in range(len(app.APPEARANCE_CHOICES)):
+        setting = app.next_appearance(setting)
+        seen.append(setting)
+
+    assert seen == ["light", "dark", "os"]
+    assert app.next_appearance("nonsense-from-a-hand-edited-config") == "os"
+
+
+def test_each_setting_says_what_it_is():
+    assert app.appearance_label("os") == "Theme: follow OS"
+    assert app.appearance_label("dark") == "Theme: dark"
+    assert app.appearance_label("who knows") == "Theme: follow OS"
+
+
+def test_a_hint_is_a_point_smaller_than_the_body_text():
+    """They move together: the size difference is what marks a hint as secondary."""
+    assert app.HINT_FONT[1] == app.BASE_FONT[1] - 1
+
+
+def test_the_disclaimer_is_given_room_for_all_of_itself():
+    """It was sized at ten rows and needs eleven, so the last line of an AS-IS disclaimer was cut."""
+    rows = app._wrapped_rows(app.DISCLAIMER_TEXT, 78)
+
+    assert rows >= 11
+    assert app._wrapped_rows("one line", 78) == 1
+    assert app._wrapped_rows("a\n\nb", 78) == 3             # a blank line still takes a row
