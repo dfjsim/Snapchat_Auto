@@ -122,7 +122,16 @@ def test_the_form_fits_the_window_it_opens_at(window):
     inner = win["form"].TKColFrame
     inner = getattr(inner, "TKFrame", inner)
 
-    assert inner.winfo_reqheight() <= 640
+    assert inner.winfo_reqheight() <= app._viewport_size()[1]
+
+
+def test_the_viewport_is_sized_to_the_screen_not_to_a_guess():
+    """A fixed height is a guess about somebody else's monitor: too tall puts the buttons off a
+    laptop screen, too short opens a form that would have fitted already scrolled."""
+    assert app._viewport_size((3440, 1440)) == app._VIEW_MAX
+    assert app._viewport_size((1366, 768)) == (1000, 548)    # width hits the cap, height does not
+    assert app._viewport_size((800, 600)) == (720, 420)      # the floor, and it scrolls
+    assert app._viewport_size((0, 0)) == app._VIEW_MIN
 
 
 # --------------------------------------------------------------------------- the appearance button
