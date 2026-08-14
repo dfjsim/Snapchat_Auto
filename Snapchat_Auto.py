@@ -232,7 +232,7 @@ DISCLAIMER_TEXT = (
     "kind.\n\n"
     "It has NOT been thoroughly tested across the many different versions of the Snapchat app, "
     "and the database schemas vary between versions. Some artifacts may therefore be parsed "
-    "incompletely, or in rare cases incorrectly or potentially incorrectly in some cases.\n\n"
+    "incompletely, or potentially incorrectly in some cases.\n\n"
     "Use it as an aid to analysis — not as a sole authority. Always validate findings against the "
     "original artifacts and corroborate them with other tools before relying on them.")
 
@@ -446,7 +446,8 @@ def _map_timezone(tzval):
 
 
 def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
-        tile_server="", run_name=None, pause=False, hash_zip=False, partial=None):
+        tile_server="", run_name=None, pause=False, hash_zip=False, partial=None,
+        legacy_reports=False):
     """Do one extraction + report run. Shared by the GUI and the command line.
 
     Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
@@ -503,7 +504,8 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                                    padding=padding, tz=tz, report_dir="./" + reports_subdir,
                                    tile_server=tile_server,
                                    zip_path=os.path.abspath(zip_path) if zip_path else "",
-                                   hash_zip=hash_zip, partial=partial)
+                                   hash_zip=hash_zip, partial=partial,
+                                   legacy_reports=legacy_reports)
             if partial is not None and partial.dry_run:
                 logger.info("--dry-run: no report was written")
                 return run_folder
@@ -564,7 +566,13 @@ def print_usage():
           "                          repeated run lands in the same place.\n"
           "  --hash-zip yes          Also record the extraction ZIP's MD5 and SHA-256. Off by\n"
           "                          default: tens of GB is a long read, and it is the database\n"
-          "                          hashes that bind what the reports contain.\n\n"
+          "                          hashes that bind what the reports contain.\n"
+          "  --legacy-reports yes    Also produce the two superseded reports (the single-page\n"
+          "                          Communications report and the legacy Memories / My Eyes Only\n"
+          "                          report). Off by default: the Conversations, Contacts and\n"
+          "                          Memories reports replace them, and the legacy Memories report\n"
+          "                          decrypts every Memory on the device. Answers for a partial\n"
+          "                          run too, where it overrides 'legacy_reports' in --relations.\n\n"
           "Build a partial report from a saved selection (only the ticked rows, plus what you\n"
           "ask for with them). Add --selection to a normal run; it writes its own folder,\n"
           "Reports_partial_<stamp>/, and never touches the reports the selection was made in:\n"
@@ -574,9 +582,10 @@ def print_usage():
           "                          minimal (only what a row cannot be shown without),\n"
           "                          recommended, all, or a list - 'mem_cache,msg_cache'\n"
           "                          to name them, or '-mem_group' for the recommended set minus\n"
-          "                          one. Add 'transitive' to keep following them, and\n"
-          "                          'legacy_reports' to include the two legacy reports whole\n"
-          "                          (neither has row selection, so they are all-or-nothing).\n"
+          "                          one. Add 'transitive' to keep following them. The token\n"
+          "                          'legacy_reports' is still read here (a selection file may\n"
+          "                          record it), but --legacy-reports above is the plain way to\n"
+          "                          ask, and wins when both are given.\n"
           "                          Omit it and the spec the selection file records is used; with\n"
           "                          neither, 'recommended'. Whichever it was is named in the log\n"
           "                          and in the report's provenance.\n"
@@ -642,7 +651,9 @@ _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz"
                 "sources-mismatch": True, "version-mismatch": True, "no-reuse": True,
                 "max-rows": True, "links-dir": True, "dry-run": True,
                 # expand the selection and write it back out for checking, instead of building
-                "expand-selection": True}
+                "expand-selection": True,
+                # the two superseded reports, off unless asked for on either path
+                "legacy-reports": True}
 
 
 def _yes(value):
@@ -706,6 +717,11 @@ def _partial_request(values):
                           f"read ({error}). Pass --relations to say what to follow instead.")
         return None, str(error)
     options.update(partial_report.parse_policy(spec))
+    # The flag is the same question the GUI's main-window checkbox asks, so when it is given at all
+    # it wins over whatever the relation spec or the selection file said — an explicit answer beats
+    # a remembered one, exactly as --relations beats the file's own policy.
+    if values.get("legacy-reports") is not None:
+        options["legacy_reports"] = _yes(values.get("legacy-reports"))
     options["relations_from"] = source
     if source == "the selection file":
         logger.info(f"Related items: following the policy {os.path.basename(path)} was built for "
@@ -808,7 +824,7 @@ def run_cli(args):
                      run_name=values.get("run-name"), pause=False,
                      hash_zip=(values.get("hash-zip") or "").lower()
                               in ("yes", "y", "true", "1"),
-                     partial=partial)
+                     partial=partial, legacy_reports=_yes(values.get("legacy-reports")))
     except partial_report.EvidenceMismatch as error:
         # Its own exit code: a script driving several extractions needs to tell "this is the wrong
         # evidence for that selection" apart from "the run broke".
@@ -1220,11 +1236,18 @@ def _relations_dialog(state):
                        'Memory\'s other entries, then their messages, and on. So this grows with the '
                        'case rather than with the selection, and one hop from each ticked row is '
                        'what stays predictable and explainable.', title="Transitive closure")])
-    rows.append([sg.Checkbox("Include the two legacy reports whole (Communications, Local Memories)",
-                             default=state["legacy_reports"], key="legacy_reports"),
-                 _help('Neither has row selection, so they are all-or-nothing. Left out by default: '
-                       'the legacy Memories report decrypts every Memory on the device.',
-                       title="The legacy reports")])
+    # Not a second control: the same question asked twice, with one of them winning, is how an
+    # examiner ends up unsure which answer the report used. It is set on the main window — this says
+    # what that setting currently is, so the dialog is not silently missing a policy it used to carry.
+    rows.append([sg.Text("Legacy reports: "
+                         + ("included" if state["legacy_reports"] else "not included")
+                         + " — set on the main window", font=HINT_FONT, text_color=hint_color()),
+                 _help('The single-page chats/contacts report and the legacy Memories report. '
+                       'Neither has row selection, so an extract takes them whole or leaves them '
+                       'out, and the legacy Memories report decrypts every Memory on the device.\n\n'
+                       'It is one question about the run rather than a relation between rows, so it '
+                       'is asked once, on the main window, and applies to a full report and to an '
+                       'extract alike.', title="The legacy reports")])
     rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
                  sg.Button("Ok"), sg.Button("Cancel")])
 
@@ -1252,7 +1275,8 @@ def _relations_dialog(state):
                 state["relations"] = {r.key: bool(values[f"rel_{r.key}"])
                                      for r in partial_report.RELATIONS}
                 state["transitive"] = bool(values["transitive"])
-                state["legacy_reports"] = bool(values["legacy_reports"])
+                # legacy_reports is deliberately not read here: it belongs to the main window, and
+                # this dialog only reports what it is set to.
                 return
     finally:
         window.close()
@@ -1297,7 +1321,8 @@ def build_settings_window(cfg, prefill=None, relations=None):
     relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
                                         or partial_report.PRESETS["recommended"]),
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
-                      "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
+                      # one setting, on the main window (the dialog only states it)
+                      "legacy_reports": bool(cfg.get("legacy_reports"))}
     layout = [
         [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
          sg.Button(appearance_label(cfg.get("appearance", "os")), key="appearance_toggle",
@@ -1340,6 +1365,18 @@ def build_settings_window(cfg, prefill=None, relations=None):
          _help('Daylight saving time is applied automatically for named zones '
                '(e.g. America/Toronto). A fixed ±HH:MM offset is taken literally and never adjusted.',
                title="Timestamp timezone")],
+        [sg.Checkbox('Include the legacy reports (Communications, Local Memories)',
+                     default=bool(cfg.get("legacy_reports")), key="legacy_reports",
+                     pad=((0, 0), (6, 0))),
+         _help('The single-page chats/contacts report and the legacy Memories / My Eyes Only '
+               'report, both superseded by the Conversations, Contacts and Memories reports.\n\n'
+               'Off by default. The legacy Memories report decrypts every Memory on the device, '
+               'which costs time on every run and puts every Memory in the output whatever the run '
+               'was for; and neither report has row selection, so a partial extract can only take '
+               'them whole or leave them out.\n\n'
+               'This one setting answers for both kinds of run: a full report simply does not '
+               'produce them, and a partial extract does not carry them.',
+               title="The legacy reports")],
         [sg.Text('Offline map tile server (optional)', pad=((0, 0), (8, 2))),
          _help('Your own XYZ tile server, e.g. http://localhost:8080 or '
                'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
@@ -1564,6 +1601,7 @@ def main(args):
                 # The relation policy is a working preference and is remembered. The selection file and
                 # the case reference deliberately are not: both belong to one case.
                 "partial": relation_state,
+                "legacy_reports": bool(values.get("legacy_reports")),
                 # Never committed and never bundled: this repository is public, so an internal
                 # share path may only live in this examiner's own settings file.
                 "installer_dir": values.get("installer_dir", "").strip()})
@@ -1579,6 +1617,9 @@ def main(args):
     if values["selection"].strip():
         # The same options table the CLI fills in, so the GUI cannot wire up a different run. The two
         # mismatch answers were settled in the confirmation dialog above.
+        # The main window's checkbox is the answer for a partial run as well, so it goes into the
+        # policy the spec is built from rather than being asked again in the dialog.
+        relation_state["legacy_reports"] = bool(values.get("legacy_reports"))
         cli_values = {"selection": values["selection"].strip(),
                       "relations": _relations_spec(relation_state),
                       "case-ref": values.get("case_ref", "").strip(),
@@ -1599,7 +1640,8 @@ def main(args):
             padding=PADDING_MAP.get(values.get("padding"), "both"),
             tz=_map_timezone(values.get("timezone")),
             tile_server=values.get("tile_server", "").strip(),
-            pause=True, partial=partial)
+            pause=True, partial=partial,
+            legacy_reports=bool(values.get("legacy_reports")))
     except (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection, LookupError) as error:
         # A refused partial run reaches here. Without this it left a traceback on the console and
         # **nothing in the log**, so the examiner saw a run that simply stopped: the reason has to be

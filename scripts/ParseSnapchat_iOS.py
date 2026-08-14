@@ -1935,7 +1935,7 @@ def _render_partial(partial, report_dir, args, stages):
 
 
 def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
-         tile_server="", zip_path="", hash_zip=False, partial=None):
+         tile_server="", zip_path="", hash_zip=False, partial=None, legacy_reports=False):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -1961,10 +1961,16 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     if report_dir is None:
         report_dir = "./Report_" + datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
 
-    # A partial run leaves the two legacy reports out by default: neither has row selection, so both
-    # are all-or-nothing, and including them whole would put every conversation and every Memory into
-    # an extract meant to hold a subset. `--relations legacy_reports` (GUI: the same checkbox) opts in.
-    legacy_wanted = partial is None or partial.legacy_reports
+    # The two legacy reports are left out unless they are asked for, on either path. They are
+    # superseded by the Conversations/Contacts and Memories reports, neither has row selection (so an
+    # extract takes them whole or not at all), and the legacy Memories report decrypts every Memory on
+    # the device. One question with one answer: the GUI asks it once on the main window, `--legacy-
+    # reports yes` is the headless form, and a partial run can also carry it in its relation policy.
+    legacy_wanted = bool(partial.legacy_reports if partial is not None else legacy_reports)
+    if not legacy_wanted:
+        logger.info("Legacy reports: not produced (superseded by the Conversations, Contacts and "
+                    "Memories reports). Tick «Include the legacy reports» or pass --legacy-reports "
+                    "yes to have them.")
     arroyo = []
 
     uuid_pattern = re.compile("[a-fA-F0-9-]{36}")
@@ -2371,6 +2377,12 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
 
     #final_df.to_excel("test.xlsx")
     legacy_memories_report()
+    if not legacy_wanted:
+        # The parser stages chat attachments in that folder whether or not the legacy report is
+        # wanted, and the Conversations report hard-links what it needs out of it — so the bytes
+        # survive in Conversations/media/ while the staging folder, which holds every conversation's
+        # attachments and the legacy report's own output, does not stay in the report.
+        shutil.rmtree(report_dir + "/Communications_legacy", ignore_errors=True)
 
     # Memories media report: links every Memory to all its media (SCContent + caching-media
     # .pack) and geolocation. Handles both key schemas and multiple profiles; runs even

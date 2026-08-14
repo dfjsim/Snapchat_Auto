@@ -150,3 +150,26 @@ def test_a_rebuild_carries_the_form_across(window):
     assert real["zip"] == SAVED_ZIP                          # a path, through the elision
     assert win["case_ref"].get() == "EXHIBIT-9"              # plain text
     assert win["expand_only"].get() is True                  # a checkbox
+
+
+# --------------------------------------------------------------------------- the legacy reports
+
+def test_the_legacy_setting_is_on_the_main_window_and_starts_off(window):
+    """One question about the run, asked once. It used to live only in the relations dialog, where
+    it decided a partial extract while a full run produced them regardless."""
+    win = window[0]
+
+    assert "legacy_reports" in win.AllKeysDict
+    assert win["legacy_reports"].get() is False
+
+
+def test_the_relations_dialog_no_longer_asks_it_again(window):
+    """Two controls for one setting, one gating the other, is how an examiner ends up unsure which
+    answer the report used. The dialog states it instead — pinned on the source, since building a
+    second window in this process is not possible."""
+    import inspect
+
+    source = inspect.getsource(app._relations_dialog)
+
+    assert 'key="legacy_reports"' not in source, "the dialog must not offer a second control"
+    assert "set on the main window" in source

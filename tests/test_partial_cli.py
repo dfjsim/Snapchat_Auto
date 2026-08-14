@@ -415,3 +415,34 @@ def test_an_explicit_links_dir_wins_over_the_derived_one(tmp_path):
     path, _payload = _selection(run)
     request, error = app._partial_request({"selection": path, "links-dir": elsewhere})
     assert error is None and request.links_dir == elsewhere
+
+
+# --------------------------------------------------------------------------- the legacy reports
+
+def test_the_legacy_reports_are_off_unless_asked_for(tmp_path):
+    """They are superseded, the legacy Memories report decrypts every Memory on the device, and
+    neither has row selection — so an extract can only take them whole."""
+    path, _ = _selection(tmp_path)
+    request, error = app._partial_request({"selection": path})
+
+    assert error is None and request.options["legacy_reports"] is False
+
+
+def test_the_flag_overrides_what_the_selection_file_asked_for(tmp_path):
+    """One question, one answer: an explicit --legacy-reports beats a remembered policy, exactly as
+    --relations beats the spec the file records."""
+    path, _ = _selection(tmp_path, relations="legacy_reports")
+
+    asked = app._partial_request({"selection": path})[0]
+    forced_off = app._partial_request({"selection": path, "legacy-reports": "no"})[0]
+    forced_on = app._partial_request({"selection": path, "legacy-reports": "yes"})[0]
+
+    assert asked.options["legacy_reports"] is True          # the file's policy still applies
+    assert forced_off.options["legacy_reports"] is False    # …until the run says otherwise
+    assert forced_on.options["legacy_reports"] is True
+
+
+def test_the_option_is_in_the_table_so_the_parser_accepts_it():
+    values, error = app._parse_options(["--legacy-reports", "yes"], app._CLI_OPTIONS)
+
+    assert error is None and values["legacy-reports"] == "yes"
