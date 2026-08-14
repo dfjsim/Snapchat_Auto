@@ -1019,7 +1019,8 @@ def run_install_selection(args):
 
 
 def _hint(text, width=88):
-    """One of the small explanatory lines under a settings field.
+    """One of the small explanatory lines under a settings field. Kept for text that must stay
+    *visible* — a warning, or a field's current state — rather than being available on request.
 
     The text is wrapped here rather than by the widget because FreeSimpleGUI only wraps a Text
     element whose size spans several rows, and then at a pixel width it derives from the font — so
@@ -1029,6 +1030,40 @@ def _hint(text, width=88):
     near-white, which the old mid-blue theme forced and which read as washed-out on anything else.
     """
     return sg.Text(textwrap.fill(text, width), font=HINT_FONT, text_color=hint_color())
+
+
+#: The "?" texts, by the key of the mark that shows them. Filled as the layout is built.
+_HELP = {}
+
+
+def _help(text, title="About this setting"):
+    """A "?" beside a field: the explanation on hover, and the whole of it in a popup when clicked.
+
+    Every one of these used to be three or four wrapped lines printed under its field, which is
+    accurate and unreadable — a form of twenty settings became a wall of prose, and the settings
+    themselves got lost in it. The same idiom the reports use: the answer is one gesture away, and
+    nothing is *only* discoverable by hovering, because a click gives text that can be read at
+    length and selected.
+    """
+    key = f"help:{len(_HELP)}"
+    _HELP[key] = (title, text)
+    return sg.Text("(?)", key=key, enable_events=True, font=HINT_FONT, text_color=hint_color(),
+                   tooltip=textwrap.fill(text, 74), pad=((3, 0), (0, 0)))
+
+
+def _handle_help(event):
+    """Show the text behind a clicked "?". True when *event* was one, so a loop can move on."""
+    entry = _HELP.get(event)
+    if entry is None:
+        return False
+    title, text = entry
+    body = textwrap.fill(text, 76)
+    rows = body.count("\n") + 1
+    if rows > 12:
+        sg.popup_scrolled(body, title=title, size=(78, 14), keep_on_top=True)
+    else:
+        sg.popup(body, title=title, keep_on_top=True, font=BASE_FONT)
+    return True
 
 
 def _relations_spec(state):
@@ -1146,24 +1181,26 @@ def _relations_dialog(state):
     for src, relations in by_src.items():
         rows.append([sg.Text(label.get(src, src), font=("", 10, "bold"), pad=((0, 0), (10, 0)))])
         for relation in relations:
+            # The basis is on the "?" rather than under the checkbox: eleven relations with a
+            # paragraph each turned the choice everyone comes here to make into a wall of prose.
             rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
-                                     key=f"rel_{relation.key}")])
-            rows.append([_hint("      " + relation.basis, width=100)])
+                                     key=f"rel_{relation.key}"),
+                         _help(relation.basis, title=relation.label)])
     # The last two are not relations — they set the scope of the whole extract — so they sit under
     # their own heading rather than reading as one more hop from a selected row.
     rows.append([sg.Text("The extract as a whole", font=("", 10, "bold"), pad=((0, 0), (14, 0)))])
     rows.append([sg.Checkbox("Keep following the relations above until nothing new is added "
-                             "(transitive)", default=state["transitive"], key="transitive")])
-    rows.append([_hint('      Only the relations ticked above are followed — but even the recommended '
-                       'set forms a loop: a message reaches its cache entry, that entry\'s Memory, '
-                       'that Memory\'s other entries, then their messages, and on. So this grows with '
-                       'the case rather than with the selection, and one hop from each ticked row is '
-                       'what stays predictable and explainable.', width=100)])
+                             "(transitive)", default=state["transitive"], key="transitive"),
+                 _help('Only the relations ticked above are followed — but even the recommended set '
+                       'forms a loop: a message reaches its cache entry, that entry\'s Memory, that '
+                       'Memory\'s other entries, then their messages, and on. So this grows with the '
+                       'case rather than with the selection, and one hop from each ticked row is '
+                       'what stays predictable and explainable.', title="Transitive closure")])
     rows.append([sg.Checkbox("Include the two legacy reports whole (Communications, Local Memories)",
-                             default=state["legacy_reports"], key="legacy_reports")])
-    rows.append([_hint('      Neither has row selection, so they are all-or-nothing. Left out by '
-                       'default: the legacy Memories report decrypts every Memory on the device.',
-                       width=100)])
+                             default=state["legacy_reports"], key="legacy_reports"),
+                 _help('Neither has row selection, so they are all-or-nothing. Left out by default: '
+                       'the legacy Memories report decrypts every Memory on the device.',
+                       title="The legacy reports")])
     rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
                  sg.Button("Ok"), sg.Button("Cancel")])
 
@@ -1177,6 +1214,8 @@ def _relations_dialog(state):
             event, values = window.read()
             if event in (sg.WIN_CLOSED, "Cancel"):
                 return
+            if _handle_help(event):
+                continue
             if event in ("Minimal", "Recommended", "Everything"):
                 preset = {"Minimal": "minimal", "Recommended": "recommended",
                           "Everything": "all"}[event]
@@ -1239,42 +1278,47 @@ def build_settings_window(cfg, prefill=None, relations=None):
          sg.Combo(PADDING_OPTIONS, default_value=cfg.get("padding", PADDING_OPTIONS[0]), key="padding", readonly=True, size=(30, 1))],
         [sg.Text('Timestamp timezone (iOS)'),
          sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
-         sg.Text('(or type an IANA name / ±HH:MM)')],
-        [_hint('Daylight saving time is applied automatically for named zones '
-               '(e.g. America/Toronto).')],
-        [sg.Text('Offline map tile server (optional)')],
+         sg.Text('(or type an IANA name / ±HH:MM)'),
+         _help('Daylight saving time is applied automatically for named zones '
+               '(e.g. America/Toronto). A fixed ±HH:MM offset is taken literally and never adjusted.',
+               title="Timestamp timezone")],
+        [sg.Text('Offline map tile server (optional)'),
+         _help('Your own XYZ tile server, e.g. http://localhost:8080 or '
+               'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
+               'map on its detail page. Nothing is downloaded when this is empty — this tool never '
+               'reaches out to the internet on its own.', title="Offline map tile server")],
         [sg.In(cfg.get("tile_server", ""), key="tile_server", size=(PATH_WIDTH, 1), expand_x=True),
          sg.Button('Test', key="tile_test")],
-        [_hint('Your own XYZ tile server, e.g. http://localhost:8080 or '
-               'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
-               'map on its detail page. Nothing is downloaded when this is empty.')],
-        [sg.Text('Selection file — build a partial report (optional, iOS)')],
+        [sg.Text('Selection file — build a partial report (optional, iOS)'),
+         _help('A selection.json an examiner saved from the reports. With one, this run renders only '
+               'the rows it names plus the related items you choose, into its own '
+               'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
+               'for a normal, complete run.\n\n'
+               'The whole workflow is in docs/guide_partial_reports.md.',
+               title="Selection file")],
         [sg.In("", key="selection", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True),
          sg.Button('Browse', key="selection_browse"),
          sg.Button('Related items…', key="relations_edit")],
-        [_hint('A selection.json an examiner saved from the reports. With one, this run renders only '
-               'the rows it names plus the related items you choose, into its own '
-               'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
-               'for a normal, complete run.')],
         [sg.Checkbox('Expand and check first — write the expanded selection, build nothing',
-                     key="expand_only")],
-        [_hint('Writes <selection>.expanded.json beside the selection file: every row the extract '
+                     key="expand_only"),
+         _help('Writes <selection>.expanded.json beside the selection file: every row the extract '
                'would hold, with the ones the relations added marked. Load it in the full report '
                '(Load…), see what came in and why, untick anything you do not want, save, and '
-               'build from that file. Nothing is built by this run.')],
+               'build from that file. Nothing is built by this run.', title="Expand and check")],
         [sg.Text('', key="selection_note", font=HINT_FONT, text_color=hint_color())],
-        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
+        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)'),
+         _help('Not remembered between runs: carrying one case reference onto another case is a real '
+               'error, and a saved default is how that happens.', title="Case / exhibit reference")],
         [sg.In("", key="case_ref", size=(PATH_WIDTH, 1), expand_x=True)],
-        [_hint('Not remembered between runs: carrying one case reference onto another case is a real '
-               'error, and a saved default is how that happens.')],
-        [sg.Text('Folder with newer builds, for update checks (optional)')],
+        [sg.Text('Folder with newer builds, for update checks (optional)'),
+         _help('A folder where your organization publishes new builds of this tool (e.g. a '
+               'shared drive). At each start, a newer installer found there is offered. The '
+               'folder is only checked at the next start, and only when this is not empty.',
+               title="Update checks")],
         [sg.In(cfg.get("installer_dir", ""), key="installer_dir", size=(PATH_WIDTH, 1),
                expand_x=True, enable_events=True),
          sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
          sg.Button('Check', key="installer_check")],
-        [_hint('A folder where your organization publishes new builds of this tool (e.g. a '
-               'shared drive). At each start, a newer installer found there is offered. The '
-               'folder is only checked at the next start, and only when this is not empty.')],
         ]
 
     # The form is taller than a laptop screen once every optional section is on it, so it scrolls
@@ -1372,6 +1416,8 @@ def main(args):
         if event in (sg.WIN_CLOSED, "Cancel"):
             window.close()
             sys.exit()
+        if _handle_help(event):
+            continue
         if event == "zip_prev":
             _set_path(window, real, "zip", cfg.get("zip", ""))
         elif event == "keychain_prev":
