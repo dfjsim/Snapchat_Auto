@@ -568,9 +568,15 @@ each is *stated* in the provenance rather than silently missing:
 
 * **The two legacy reports** (`Communications_legacy`, `LocalMemories_legacy`). Neither has row
   selection, so both are all-or-nothing; the legacy Memories report decrypts every Memory on the
-  device. Left out by default, `legacy_reports` opts in. The legacy folder is also the parser's staging
-  area for chat attachments, so it is removed *after* the Conversations report has linked out what it
-  needs — those are hard links, so the bytes survive in `Conversations/media/`.
+  device. The legacy folder is also the parser's staging area for chat attachments, so it is removed
+  *after* the Conversations report has linked out what it needs — those are hard links, so the bytes
+  survive in `Conversations/media/`.
+
+  Since v1.6.0-beta.4 they are off for a **full** run too, so this is no longer a partial-report
+  policy but one setting for the whole run: the GUI asks once on its main window, `--legacy-reports
+  yes` is the headless form, and it overrides the `legacy_reports` token a selection file may still
+  record. Asking the same question in two places, with one of them winning, is how an examiner ends
+  up unsure which answer the report was built with.
 * **`Communications_legacy/cache_links.json`**, which names every message of every conversation.
 * **`CacheController/sqlite_views/`** — the staged copies of `cache_controller.db`, with its write-ahead
   log applied and without. In a full report those are transparency: any figure can be read back from the

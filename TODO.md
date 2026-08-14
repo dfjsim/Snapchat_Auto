@@ -34,6 +34,17 @@ corpus these are the correct answers, not defects.
   - The selection half exists: conversations are selectable on the index (kind `conv`) and
     individual messages on a detail page (kind `msg`), shared with every other report through
     `Reports/selection.js`. What is missing is the export.
+- **Both legacy reports are now OFF by default** (v1.6.0-beta.4): the GUI's "Include the legacy
+  reports" checkbox on the main window, `--legacy-reports yes` headlessly. That is one step short of
+  removal and it already buys the correctness argument below — a run that does not produce them does
+  not write into the extracted evidence copy at all.
+  - **Measured**: producing them leaves reassembled whole cache files in
+    `ExtractedData/.../SCContent_*` beside the device's own shards, and the cache_controller report
+    then reads those back as if they were device data — the affected rows pick up an extra token in
+    their search text. With the legacy reports off, the extraction folder is left exactly as
+    unzipped. Same device, same build, the two runs differing only in that flag.
+  - So the remaining removal work is bounded: everything else in a full report is byte-identical
+    between the two runs (checked file by file, run identity normalised).
 - Validate against the legacy report on more extractions, then remove the legacy one:
   - message counts per conversation, and the rows each report drops (see `_drop_unrenderable`);
   - that every attachment the legacy report inlined is also shown here, with the same bytes;
