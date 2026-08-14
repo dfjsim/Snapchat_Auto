@@ -173,6 +173,12 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   [stark4n6](https://github.com/stark4n6) — <https://github.com/DFIR-HBG/Snapchat_Auto>.
 - **Licence:** MIT, © 2022 DFIR-HBG. The original [LICENSE](LICENSE) is retained unmodified and
   covers this fork, including all modifications made here.
+- **Bundled dependencies keep their own licences.** The packaged EXE and MSI carry third-party
+  libraries, and one of them is copyleft: the GUI toolkit **FreeSimpleGUI is LGPLv3+**. That is
+  compatible with an MIT application, and the obligation it brings is on *distribution* — ship the
+  licence text and notice, say that the library is used and under which licence, and make its source
+  available (upstream is enough). It is dynamically imported and replaceable, never statically linked
+  into the application's own code.
 - Fork maintained by [dfjs1m](https://github.com/dfjs1m). Bugs in the original tool
   should be reported upstream; only fork-specific issues belong here.
 - **Development note:** the fork-specific features and fixes listed under
