@@ -1,6 +1,6 @@
 [project]
     name = "Snapchat_Auto"
-    version = "1.6.0-beta.4+build.20260813"
+    version = "1.6.0-beta.4+build.20260814"
     description = "Add your description here"
     readme = "README.md"
     requires-python = ">=3.14,<3.15"
@@ -73,7 +73,7 @@
     # The date lives in the fourth field, which Windows Installer **ignores** when comparing versions.
     # That is safe here only because the bundled WiX template sets AllowSameVersionUpgrades="yes":
     # without it, a second beta sharing these first three fields would not be seen as an upgrade.
-    version = "1.6.0.20260813"
+    version = "1.6.0.20260814"
 
 [tool.wix-build]
     # Copied next to the built executable and into the MSI. pyproject.toml is how the installed
