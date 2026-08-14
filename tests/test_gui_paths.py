@@ -121,16 +121,24 @@ def test_a_question_mark_keeps_its_text_and_shows_it_on_demand(monkeypatch):
     """Every explanation used to be printed under its field, which is accurate and unreadable: a form
     of twenty settings became a wall of prose. The text is the same; where it lives is not."""
     shown = {}
-    monkeypatch.setattr(app.sg, "popup", lambda body, **kw: shown.update(body=body, kw=kw))
-    monkeypatch.setattr(app.sg, "popup_scrolled", lambda body, **kw: shown.update(body=body, kw=kw))
+    monkeypatch.setattr(app, "_show_help_window",
+                        lambda title, body: shown.update(title=title, body=body))
 
     mark = app._help("The keychain is only needed for iOS.", title="Keychain")
 
     assert app._handle_help(mark.Key) is True
+    assert shown["title"] == "Keychain"
     assert "keychain is only needed" in shown["body"]
-    assert shown["kw"]["title"] == "Keychain"
     # and on hover, without a click (the live TooltipObject only exists once it is in a window)
     assert "keychain is only needed" in mark.Tooltip
+
+
+def test_the_mark_is_something_you_can_press():
+    """"(?)" set in text read as a footnote. A mark that does something has to look like it does."""
+    mark = app._help("anything")
+
+    assert mark.__class__.__name__ == "Button"
+    assert mark.ButtonText == "?"
 
 
 def test_an_ordinary_event_is_not_swallowed():
@@ -139,17 +147,19 @@ def test_an_ordinary_event_is_not_swallowed():
     assert app._handle_help(None) is False
 
 
-def test_a_long_explanation_gets_a_scrollable_popup(monkeypatch):
-    calls = []
-    monkeypatch.setattr(app.sg, "popup", lambda body, **kw: calls.append("popup"))
-    monkeypatch.setattr(app.sg, "popup_scrolled", lambda body, **kw: calls.append("scrolled"))
+def test_the_popup_text_is_wrapped_once_and_keeps_its_paragraphs():
+    """The ragged popups were text wrapped twice — here at 76 columns, then again by the label at
+    whatever width the window turned out to be. One wrap, and the window is built to that width."""
+    text = ("A selection.json an examiner saved from the reports, which names the rows to render.\n\n"
+            "The whole workflow is in the guide.")
 
-    short = app._help("Two words.")
-    long = app._help("word " * 400)
-    app._handle_help(short.Key)
-    app._handle_help(long.Key)
+    body = app.help_body(text)
 
-    assert calls == ["popup", "scrolled"]
+    assert max(len(line) for line in body.split("\n")) <= app.HELP_WRAP
+    assert "\n\n" in body, "the blank line between paragraphs has to survive"
+    assert body.count("\n\n") == 1
+    # and no line is broken mid-word
+    assert all(not line.startswith(" ") for line in body.split("\n") if line)
 
 
 def test_a_hint_is_a_point_smaller_than_the_body_text():

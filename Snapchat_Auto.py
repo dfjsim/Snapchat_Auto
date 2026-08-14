@@ -96,6 +96,9 @@ _APPEARANCE_LABEL = {"os": "Theme: follow OS", "light": "Theme: light", "dark": 
 #: together.
 BASE_FONT = ("Helvetica", 11)
 HINT_FONT = ("Helvetica", 10)
+#: The heading over each group of settings. Grouping is what replaced the single flat list, where
+#: everything looked equally important and nothing said which fields belonged together.
+SECTION_FONT = ("Helvetica", 11, "bold")
 
 
 def next_appearance(current):
@@ -1047,8 +1050,34 @@ def _help(text, title="About this setting"):
     """
     key = f"help:{len(_HELP)}"
     _HELP[key] = (title, text)
-    return sg.Text("(?)", key=key, enable_events=True, font=HINT_FONT, text_color=hint_color(),
-                   tooltip=textwrap.fill(text, 74), pad=((3, 0), (0, 0)))
+    # A button, not "(?)" in text: a mark that does something has to look like it does something,
+    # and a tk button is the only widget here that reads as pressable at this size.
+    return sg.Button("?", key=key, font=(BASE_FONT[0], BASE_FONT[1] - 1, "bold"), size=(2, 1),
+                     pad=((4, 0), (0, 0)), border_width=1, tooltip=textwrap.fill(text, 74))
+
+
+#: Columns the "?" popup wraps at. One wrap, at a width the window is then built to fit — text
+#: wrapped twice (once by us, once by the widget) is what made the popups ragged.
+HELP_WRAP = 74
+
+
+def help_body(text, width=HELP_WRAP):
+    """*text* wrapped **once**, with its paragraph breaks kept.
+
+    The popups were ragged because the text was wrapped twice: once here at 76 columns, and then
+    again by the label at whatever width the window happened to be. One wrap, and the window is
+    then built to that width.
+    """
+    return "\n\n".join(textwrap.fill(para, width) for para in str(text).split("\n\n"))
+
+
+def _show_help_window(title, body):
+    """The "?" popup. Split out so the rest can be tested without opening a modal window."""
+    rows = min(body.count("\n") + 1, 22)
+    layout = [[sg.Text(body, size=(HELP_WRAP, rows), font=BASE_FONT)],
+              [sg.Push(), sg.Button("Close", key="close", size=(10, 1)), sg.Push()]]
+    window = sg.Window(title, layout, modal=True, keep_on_top=True, finalize=True)
+    window.read(close=True)
 
 
 def _handle_help(event):
@@ -1057,12 +1086,7 @@ def _handle_help(event):
     if entry is None:
         return False
     title, text = entry
-    body = textwrap.fill(text, 76)
-    rows = body.count("\n") + 1
-    if rows > 12:
-        sg.popup_scrolled(body, title=title, size=(78, 14), keep_on_top=True)
-    else:
-        sg.popup(body, title=title, keep_on_top=True, font=BASE_FONT)
+    _show_help_window(title, help_body(text))
     return True
 
 
@@ -1234,6 +1258,27 @@ def _relations_dialog(state):
         window.close()
 
 
+#: How much of the screen the form's viewport may take, and the floor below which it scrolls anyway.
+_VIEW_MAX = (1000, 880)
+_VIEW_MIN = (720, 420)
+#: Room for the title bar, the Ok/Cancel row and the taskbar.
+_VIEW_MARGIN = (200, 220)
+
+
+def _viewport_size(screen=None):
+    """The size to open the scrolling form at: as much as the screen allows, within reason.
+
+    A fixed height is a guess about somebody else's monitor. Too tall and the buttons are off the
+    bottom of a laptop screen; too short and a form that would have fitted opens already scrolled.
+    """
+    try:
+        width, height = screen or sg.Window.get_screen_size()
+    except Exception:                                       # noqa: BLE001 - no display to ask
+        width, height = 1280, 800
+    return (max(_VIEW_MIN[0], min(_VIEW_MAX[0], width - _VIEW_MARGIN[0])),
+            max(_VIEW_MIN[1], min(_VIEW_MAX[1], height - _VIEW_MARGIN[1])))
+
+
 def build_settings_window(cfg, prefill=None, relations=None):
     """The settings window, its path bookkeeping and the relation policy it starts with.
 
@@ -1254,10 +1299,20 @@ def build_settings_window(cfg, prefill=None, relations=None):
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
                       "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
     layout = [
-        [sg.Text("Select Settings"), sg.Push(),
+        [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
          sg.Button(appearance_label(cfg.get("appearance", "os")), key="appearance_toggle",
                    tooltip="Follow the OS setting, or force light or dark. Remembered "
                            "between runs.")],
+        # First, because it belongs to the case rather than to a setting, it is stamped on every page
+        # of anything handed over, and it is the one field deliberately not remembered between runs.
+        [sg.Text('Case / exhibit reference', font=SECTION_FONT, pad=((0, 0), (10, 2))),
+         _help('Stamped on every page of a partial report. Not remembered between runs: carrying '
+               'one case reference onto another case is a real error, and a saved default is how '
+               'that happens.', title="Case / exhibit reference")],
+        [sg.In("", key="case_ref", size=(PATH_WIDTH, 1), expand_x=True)],
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
+        [sg.Text('Evidence', font=SECTION_FONT)],
         [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
         [sg.Text('Extraction zip')],
         [sg.In("", key="zip", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True,
@@ -1274,22 +1329,28 @@ def build_settings_window(cfg, prefill=None, relations=None):
         [sg.In(cfg.get("workdir", ""), key="workdir", size=(PATH_WIDTH, 1), expand_x=True,
                enable_events=True),
          sg.FolderBrowse(target="workdir", initial_folder=cfg.get("workdir") or ".")],
-        [sg.Text('Memories media hashes (iOS)'),
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
+        [sg.Text('Report options', font=SECTION_FONT)],
+        [sg.Text('Memories media hashes (iOS)', size=(28, 1)),
          sg.Combo(PADDING_OPTIONS, default_value=cfg.get("padding", PADDING_OPTIONS[0]), key="padding", readonly=True, size=(30, 1))],
-        [sg.Text('Timestamp timezone (iOS)'),
+        [sg.Text('Timestamp timezone (iOS)', size=(28, 1)),
          sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
-         sg.Text('(or type an IANA name / ±HH:MM)'),
+         sg.Text('(or an IANA name / ±HH:MM)'),
          _help('Daylight saving time is applied automatically for named zones '
                '(e.g. America/Toronto). A fixed ±HH:MM offset is taken literally and never adjusted.',
                title="Timestamp timezone")],
-        [sg.Text('Offline map tile server (optional)'),
+        [sg.Text('Offline map tile server (optional)', pad=((0, 0), (8, 2))),
          _help('Your own XYZ tile server, e.g. http://localhost:8080 or '
                'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
                'map on its detail page. Nothing is downloaded when this is empty — this tool never '
                'reaches out to the internet on its own.', title="Offline map tile server")],
         [sg.In(cfg.get("tile_server", ""), key="tile_server", size=(PATH_WIDTH, 1), expand_x=True),
          sg.Button('Test', key="tile_test")],
-        [sg.Text('Selection file — build a partial report (optional, iOS)'),
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
+        [sg.Text('Partial report — selected rows only (optional, iOS)', font=SECTION_FONT)],
+        [sg.Text('Selection file'),
          _help('A selection.json an examiner saved from the reports. With one, this run renders only '
                'the rows it names plus the related items you choose, into its own '
                'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
@@ -1306,11 +1367,10 @@ def build_settings_window(cfg, prefill=None, relations=None):
                '(Load…), see what came in and why, untick anything you do not want, save, and '
                'build from that file. Nothing is built by this run.', title="Expand and check")],
         [sg.Text('', key="selection_note", font=HINT_FONT, text_color=hint_color())],
-        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)'),
-         _help('Not remembered between runs: carrying one case reference onto another case is a real '
-               'error, and a saved default is how that happens.', title="Case / exhibit reference")],
-        [sg.In("", key="case_ref", size=(PATH_WIDTH, 1), expand_x=True)],
-        [sg.Text('Folder with newer builds, for update checks (optional)'),
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
+        [sg.Text('Updates', font=SECTION_FONT)],
+        [sg.Text('Folder with newer builds (optional)'),
          _help('A folder where your organization publishes new builds of this tool (e.g. a '
                'shared drive). At each start, a newer installer found there is offered. The '
                'folder is only checked at the next start, and only when this is not empty.',
@@ -1321,13 +1381,15 @@ def build_settings_window(cfg, prefill=None, relations=None):
          sg.Button('Check', key="installer_check")],
         ]
 
-    # The form is taller than a laptop screen once every optional section is on it, so it scrolls
-    # inside a resizable window rather than being cut off at the bottom with the buttons out of
-    # reach. Ok/Cancel sit OUTSIDE the scrolling area, where they cannot be scrolled away from.
+    # It scrolls when it must, but opening already scrolled is most of what "crammed" means — so the
+    # viewport is as tall as the screen allows rather than a fixed guess, leaving room for the title
+    # bar, the button row and the taskbar. Ok/Cancel sit OUTSIDE the scrolling area, where they
+    # cannot be scrolled away from.
+    view = _viewport_size()
     window = sg.Window(
         f'Snapchat Auto v{get_version()}',
         [[sg.Column(layout, key="form", scrollable=True, vertical_scroll_only=True,
-                    expand_x=True, expand_y=True, size=(940, 640), pad=(0, 0))],
+                    expand_x=True, expand_y=True, size=view, pad=(0, 0))],
          [sg.Column([[sg.Button('Ok', size=(10, 1)), sg.Button('Cancel', size=(10, 1))]],
                     expand_x=True, element_justification="right", pad=(8, 8))]],
         resizable=True, finalize=True)
