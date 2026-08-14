@@ -15,6 +15,7 @@ import logging
 import datetime
 import textwrap
 from html import escape as _esc
+from platform import system
 
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;0"
 
@@ -75,6 +76,103 @@ PADDING_MAP = {'Both (with & without padding)': 'both', 'Without padding only': 
 TZ_OPTIONS = ['Local time', 'UTC', 'America/Toronto', 'America/New_York', 'America/Chicago',
               'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Australia/Sydney']
 
+# --------------------------------------------------------------------------- looks
+
+#: Theme per OS appearance. The default (DarkBlue3) is a mid-blue that every hint had to be printed
+#: near-white on to be legible at all, which is how the form ended up as pale text on pale blue.
+#: These two are neutral, so a hint can simply be a *quieter* shade of the ordinary text colour.
+_THEME = {"dark": "DarkGrey13", "light": "SystemDefaultForReal"}
+#: A hint is secondary, not disabled: readable, and plainly not the field's own label.
+_HINT_COLOR = {"dark": "#b9bec7", "light": "#4a4a4a"}
+_appearance = "light"
+
+
+def os_appearance():
+    """``"dark"`` or ``"light"``, from the OS where it can be read — Windows only, and never fatal.
+
+    Nothing about a run depends on this, so every failure path lands on "light": an unreadable
+    registry, a non-Windows host, a policy that removed the key.
+    """
+    if system() != "Windows":
+        return "light"
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return "light" if winreg.QueryValueEx(key, "AppsUseLightTheme")[0] else "dark"
+    except Exception as error:                              # noqa: BLE001 - appearance is cosmetic
+        logger.debug(f"Could not read the OS appearance setting: {error}")
+        return "light"
+
+
+def apply_theme(appearance=None):
+    """Pick the window theme to match the OS, once, before any window is built."""
+    global _appearance
+    _appearance = appearance or os_appearance()
+    sg.theme(_THEME[_appearance])
+    return _appearance
+
+
+def hint_color():
+    return _HINT_COLOR[_appearance]
+
+
+# --------------------------------------------------------------------------- long paths in a field
+
+#: The fields holding a filesystem path, which are the ones long enough to need eliding.
+PATH_KEYS = ("zip", "keychain", "workdir", "selection", "installer_dir")
+#: How wide those input boxes are, in characters. Also what decides when a path is too long to show.
+PATH_WIDTH = 74
+
+
+def elide_middle(text, width=PATH_WIDTH):
+    """A path shortened from the MIDDLE, so the drive and the file name both stay visible.
+
+    ``C:/Users/…/EXTRACTION_FFS.zip`` — which of the two ends matters depends on what the examiner
+    is checking (the right case folder, or the right file), and a box that shows only one of them
+    answers half the question. Text that already fits is returned unchanged.
+    """
+    text = str(text or "")
+    if len(text) <= width or width < 12:
+        return text
+    keep = width - 1                                        # the ellipsis takes one column
+    head = (keep + 1) // 2
+    return text[:head] + "\u2026" + text[len(text) - (keep - head):]
+
+
+def _show_path(window, real, key, focused):
+    """Draw one path field: whole while it has focus, elided while it does not."""
+    element = window[key]
+    element.update(real.get(key, "") if focused else elide_middle(real.get(key, "")))
+    if not focused:
+        # the box shows an abbreviation, so the full path has to be reachable without clicking in
+        element.set_tooltip(real.get(key, "") or None)
+
+
+def _set_path(window, real, key, value):
+    """Record a path the GUI itself chose (a Browse result, «Use previous»), then redraw it."""
+    real[key] = value or ""
+    _show_path(window, real, key, focused=False)
+
+
+def reconcile_paths(values, real):
+    """Put the true paths back into *values*, and take up anything the examiner typed.
+
+    The elision is a **display**: the box can be showing ``C:/Users/…/x.zip`` while the field's value
+    is the whole path. Every read of ``values`` downstream — validation, the saved config, the run
+    itself — has to see the real one, so this runs once, immediately after ``window.read()``, rather
+    than being remembered at fifteen call sites. A box whose text is not the elision we produced has
+    been edited, and what it shows is then the truth.
+    """
+    for key in PATH_KEYS:
+        if key not in values:
+            continue
+        shown = values.get(key) or ""
+        if shown != elide_middle(real.get(key, "")):
+            real[key] = shown                               # typed or pasted: this is now the value
+        values[key] = real.get(key, shown)
+    return values
+
 
 def load_config():
     try:
@@ -117,7 +215,8 @@ def show_disclaimer(cfg):
         [sg.Push(), sg.Button("I understand", key="ok"), sg.Push()],
     ]
     try:
-        window = sg.Window("Snapchat Auto — Disclaimer", layout, modal=True, keep_on_top=True)
+        window = sg.Window("Snapchat Auto — Disclaimer", layout, modal=True, keep_on_top=True,
+                           resizable=True)
         _, values = window.read(close=True)
     except Exception as error:                              # never let the dialog block a run
         logger.debug(f"Could not show disclaimer dialog: {error}")
@@ -885,10 +984,10 @@ def _hint(text, width=88):
     element whose size spans several rows, and then at a pixel width it derives from the font — so
     the row count has to be guessed right or the text is silently clipped. Wrapping the string
     keeps every hint inside the width the rest of the layout already needs, instead of stretching
-    the window to fit one long line. The colour is near-white: grey text was all but invisible on
-    this theme's mid-blue background, and the smaller font is what marks a hint as secondary.
+    the window to fit one long line. The colour is a quieter shade of the theme's own text — it was
+    near-white, which the old mid-blue theme forced and which read as washed-out on anything else.
     """
-    return sg.Text(textwrap.fill(text, width), font=("", 9), text_color="#eef3fa")
+    return sg.Text(textwrap.fill(text, width), font=("", 9), text_color=hint_color())
 
 
 def _relations_spec(state):
@@ -1027,10 +1126,11 @@ def _relations_dialog(state):
     rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
                  sg.Button("Ok"), sg.Button("Cancel")])
 
-    window = sg.Window("Related items to include", [[sg.Column(rows, scrollable=True,
-                                                               vertical_scroll_only=True,
-                                                               size=(760, 560))]],
-                       modal=True, keep_on_top=True)
+    window = sg.Window("Related items to include",
+                       [[sg.Column(rows, scrollable=True, vertical_scroll_only=True,
+                                   expand_x=True, expand_y=True, size=(820, 580))]],
+                       modal=True, keep_on_top=True, resizable=True, finalize=True)
+    window.set_min_size((700, 420))
     try:
         while True:
             event, values = window.read()
@@ -1052,6 +1152,102 @@ def _relations_dialog(state):
                 return
     finally:
         window.close()
+
+
+def build_settings_window(cfg):
+    """The settings window, its path bookkeeping and the relation policy it starts with.
+
+    Returns ``(window, real, relation_state)``. Split out of ``main()`` so that it can be
+    built and inspected without a person clicking anything: a mistyped element argument, a
+    binding on a key that no longer exists or a theme that will not load are all things that
+    otherwise surface only when an examiner opens the app.
+    """
+    has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
+    # The relation policy for a partial run, remembered between runs (the selection file and the case
+    # reference are not — see the hints below the fields).
+    relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
+                                        or partial_report.PRESETS["recommended"]),
+                      "transitive": bool(cfg.get("partial", {}).get("transitive")),
+                      "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
+    layout = [
+        [sg.Text("Select Settings")],
+        [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
+        [sg.Text('Extraction zip')],
+        [sg.In("", key="zip", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True,
+               tooltip="The extraction ZIP. A long path is shortened in the middle for display; "
+                       "the whole path is what the run uses."),
+         sg.Button('Browse', key="zip_browse"),
+         sg.Button('Use previous', key="zip_prev", visible=has_zip, tooltip=cfg.get("zip", ""))],
+        [sg.Text('Keychain (iOS Only)')],
+        [sg.In("", key="keychain", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True,
+               tooltip="The keychain/keystore plist. Optional for Android."),
+         sg.Button('Browse', key="keychain_browse"),
+         sg.Button('Use previous', key="keychain_prev", visible=has_kc, tooltip=cfg.get("keychain", ""))],
+        [sg.Text('Working/Temp/Report directory (required)')],
+        [sg.In(cfg.get("workdir", ""), key="workdir", size=(PATH_WIDTH, 1), expand_x=True,
+               enable_events=True),
+         sg.FolderBrowse(target="workdir", initial_folder=cfg.get("workdir") or ".")],
+        [sg.Text('Memories media hashes (iOS)'),
+         sg.Combo(PADDING_OPTIONS, default_value=cfg.get("padding", PADDING_OPTIONS[0]), key="padding", readonly=True, size=(30, 1))],
+        [sg.Text('Timestamp timezone (iOS)'),
+         sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
+         sg.Text('(or type an IANA name / ±HH:MM)')],
+        [_hint('Daylight saving time is applied automatically for named zones '
+               '(e.g. America/Toronto).')],
+        [sg.Text('Offline map tile server (optional)')],
+        [sg.In(cfg.get("tile_server", ""), key="tile_server", size=(PATH_WIDTH, 1), expand_x=True),
+         sg.Button('Test', key="tile_test")],
+        [_hint('Your own XYZ tile server, e.g. http://localhost:8080 or '
+               'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
+               'map on its detail page. Nothing is downloaded when this is empty.')],
+        [sg.Text('Selection file — build a partial report (optional, iOS)')],
+        [sg.In("", key="selection", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True),
+         sg.Button('Browse', key="selection_browse"),
+         sg.Button('Related items…', key="relations_edit")],
+        [_hint('A selection.json an examiner saved from the reports. With one, this run renders only '
+               'the rows it names plus the related items you choose, into its own '
+               'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
+               'for a normal, complete run.')],
+        [sg.Checkbox('Expand and check first — write the expanded selection, build nothing',
+                     key="expand_only")],
+        [_hint('Writes <selection>.expanded.json beside the selection file: every row the extract '
+               'would hold, with the ones the relations added marked. Load it in the full report '
+               '(Load…), see what came in and why, untick anything you do not want, save, and '
+               'build from that file. Nothing is built by this run.')],
+        [sg.Text('', key="selection_note", font=("", 9), text_color="#eef3fa")],
+        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
+        [sg.In("", key="case_ref", size=(PATH_WIDTH, 1), expand_x=True)],
+        [_hint('Not remembered between runs: carrying one case reference onto another case is a real '
+               'error, and a saved default is how that happens.')],
+        [sg.Text('Folder with newer builds, for update checks (optional)')],
+        [sg.In(cfg.get("installer_dir", ""), key="installer_dir", size=(PATH_WIDTH, 1),
+               expand_x=True, enable_events=True),
+         sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
+         sg.Button('Check', key="installer_check")],
+        [_hint('A folder where your organization publishes new builds of this tool (e.g. a '
+               'shared drive). At each start, a newer installer found there is offered. The '
+               'folder is only checked at the next start, and only when this is not empty.')],
+        ]
+
+    # The form is taller than a laptop screen once every optional section is on it, so it scrolls
+    # inside a resizable window rather than being cut off at the bottom with the buttons out of
+    # reach. Ok/Cancel sit OUTSIDE the scrolling area, where they cannot be scrolled away from.
+    window = sg.Window(
+        f'Snapchat Auto v{get_version()}',
+        [[sg.Column(layout, key="form", scrollable=True, vertical_scroll_only=True,
+                    expand_x=True, expand_y=True, size=(940, 640), pad=(0, 0))],
+         [sg.Column([[sg.Button('Ok', size=(10, 1)), sg.Button('Cancel', size=(10, 1))]],
+                    expand_x=True, element_justification="right", pad=(8, 8))]],
+        resizable=True, finalize=True)
+    window.set_min_size((760, 420))
+    # Every path the examiner sees is elided for display; `real` is what the run gets. See
+    # reconcile_paths, which is the single place the two are put back together.
+    real = {key: (window[key].get() if key in window.AllKeysDict else "") for key in PATH_KEYS}
+    for key in PATH_KEYS:
+        window[key].bind("<FocusIn>", "+FOCUSIN")
+        window[key].bind("<FocusOut>", "+FOCUSOUT")
+        _show_path(window, real, key, focused=False)
+    return window, real, relation_state
 
 
 def main(args):
@@ -1083,6 +1279,9 @@ def main(args):
         sys.exit(2)                                           # through to the GUI
 
     logger.info(f"Snapchat Auto v{get_version()}")
+    # Before any window is built, including the update prompt and the disclaimer, so every one of
+    # them matches the OS rather than the first one setting the tone for the rest.
+    logger.debug(f"GUI appearance: {apply_theme()}")
     cfg = load_config()
     # Only for an examiner who pointed the tool at a folder of newer builds (GUI field below).
     # It runs before anything else because accepting an update launches the installer and ends
@@ -1098,88 +1297,36 @@ def main(args):
                 return os.path.dirname(candidate)
         return "."
 
-    has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
-    # The relation policy for a partial run, remembered between runs (the selection file and the case
-    # reference are not — see the hints below the fields).
-    relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
-                                        or partial_report.PRESETS["recommended"]),
-                      "transitive": bool(cfg.get("partial", {}).get("transitive")),
-                      "legacy_reports": bool(cfg.get("partial", {}).get("legacy_reports"))}
-    layout = [
-        [sg.Text("Select Settings")],
-        [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
-        [sg.Text('Extraction zip')],
-        [sg.In("", key="zip"), sg.Button('Browse', key="zip_browse"),
-         sg.Button('Use previous', key="zip_prev", visible=has_zip, tooltip=cfg.get("zip", ""))],
-        [sg.Text('Keychain (iOS Only)')],
-        [sg.In("", key="keychain"), sg.Button('Browse', key="keychain_browse"),
-         sg.Button('Use previous', key="keychain_prev", visible=has_kc, tooltip=cfg.get("keychain", ""))],
-        [sg.Text('Working/Temp/Report directory (required)')],
-        [sg.In(cfg.get("workdir", ""), key="workdir"),
-         sg.FolderBrowse(target="workdir", initial_folder=cfg.get("workdir") or ".")],
-        [sg.Text('Memories media hashes (iOS)'),
-         sg.Combo(PADDING_OPTIONS, default_value=cfg.get("padding", PADDING_OPTIONS[0]), key="padding", readonly=True, size=(30, 1))],
-        [sg.Text('Timestamp timezone (iOS)'),
-         sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
-         sg.Text('(or type an IANA name / ±HH:MM)')],
-        [_hint('Daylight saving time is applied automatically for named zones '
-               '(e.g. America/Toronto).')],
-        [sg.Text('Offline map tile server (optional)')],
-        [sg.In(cfg.get("tile_server", ""), key="tile_server"),
-         sg.Button('Test', key="tile_test")],
-        [_hint('Your own XYZ tile server, e.g. http://localhost:8080 or '
-               'http://host/tiles/{z}/{x}/{y}.png. When set, each geolocated Memory gets a small '
-               'map on its detail page. Nothing is downloaded when this is empty.')],
-        [sg.Text('Selection file — build a partial report (optional, iOS)')],
-        [sg.In("", key="selection", enable_events=True),
-         sg.Button('Browse', key="selection_browse"),
-         sg.Button('Related items…', key="relations_edit")],
-        [_hint('A selection.json an examiner saved from the reports. With one, this run renders only '
-               'the rows it names plus the related items you choose, into its own '
-               'Reports_partial_<stamp>/ folder — the full reports are never touched. Leave empty '
-               'for a normal, complete run.')],
-        [sg.Checkbox('Expand and check first — write the expanded selection, build nothing',
-                     key="expand_only")],
-        [_hint('Writes <selection>.expanded.json beside the selection file: every row the extract '
-               'would hold, with the ones the relations added marked. Load it in the full report '
-               '(Load…), see what came in and why, untick anything you do not want, save, and '
-               'build from that file. Nothing is built by this run.')],
-        [sg.Text('', key="selection_note", font=("", 9), text_color="#eef3fa")],
-        [sg.Text('Case / exhibit reference (stamped on every page of a partial report)')],
-        [sg.In("", key="case_ref")],
-        [_hint('Not remembered between runs: carrying one case reference onto another case is a real '
-               'error, and a saved default is how that happens.')],
-        [sg.Text('Folder with newer builds, for update checks (optional)')],
-        [sg.In(cfg.get("installer_dir", ""), key="installer_dir"),
-         sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
-         sg.Button('Check', key="installer_check")],
-        [_hint('A folder where your organization publishes new builds of this tool (e.g. a '
-               'shared drive). At each start, a newer installer found there is offered. The '
-               'folder is only checked at the next start, and only when this is not empty.')],
-        [sg.Button('Ok'), sg.Button('Cancel')]]
-
-    window = sg.Window(f'Snapchat Auto v{get_version()}', layout)
+    window, real, relation_state = build_settings_window(cfg)
     while True:
         event, values = window.read()
+        values = reconcile_paths(values, real)
+        # A path is shown whole while it is being edited and elided as soon as it is not: the
+        # examiner can always select and correct the real thing.
+        if isinstance(event, str) and event.endswith(("+FOCUSIN", "+FOCUSOUT")):
+            key, _, which = event.rpartition("+")
+            if key in PATH_KEYS:
+                _show_path(window, real, key, focused=(which == "FOCUSIN"))
+            continue
         if event in (sg.WIN_CLOSED, "Cancel"):
             window.close()
             sys.exit()
         if event == "zip_prev":
-            window["zip"].update(cfg.get("zip", ""))
+            _set_path(window, real, "zip", cfg.get("zip", ""))
         elif event == "keychain_prev":
-            window["keychain"].update(cfg.get("keychain", ""))
+            _set_path(window, real, "keychain", cfg.get("keychain", ""))
         elif event == "zip_browse":
             picked = sg.popup_get_file("Select extraction ZIP", no_window=True, keep_on_top=True,
                                        initial_folder=_browse_start(values["zip"], values["keychain"], "zip"),
                                        file_types=(("All Files", "*.*"),))
             if picked:
-                window["zip"].update(picked)
+                _set_path(window, real, "zip", picked)
         elif event == "keychain_browse":
             picked = sg.popup_get_file("Select keychain", no_window=True, keep_on_top=True,
                                        initial_folder=_browse_start(values["keychain"], values["zip"], "keychain"),
                                        file_types=(("Keychain (plist/json)", "*.plist *.json"), ("All Files", "*.*")))
             if picked:
-                window["keychain"].update(picked)
+                _set_path(window, real, "keychain", picked)
         elif event == "tile_test":
             if not values["tile_server"].strip():
                 sg.popup("Enter a tile server URL first (or leave it empty for no maps).",
@@ -1199,7 +1346,7 @@ def main(args):
                                        initial_folder=_browse_start(values["selection"],
                                                                    values["zip"], "workdir"))
             if picked:
-                window["selection"].update(picked)
+                _set_path(window, real, "selection", picked)
                 _describe_selection(window, picked, values)
         elif event == "selection":
             _describe_selection(window, values["selection"], values)
