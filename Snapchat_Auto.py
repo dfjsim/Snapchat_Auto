@@ -9,6 +9,7 @@ from scripts import app_version
 from scripts import selection_file
 from scripts import source_fingerprint
 from scripts import partial_report
+from scripts import hidpi
 import os
 import json
 import logging
@@ -70,6 +71,14 @@ def check_installer_dir(directory):
 
 # Remembered GUI selections persist here between runs.
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".snapchat_auto_gui.json")
+
+# Here because it needs CONFIG_PATH (an examiner's saved preference is one of the things that
+# decides it) and because it must run before any window exists: Tk reads the screen's DPI when its
+# first interpreter is created, and awareness can only be claimed once per process. Claim nothing
+# and the process is DPI *unaware*, so Windows draws it at 96 dpi and stretches the result up to
+# the display — which is the soft, slightly smeared text on any screen that is not at 100%.
+# See scripts/hidpi.py, and --dpi-report for what it resolved to on a given machine.
+_DPI = hidpi.configure(sys.argv[1:], CONFIG_PATH)
 
 PADDING_OPTIONS = ['Both (with & without padding)', 'Without padding only', 'With padding only']
 PADDING_MAP = {'Both (with & without padding)': 'both', 'Without padding only': 'strip', 'With padding only': 'keep'}
@@ -146,7 +155,7 @@ def apply_theme(setting=None):
     else:
         _appearance = os_appearance()
     sg.theme(_THEME[_appearance])
-    sg.set_options(font=BASE_FONT)
+    sg.set_options(font=BASE_FONT, scaling=hidpi.tk_scaling())
     return _appearance
 
 
@@ -634,6 +643,22 @@ def print_usage():
           "  --make-selection <out.json> --items <items.json> [--relations <spec>] [--note <text>]\n"
           "                          Build a selection from identifiers, without importing anything:\n"
           "                          items.json is a list of {\"kind\": ..., <identifiers>} objects.\n\n"
+          "Display scaling (Windows). Add these to any of the above, or use them alone with the\n"
+          "GUI. The first two are also read from the environment (SNAPCHAT_AUTO_DPI_AWARENESS,\n"
+          "SNAPCHAT_AUTO_DPI_SCALE) and from \"dpi_awareness\" / \"dpi_scale\" in\n"
+          "~/.snapchat_auto_gui.json, in that order of precedence:\n"
+          "  --dpi-awareness <mode>  auto (default), permonitor, system, or unaware. The window is\n"
+          "                          drawn at the display's real DPI unless this says otherwise;\n"
+          "                          'unaware' reproduces the pre-1.6 rendering, where Windows drew\n"
+          "                          it at 96 dpi and enlarged the result, so the two can be\n"
+          "                          compared in one build instead of by keeping an old EXE.\n"
+          "  --dpi-scale <n>         Lay the GUI out for this scale whatever the display reports:\n"
+          "                          125, '125%' and 1.25 all mean the same thing, 50-400. Use it\n"
+          "                          to make the text bigger or smaller than Windows' own setting.\n"
+          "  --dpi-report            Print what the display, the session and Tk each report, with\n"
+          "                          the unaware and aware readings side by side, and exit. This is\n"
+          "                          the thing to send when text looks soft: it says whether the\n"
+          "                          softening is happening in the app, or outside it.\n\n"
           "Other:\n"
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
@@ -1253,9 +1278,9 @@ def _relations_dialog(state):
 
     window = sg.Window("Related items to include",
                        [[sg.Column(rows, scrollable=True, vertical_scroll_only=True,
-                                   expand_x=True, expand_y=True, size=(820, 580))]],
+                                   expand_x=True, expand_y=True, size=hidpi.px2((820, 580)))]],
                        modal=True, keep_on_top=True, resizable=True, finalize=True)
-    window.set_min_size((700, 420))
+    window.set_min_size(hidpi.px2((700, 420)))
     try:
         while True:
             event, values = window.read()
@@ -1299,8 +1324,12 @@ def _viewport_size(screen=None):
         width, height = screen or sg.Window.get_screen_size()
     except Exception:                                       # noqa: BLE001 - no display to ask
         width, height = 1280, 800
-    return (max(_VIEW_MIN[0], min(_VIEW_MAX[0], width - _VIEW_MARGIN[0])),
-            max(_VIEW_MIN[1], min(_VIEW_MAX[1], height - _VIEW_MARGIN[1])))
+    # All three are pixel counts written for a 100% display, while get_screen_size() reports the
+    # real ones. On a scaled screen the form's *content* is bigger by the same factor, so the box
+    # holding it has to be too — otherwise a window that fitted at 100% opens already scrolled.
+    low, high, margin = hidpi.px2(_VIEW_MIN), hidpi.px2(_VIEW_MAX), hidpi.px2(_VIEW_MARGIN)
+    return (max(low[0], min(high[0], width - margin[0])),
+            max(low[1], min(high[1], height - margin[1])))
 
 
 def build_settings_window(cfg, prefill=None, relations=None):
@@ -1434,7 +1463,7 @@ def build_settings_window(cfg, prefill=None, relations=None):
          [sg.Column([[sg.Button('Ok', size=(10, 1)), sg.Button('Cancel', size=(10, 1))]],
                     expand_x=True, element_justification="right", pad=(8, 8))]],
         resizable=True, finalize=True)
-    window.set_min_size((760, 420))
+    window.set_min_size(hidpi.px2((760, 420)))
     # Every path the examiner sees is elided for display; `real` is what the run gets. See
     # reconcile_paths, which is the single place the two are put back together.
     real = {key: (window[key].get() if key in window.AllKeysDict else "") for key in PATH_KEYS}
@@ -1458,6 +1487,13 @@ def build_settings_window(cfg, prefill=None, relations=None):
 
 
 def main(args):
+    # The --dpi-* options were applied at import (they have to be, to beat the first window) and are
+    # dropped here so the dispatch below never sees them: it reads args[0] only, so "--dpi-scale 150"
+    # left in place would be taken for an unknown command and print the usage instead of opening the
+    # window it was asked for. They are modifiers on whatever else was asked, GUI or headless alike.
+    args = hidpi.strip_options(args)[1]
+    if _DPI.get("report"):
+        sys.exit(hidpi.print_report())
     flag = args[0].lstrip("-/").lower() if args else ""
     # Re-entry as the poster-frame worker. A packaged build has no interpreter to run
     # "python -m scripts.data.poster_worker" with — sys.executable IS this program — so the report
@@ -1489,6 +1525,9 @@ def main(args):
     # Before any window is built, including the update prompt and the disclaimer, so every one of
     # them matches the OS rather than the first one setting the tone for the rest.
     cfg = load_config()
+    # Logged because "the text is blurry" arrives as a screenshot, and awareness 0 here is the whole
+    # answer: the window is a 96-dpi bitmap stretched to a display running at something else.
+    logger.info(hidpi.describe(_DPI))
     logger.debug(f"GUI appearance: {apply_theme(cfg.get('appearance', 'os'))} "
                  f"(setting: {cfg.get('appearance', 'os')})")
     # Only for an examiner who pointed the tool at a folder of newer builds (GUI field below).

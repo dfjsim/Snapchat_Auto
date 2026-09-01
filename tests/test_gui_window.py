@@ -42,7 +42,9 @@ def test_the_window_can_be_resized_and_has_a_floor(window):
     win = window[0]
 
     assert win.Resizable is True
-    assert win.TKroot.minsize() == (760, 420)
+    # The floor is a 100% measurement, so what the window carries is that floor at this display's
+    # scale — the test has to run on whatever screen the developer or the CI runner has.
+    assert tuple(win.TKroot.minsize()) == app.hidpi.px2((760, 420))
 
 
 def test_the_buttons_are_outside_the_scrolling_area(window):
@@ -125,13 +127,30 @@ def test_the_form_fits_the_window_it_opens_at(window):
     assert inner.winfo_reqheight() <= app._viewport_size()[1]
 
 
-def test_the_viewport_is_sized_to_the_screen_not_to_a_guess():
+def test_the_viewport_is_sized_to_the_screen_not_to_a_guess(monkeypatch):
     """A fixed height is a guess about somebody else's monitor: too tall puts the buttons off a
     laptop screen, too short opens a form that would have fitted already scrolled."""
+    monkeypatch.setattr(app.hidpi, "dpi", lambda: 96)        # the display these numbers are written for
+
     assert app._viewport_size((3440, 1440)) == app._VIEW_MAX
     assert app._viewport_size((1366, 768)) == (1000, 548)    # width hits the cap, height does not
     assert app._viewport_size((800, 600)) == (720, 420)      # the floor, and it scrolls
     assert app._viewport_size((0, 0)) == app._VIEW_MIN
+
+
+def test_the_viewport_grows_with_the_display_scale(monkeypatch):
+    """A DPI-aware window draws its content bigger, so the box holding the content has to grow too.
+
+    Scaling only the fonts is the half-fix that looks worse than the blur it replaced: crisp text in
+    a form that opens already scrolled, on a screen with room to spare.
+    """
+    monkeypatch.setattr(app.hidpi, "dpi", lambda: 120)       # a 125% display
+
+    # 1920x1200 at 125%: the width reaches the cap (1000 * 1.25), the height is what the screen
+    # leaves after a margin that scaled with it.
+    assert app._viewport_size((1920, 1200)) == (1250, 925)
+    # Small enough to hit the floor, which is itself a 100% measurement.
+    assert app._viewport_size((0, 0)) == (900, 525)
 
 
 # --------------------------------------------------------------------------- the appearance button
