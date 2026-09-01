@@ -30,6 +30,14 @@ Memories / My Eyes Only.
   caller's markup untouched, so full reports are unaffected.
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
+- Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,
+  and supplies the two things that must then follow it: `tk_scaling()` for the point-sized fonts and
+  `px()`/`px2()` for every constant the GUI writes in pixels. Without it the window is a 96-dpi bitmap
+  that Windows stretches, which is the soft text on a scaled screen or over RDP. Adjustable on the
+  command line (`--dpi-awareness`, `--dpi-scale`, `--dpi-report`), from the environment and from the
+  saved GUI settings — `--dpi-awareness unaware` reproduces the pre-1.6 rendering in the current
+  build, because "is this sharper?" cannot be answered without something to compare against. See
+  [hidpi_scaling.md](docs/hidpi_scaling.md).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
   thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
@@ -152,6 +160,10 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   (AES-256-CBC, key + fixed IV in `Documents/ClientEncryptionService.plist`, no keychain), and
   why a root-level filename UUID must never be quoted as a snap id. Implemented by
   `scripts/cache_media_report.py`.
+- [Blurred text on scaled displays and over RDP](docs/hidpi_scaling.md) — why a Tk front end is DPI
+  *unaware* by default and what Windows does about it, the two halves of the fix that have to move
+  together (`tk scaling` for fonts in points, `hidpi.px` for constants in pixels), and why
+  FreeSimpleGUI's own `set_options(dpi_awareness=True)` is a silent no-op on Windows 11.
 - [pandas 3.x / Python 3.14 compatibility notes](docs/pandas3_python314_compat.md) — the strict
   dtype enforcement (`Invalid value 'X' for dtype '…'`), removed `DataFrame.append()`, and the
   per-cell `df.loc[…] = value` pattern that breaks on the current runtime. Read before adding or
