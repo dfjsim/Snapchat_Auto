@@ -148,6 +148,34 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   that teaches an examiner to wave a sidecar difference through.
 
 # Code cleanup, performance and optimization
+- Two locale-encoding defects, found while triaging the test-run warnings (v1.6.0-beta.5). Neither has
+  bitten and neither is a warning; both are one-liners, deliberately NOT done in beta week:
+  - `scripts/data/poster_worker.py` `_spawn()` passes `text=True, errors="replace"` with no
+    `encoding=`, so the pipes carrying file paths use the locale encoding (cp1252 on our machines).
+    A workdir path with a character cp1252 cannot represent degrades to "?", the worker's
+    `START/OK <src>` echo then no longer matches what the parent sent, and that video is silently
+    recorded as having no poster frame. Fix: `encoding="utf-8"` on both ends of the pipe.
+  - `scripts/DecryptLocalMemories_iOS.py:657` writes the legacy Memories HTML with `open(..., 'w')`
+    and no encoding — the only locale-encoded text write left in the shipped code — and its content
+    comes from `to_html(escape=False)`. A Memory caption holding an emoji raises UnicodeEncodeError
+    and loses that report. Exposure dropped when the legacy reports became opt-in (79ea835), which is
+    also why this has not been seen. Fix: `encoding="utf-8"`, or drop it with the legacy report.
+- Warnings policy for the test suite, after the beta. Today's two warnings are both third-party and
+  invisible outside pytest; `-W error::DeprecationWarning` with just those two ignored passes the
+  whole suite, so nothing of ours is deprecated. The policy worth adopting is scoped by module —
+  a warning blamed on OUR modules fails the suite, one a dependency raises about its own internals
+  stays printed — rather than an ignore list that rots on every dependency update:
+      [tool.pytest.ini_options]
+          filterwarnings = ['error:::Snapchat_Auto', 'error:::scripts\..*',
+                            'error:::snapchat_auto_selection.*', 'error:::test_.*',
+                            "ignore::ResourceWarning"]
+  Note TOML literal (single-quoted) strings for the entries containing `\.`, and that later entries
+  win, so the ResourceWarning ignore stays last. Gating ResourceWarning as well needs
+  `error::pytest.PytestUnraisableExceptionWarning` too — `-W error::ResourceWarning` alone does not
+  fail, because the raise happens in an unraisable finalizer. The ~12 ResourceWarning sites are all
+  ours and all benign (refcounting closes each handle at the end of the statement); two are
+  production code, `scripts/memories_media_report.py:1073` and `:1222`, worth a `with` block so a
+  future real leak is not lost in the noise.
 - Fix Pylance/Pyright/Ruff warnings/errors.
 - Consider giving the user an option to make the report dependent on the device extraction ZIP archive for unencrypted media files.
   We would not have to keep a copy of so much extracted media files. It might not be worth it depending on the ratio of encrypted/unencrypted files.
