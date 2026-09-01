@@ -173,3 +173,43 @@ def test_the_relations_dialog_no_longer_asks_it_again(window):
 
     assert 'key="legacy_reports"' not in source, "the dialog must not offer a second control"
     assert "set on the main window" in source
+
+
+# --------------------------------------------------------------------------- what Ok actually reads
+
+def _keys_main_reads():
+    """Every key `main()` reads out of `values`, taken from the source.
+
+    Both spellings, and the numeric one is the point: the crash was `values[0]`, so a check that only
+    looked at quoted keys would have watched it happen. Derived rather than listed, so a field read in
+    a new place cannot quietly escape the check below.
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(app.main)
+    named = set(re.findall(r"""values(?:\.get)?\(?\[?["']([a-z_]+)["']""", source))
+    positional = {int(n) for n in re.findall(r"values\[(\d+)\]", source)}
+    return named | positional
+
+
+def test_every_field_ok_reads_is_actually_on_the_form(window):
+    """The beta.4 crash: the OS radios had no key, so they were numbered by their POSITION among the
+    keyless elements — and re-ordering the form moved them from 0/1 to 1/2. `values[0]` was then a
+    KeyError on Ok, after the examiner had filled everything in. Nothing here read the window's
+    values, so nothing caught it; this does."""
+    win = window[0]
+    _event, values = win.read(timeout=10)
+
+    missing = sorted(key for key in _keys_main_reads() if key not in values)
+
+    assert not missing, f"main() reads {missing}, which the window does not produce"
+
+
+def test_the_os_radios_are_keyed_rather_than_numbered(window):
+    win, _real, _relations = window
+    _event, values = win.read(timeout=10)
+
+    assert values["os_ios"] is True and values["os_android"] is False
+    assert not [k for k in values if isinstance(k, int)], \
+        "a positional key is a layout change waiting to break the run"
