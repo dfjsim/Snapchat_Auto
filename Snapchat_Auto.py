@@ -1338,7 +1338,11 @@ def build_settings_window(cfg, prefill=None, relations=None):
         [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
 
         [sg.Text('Evidence', font=SECTION_FONT)],
-        [sg.Radio('IOS', 'OS', default=True), sg.Radio('Android', 'OS')],
+        # Keyed, both of them. Without a key FreeSimpleGUI numbers an element by its position among
+        # the keyless ones, so `values[0]` meant "whatever happens to be first" — and re-ordering the
+        # form moved the radios to 1 and 2, which is a KeyError on Ok and no run at all.
+        [sg.Radio('IOS', 'OS', default=True, key="os_ios"),
+         sg.Radio('Android', 'OS', key="os_android")],
         [sg.Text('Extraction zip')],
         [sg.In("", key="zip", size=(PATH_WIDTH, 1), expand_x=True, enable_events=True,
                tooltip="The extraction ZIP. A long path is shortened in the middle for display; "
@@ -1607,9 +1611,9 @@ def main(args):
                 "installer_dir": values.get("installer_dir", "").strip()})
     save_config(cfg)
 
-    # values[0]/values[1] are the iOS/Android radios. One is always selected (iOS is the default),
-    # but pick explicitly rather than treating "not iOS" as Android.
-    if not (values[0] or values[1]):
+    # One radio is always selected (iOS is the default), but pick explicitly rather than treating
+    # "not iOS" as Android.
+    if not (values["os_ios"] or values["os_android"]):
         logger.error("Choose iOS or Android")
         return
 
@@ -1636,7 +1640,7 @@ def main(args):
 
     try:
         run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
-            os_mode="ios" if values[0] else "android",
+            os_mode="ios" if values["os_ios"] else "android",
             padding=PADDING_MAP.get(values.get("padding"), "both"),
             tz=_map_timezone(values.get("timezone")),
             tile_server=values.get("tile_server", "").strip(),
