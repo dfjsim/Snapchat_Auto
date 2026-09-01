@@ -148,13 +148,16 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   that teaches an examiner to wave a sidecar difference through.
 
 # Code cleanup, performance and optimization
-- Two locale-encoding defects, found while triaging the test-run warnings (v1.6.0-beta.5). Neither has
-  bitten and neither is a warning; both are one-liners, deliberately NOT done in beta week:
+- ~~Two locale-encoding defects, found while triaging the test-run warnings.~~ **Fixed in
+  1.6.0-beta.5**, together with a third the fix uncovered — see DONE.md. What they were:
   - `scripts/data/poster_worker.py` `_spawn()` passes `text=True, errors="replace"` with no
     `encoding=`, so the pipes carrying file paths use the locale encoding (cp1252 on our machines).
     A workdir path with a character cp1252 cannot represent degrades to "?", the worker's
     `START/OK <src>` echo then no longer matches what the parent sent, and that video is silently
-    recorded as having no poster frame. Fix: `encoding="utf-8"` on both ends of the pipe.
+    recorded as having no poster frame.
+  - And the one that only showed up once the path arrived intact: `cv2.imwrite` goes through the
+    ANSI API on Windows, so it returned False and wrote nothing for the same paths. The frame is
+    encoded with `cv2.imencode` and written by Python now.
   - `scripts/DecryptLocalMemories_iOS.py:657` writes the legacy Memories HTML with `open(..., 'w')`
     and no encoding — the only locale-encoded text write left in the shipped code — and its content
     comes from `to_html(escape=False)`. A Memory caption holding an emoji raises UnicodeEncodeError

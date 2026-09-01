@@ -99,7 +99,13 @@ def _spawn():
     return subprocess.Popen(
         command, cwd=cwd,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, errors="replace",
+        # utf-8 on both ends (the child retunes its own streams in `main`). These pipes carry
+        # FILE PATHS: under the locale default a path holding a character cp1252 cannot
+        # represent was written as "?", so the worker was asked to open a file that does not
+        # exist and the video came back as undecodable -- a claim about the evidence, made
+        # from a mangled string. errors="replace" stays for stderr, which carries whatever
+        # bytes ffmpeg emits.
+        text=True, bufsize=1, encoding="utf-8", errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
@@ -238,6 +244,14 @@ def main(argv=None):
         sys.stdout.write(f"FATAL {error}\n")
         sys.stdout.flush()
         return 1
+
+    # The other end of the same agreement: without this the child decodes the paths the
+    # parent sent, and encodes its own echo, with the locale encoding.
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):                   # not a retunable stream
+            pass
 
     for line in sys.stdin:
         line = line.rstrip("\n")

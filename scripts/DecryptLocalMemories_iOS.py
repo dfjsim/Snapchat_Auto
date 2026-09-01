@@ -634,7 +634,11 @@ def generateReport(df_merge):
     </body>
     """
 
+    # The document says which encoding it is in, because the file below is written in it.
+    # Writing utf-8 without declaring it only trades a crash for mojibake: with no charset
+    # a browser guesses, and on Windows it guesses windows-1252 often enough to matter.
     html = """
+    <meta charset="utf-8">
     <link href="./css/bootstrap.min.css" rel="stylesheet">
     <style>
     th {
@@ -654,7 +658,10 @@ def generateReport(df_merge):
     html = html.replace('<video width="320" height="240" controls> <source src="./DecryptedMemories/" type="video/mp4"> Your browser does not support the video tag. </video> <a href="./DecryptedMemories/" open><br>Open </a>', "Could not be found or decrypted, "
                                                                              "usually because the Memory/MEO was " 
                                                                              "not locally stored")
-    with open(f'{outputDir}/LocalMemories_legacy_report.html', 'w') as f:
+    # utf-8, not the locale default: this is the report's own text, and a Memory caption
+    # holding an emoji made the whole report fail with UnicodeEncodeError on a cp1252
+    # machine -- the content is device data, so it is not ours to restrict to one codepage.
+    with open(f'{outputDir}/LocalMemories_legacy_report.html', 'w', encoding='utf-8') as f:
         f.write(html)
     # `len(df_report)` is how many Memories were LISTED, not how many were decrypted — most rows on
     # a typical device have no locally cached media at all. Reporting it as "Decrypted N" claimed
