@@ -1324,7 +1324,16 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=T
                 cap.release()
         if frame is None:
             return False
-        return bool(cv2.imwrite(out_path, frame))
+        # imencode + a plain write, not cv2.imwrite: on Windows imwrite goes through the ANSI
+        # API, so a destination path holding any character outside the system codepage makes
+        # it return False and write nothing -- the poster is lost with no error, for a run
+        # whose only sin was a case folder with an accent in it.
+        ok, buffer = cv2.imencode(os.path.splitext(out_path)[1] or ".jpg", frame)
+        if not ok:
+            return False
+        with open(out_path, "wb") as fh:
+            fh.write(buffer.tobytes())
+        return True
     except Exception as error:
         logger.debug(f"poster generation failed for {video_path}: {error}")
         return False

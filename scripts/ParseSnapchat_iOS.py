@@ -89,7 +89,10 @@ def getHtml(final_df, friends_df, group_df):
 </body>
 """
     
+    # Declared, because the file is written in it (see the write below). Without a charset a
+    # browser guesses, and on Windows it guesses windows-1252 often enough to matter.
     html = """
+<meta charset="utf-8">
 <link href="./css/bootstrap.min.css" rel="stylesheet">
 <style>
 th {
@@ -2254,7 +2257,11 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                 final_df = final_df.drop(index)
 
         html = getHtml(final_df, friends_df, group_df)
-        text_file = open(outputDir + "/Communications_legacy_report.html", "w", encoding="cp1252")
+        # Was encoding="cp1252", which raises UnicodeEncodeError on any message content that
+        # codepage cannot hold -- an emoji in a chat is not an edge case. getHtml() emits the
+        # matching <meta charset>.
+        text_file = open(outputDir + "/Communications_legacy_report.html", "w",
+                         encoding="utf-8")
         text_file.write(html)
         text_file.close()
         logger.info("Success, report can be found in " + os.path.abspath(outputDir))
