@@ -16,6 +16,15 @@ rem here, so the built exe re-enters ITSELF with --poster-worker, which Snapchat
 rem before anything else. Nothing extra to bundle - but do not remove that flag, or every cached
 rem video would start a copy of the GUI.
 
+rem The anti-bloat plugin warns that FreeSimpleGUI imports pydoc (its __init__.py, line 15).
+rem Leave it be. That import is at module scope and unguarded, so excluding it
+rem (--noinclude-custom-mode=pydoc:nofollow) produces a build whose GUI dies on
+rem "import FreeSimpleGUI" - verified by making pydoc unimportable and loading the toolkit.
+rem There is also nothing to win: of the 33 modules pydoc pulls in, 29 are already bundled for
+rem pandas/numpy/cv2/pillow, leaving pydoc, pkgutil and _pyrepl. Its only two uses in the toolkit
+rem are in main_sdk_help(), the SDK browser this app never opens. The warning is about compile
+rem time, not about the binary being wrong.
+
 python -m nuitka --onefile --output-dir=dist --enable-plugin=tk-inter ^
 	--include-data-dir=scripts=scripts ^
 	--include-data-files=scripts\data\sqlcipher3.exe=scripts\data\sqlcipher3.exe ^
