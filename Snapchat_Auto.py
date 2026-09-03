@@ -1457,7 +1457,8 @@ def build_settings_window(cfg, prefill=None, relations=None):
         [sg.Text('Working/Temp/Report directory (required)')],
         [sg.In(cfg.get("workdir", ""), key="workdir", size=(PATH_WIDTH, 1), expand_x=True,
                enable_events=True),
-         sg.FolderBrowse(target="workdir", initial_folder=cfg.get("workdir") or ".")],
+         sg.FolderBrowse(target="workdir", key="workdir_browse",
+                         initial_folder=cfg.get("workdir") or ".")],
         [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
 
         [sg.Text('Report options', font=SECTION_FONT)],
@@ -1518,7 +1519,8 @@ def build_settings_window(cfg, prefill=None, relations=None):
                title="Update checks")],
         [sg.In(cfg.get("installer_dir", ""), key="installer_dir", size=(PATH_WIDTH, 1),
                expand_x=True, enable_events=True),
-         sg.FolderBrowse(target="installer_dir", initial_folder=cfg.get("installer_dir") or "."),
+         sg.FolderBrowse(target="installer_dir", key="installer_browse",
+                         initial_folder=cfg.get("installer_dir") or "."),
          sg.Button('Check', key="installer_check")],
         ]
 
@@ -1552,6 +1554,12 @@ def build_settings_window(cfg, prefill=None, relations=None):
         # text_size is left out: the control derives its value from what is actually in force, so
         # restoring half-typed text over it would show something the window is not drawn at.
         if key in ("text_size",) or key not in window.AllKeysDict or isinstance(value, (list, tuple)):
+            continue
+        if isinstance(window[key], sg.Button):
+            # A FolderBrowse is a Button, and it appears in `values` with an empty string for a
+            # value (under an auto-generated key until these two were given their own). Button.update() takes the button's *text* first, so
+            # "restoring" one blanks its label — a Browse button squashed to a sliver after every
+            # rebuild. Nothing an examiner typed lives on a button, so there is nothing to restore.
             continue
         if key in PATH_KEYS:
             _set_path(window, real, key, value)             # keeps `real` and the elision in step
