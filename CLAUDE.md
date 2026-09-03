@@ -34,7 +34,8 @@ Memories / My Eyes Only.
   and supplies the two things that must then follow it: `tk_scaling()` for the point-sized fonts and
   `px()`/`px2()` for every constant the GUI writes in pixels. Without it the window is a 96-dpi bitmap
   that Windows stretches, which is the soft text on a scaled screen or over RDP. The size is the
-  GUI's own "Text size" control (Auto, or 100–200%), which writes the same `dpi_scale` setting the
+  GUI's own editable "Text size" control (Auto, the common sizes, or any percentage typed in — 55
+  of them render differently between 100% and 200%), which writes the same `dpi_scale` setting the
   command line does; `--dpi-awareness`, `--dpi-scale` and `--dpi-report` are the CLI side, and
   `--dpi-awareness unaware` reproduces the pre-1.6 rendering in the current build, because "is this
   sharper?" cannot be answered without something to compare against. See
