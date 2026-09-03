@@ -325,12 +325,16 @@ def describe(settings):
              f"awareness {settings.get('awareness')} ({settings.get('mode', 'auto')})"]
     if settings.get("forced"):
         parts.append(f"scale forced by --dpi-scale (display reports "
-                     f"{_display_dpi_unforced()} dpi)")
+                     f"{display_dpi()} dpi)")
     return "Display: " + ", ".join(parts)
 
 
-def _display_dpi_unforced():
-    """What the display says, ignoring any forced scale — for the log line above."""
+def display_dpi():
+    """What the display itself reports, ignoring any forced scale.
+
+    The GUI's text-size control needs this to say what "Auto" would resolve to, and the startup
+    line needs it to show what a forced scale is overriding.
+    """
     global _forced_dpi
     keep, _forced_dpi = _forced_dpi, None
     try:
@@ -378,7 +382,7 @@ def _metrics(label):
     user32 = ctypes.windll.user32
     lines = [f"  process DPI awareness   {awareness()}",
              f"  GetDpiForSystem         {_safe(user32.GetDpiForSystem)}",
-             f"  GetDpiForMonitor        {_display_dpi_unforced()}",
+             f"  GetDpiForMonitor        {display_dpi()}",
              f"  screen per GetSystemMetrics  {user32.GetSystemMetrics(_SM_CXSCREEN)}x"
              f"{user32.GetSystemMetrics(_SM_CYSCREEN)}   <- what a {label} process is told"]
     return "\n".join(lines)

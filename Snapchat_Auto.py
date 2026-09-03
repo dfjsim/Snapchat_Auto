@@ -100,6 +100,53 @@ _appearance = "light"
 APPEARANCE_CHOICES = ("os", "light", "dark")
 _APPEARANCE_LABEL = {"os": "Theme: follow OS", "light": "Theme: light", "dark": "Theme: dark"}
 
+#: What the text-size control offers. "Auto" — follow the display — is where almost everybody should
+#: leave it, and is the only entry that stays right when the examiner moves to another machine. The
+#: rest are for a screen whose own scaling is not the size somebody wants to read a report at, which
+#: on a scaled remote session is a real thing to want: smaller text carries fewer pixels through the
+#: connection and can read more sharply than the size Windows asked for.
+TEXT_SIZES = ("Auto", "100%", "110%", "125%", "150%", "175%", "200%")
+
+
+def text_size_label():
+    """What the control shows: the scale actually in force, or "Auto" when none is.
+
+    Read from :mod:`scripts.hidpi` rather than from the saved config, because ``--dpi-scale`` and
+    the environment can force one too — and a control disagreeing with the window it sits in would
+    be worse than no control at all.
+    """
+    forced = hidpi.forced()
+    return "Auto" if not forced else f"{round(forced / hidpi.BASE_DPI * 100)}%"
+
+
+def text_size_choices():
+    """:data:`TEXT_SIZES`, plus whatever is in force if that is not one of them.
+
+    A hand-edited config or a command line can name a size the list does not offer; adding it keeps
+    the control honest instead of silently showing the nearest thing it knows.
+    """
+    current = text_size_label()
+    return TEXT_SIZES if current in TEXT_SIZES else (*TEXT_SIZES, current)
+
+
+def text_size_setting(label):
+    """What to save for what the control shows. "" is "follow the display"."""
+    return "" if label == TEXT_SIZES[0] else str(label).strip().rstrip("%")
+
+
+def apply_text_size(cfg, label):
+    """Put the chosen size in force and remember it. The caller rebuilds the window.
+
+    Saved before the rebuild, like the appearance, so the choice survives an examiner who then
+    cancels out of the form. It reaches the *next* run through ``dpi_scale`` in the saved settings,
+    which :func:`scripts.hidpi.configure` reads before the first window exists — the same key
+    ``--dpi-scale`` writes to on the command line, so there is one setting rather than two.
+    """
+    cfg["dpi_scale"] = text_size_setting(label)
+    save_config(cfg)
+    hidpi.force_dpi(hidpi.parse_scale(cfg["dpi_scale"]) if cfg["dpi_scale"] else None)
+
+
 #: One point up from FreeSimpleGUI's default, which is small on a high-DPI laptop, and a hint one
 #: point below that: the size difference is what marks a hint as secondary, so they have to move
 #: together.
@@ -1354,6 +1401,12 @@ def build_settings_window(cfg, prefill=None, relations=None):
                       "legacy_reports": bool(cfg.get("legacy_reports"))}
     layout = [
         [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
+         sg.Text("Text size"),
+         sg.Combo(text_size_choices(), default_value=text_size_label(), key="text_size",
+                  readonly=True, enable_events=True, size=(7, 1),
+                  tooltip="How large the whole window is drawn. Auto follows the display, which "
+                          f"is reporting {round(hidpi.display_dpi() / hidpi.BASE_DPI * 100)}% "
+                          "here. Applies at once and is remembered between runs."),
          sg.Button(appearance_label(cfg.get("appearance", "os")), key="appearance_toggle",
                    tooltip="Follow the OS setting, or force light or dark. Remembered "
                            "between runs.")],
@@ -1604,6 +1657,15 @@ def main(args):
             cfg["appearance"] = next_appearance(cfg.get("appearance", "os"))
             save_config(cfg)
             apply_theme(cfg["appearance"])
+            window.close()
+            window, real, relation_state = build_settings_window(cfg, prefill=values,
+                                                                 relations=relation_state)
+        elif event == "text_size":
+            # Same rebuild as the appearance button, for the same reason: the size reaches the
+            # widgets through `tk scaling`, which is read when each one is created, so an existing
+            # window cannot be resized into the new size — it has to be built again at it.
+            apply_text_size(cfg, values["text_size"])
+            apply_theme(cfg.get("appearance", "os"))         # re-issues set_options(scaling=...)
             window.close()
             window, real, relation_state = build_settings_window(cfg, prefill=values,
                                                                  relations=relation_state)

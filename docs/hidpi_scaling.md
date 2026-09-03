@@ -106,12 +106,33 @@ print the usage instead of opening the window.
 
 Each is also read from the environment (`SNAPCHAT_AUTO_DPI_AWARENESS`, `SNAPCHAT_AUTO_DPI_SCALE`)
 and from `dpi_awareness` / `dpi_scale` in `~/.snapchat_auto_gui.json`, in that order of precedence
-after the command line. The saved settings are what make this usable by an examiner who will never
-type a flag; nothing in the GUI writes them yet.
+after the command line.
 
-`--dpi-scale` exists for its own sake as well as for testing. It decides the text size independently
-of what Windows was set to, which is what somebody wants when the machine's scaling is not the size
-they want to read a forensic report at.
+## The GUI control
+
+`--dpi-scale` exists for its own sake as well as for testing — it decides the text size
+independently of what Windows was set to, which is what somebody wants when the machine's scaling
+is not the size they want to read a forensic report at. So it is also a control on the form, beside
+the theme button: **Text size**, offering `Auto` (follow the display) and 100% through 200%.
+
+Three things make it one setting rather than two:
+
+* it writes the same `dpi_scale` key the command line writes, which `hidpi.configure` reads back
+  before the *next* run's first window — so choosing a size is remembered without any other
+  machinery;
+* it is saved *before* the rebuild, like the appearance, so the choice survives an examiner who then
+  cancels out of the form;
+* the control reads its own value from `hidpi.forced()`, not from the config, because `--dpi-scale`
+  and the environment can force a size the config has never heard of. A control that disagreed with
+  the window it sits in would be worse than no control. A forced size the preset list does not offer
+  is added to the list rather than rounded to the nearest one it knows.
+
+Choosing a size **rebuilds the window**, exactly as the theme button does and for a related reason:
+the size reaches each widget through `tk scaling`, which is read when that widget is created, so an
+existing window cannot be re-scaled — it has to be built again at the new size.
+
+Awareness is deliberately *not* on the form. It can only be claimed once per process, so changing it
+would mean a restart, and it is a diagnostic switch rather than a preference.
 
 ## Checking it
 
