@@ -22,8 +22,25 @@ LONG_DIR = r"C:\Temp\Snapchat_Auto\runs\HOM-2026-0042\exhibit B\phone 1\working 
 SAVED_ZIP = r"D:\cases\HOM-2026-0042\exhibit B\phone 1\EXTRACTION_FFS.zip"
 CFG = {"zip": SAVED_ZIP, "keychain": SAVED_ZIP, "workdir": LONG_DIR,
        "installer_dir": r"C:\builds", "tile_server": "", "appearance": "dark"}
-# what a rebuild hands back to the new window: the fields as the examiner had left them
-PREFILL = {"zip": SAVED_ZIP, "case_ref": "EXHIBIT-9", "expand_only": True}
+# What a rebuild hands back to the new window: the fields as the examiner had left them. The two
+# browse entries are in here because window.read() really does put them in `values` — a FolderBrowse
+# is a Button, and it reports an empty string.
+PREFILL = {"zip": SAVED_ZIP, "case_ref": "EXHIBIT-9", "expand_only": True,
+           "workdir_browse": "", "installer_browse": ""}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def not_the_developers_own_text_size():
+    """Whatever size the developer last chose must not decide what these tests see.
+
+    ``Snapchat_Auto`` reads ``~/.snapchat_auto_gui.json`` when it is imported — that is how a saved
+    text size reaches the next run — so without this the window is built at one machine's saved
+    preference and the assertions below pass or fail according to whose machine they are on.
+    """
+    forced = app.hidpi.forced()
+    app.hidpi.force_dpi(None)
+    yield
+    app.hidpi.force_dpi(forced)
 
 
 @pytest.fixture(scope="module")
@@ -240,6 +257,20 @@ def test_choosing_a_size_puts_it_in_force_and_remembers_it(tmp_path, monkeypatch
     app.apply_text_size(cfg, app.parse_text_size("Auto")[1])
     assert app.hidpi.forced() is None                         # back to following the display
     assert saved() == ""
+
+
+def test_a_rebuild_leaves_the_browse_buttons_alone(window):
+    """Restoring the form must not "restore" a button.
+
+    ``Button.update()`` takes the button's *text* as its first argument, so handing it the empty
+    string a FolderBrowse reports collapses the label — 62 px of "Browse" down to a 12 px sliver
+    beside the field it belongs to. Every rebuild did it: the appearance button as much as the text
+    size, which is only what made it frequent enough to notice.
+    """
+    win = window[0]
+
+    for key in ("workdir_browse", "installer_browse", "zip_browse", "keychain_browse"):
+        assert win[key].get_text() == "Browse"
 
 
 def test_a_rebuild_carries_the_form_across(window):
