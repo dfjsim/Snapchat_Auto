@@ -113,7 +113,37 @@ after the command line.
 `--dpi-scale` exists for its own sake as well as for testing — it decides the text size
 independently of what Windows was set to, which is what somebody wants when the machine's scaling
 is not the size they want to read a forensic report at. So it is also a control on the form, beside
-the theme button: **Text size**, offering `Auto` (follow the display) and 100% through 200%.
+the theme button: **Text size**, an editable combo offering `Auto` (follow the display) and 100%
+through 200%, into which any percentage from 50 to 400 can be typed and applied with Enter.
+
+### Why an editable combo and not a slider
+
+A slider is the obvious control for a size, and it was rejected for three reasons:
+
+* **Every change rebuilds the window** (see below). A slider's natural gesture is a continuous drag,
+  and firing on each tick would destroy the widget under the examiner's own cursor mid-drag.
+  Deferring to `<ButtonRelease-1>` fixes that, but then the slider applies once per gesture — which
+  is what a picker already does.
+* **`Auto` has no place on a numeric scale**, and Auto is the entry that stays right when an
+  examiner moves to another machine. It would need a companion checkbox: two controls where there
+  was one.
+* The header row already carries the title, this control and the theme button; a usable slider wants
+  150–200 px of it.
+
+### Why free entry, though
+
+Because the granularity is real, not theoretical. Rounding somebody to the nearest preset would
+throw away steps they can see:
+
+> Between 100% and 200% there are **55 percentages that render differently** — 30 of them below
+> 150%, where the steps are 1–4% apart. (Measured by walking `tk scaling` across the range and
+> reading `linespace` back for the five point sizes the form uses.)
+
+So the list is presets, not the choice. That makes "not a size at all" a third outcome, and it has
+to stay distinguishable from `Auto`: quietly treating a typo as Auto would leave the control
+reporting a size the window is not drawn at. A typed size applies on **Enter** and deliberately not
+on focus-out — applying rebuilds the window, and doing that as the examiner clicks *Browse* would
+pull the dialog's parent out from under it.
 
 Three things make it one setting rather than two:
 
@@ -124,8 +154,9 @@ Three things make it one setting rather than two:
   cancels out of the form;
 * the control reads its own value from `hidpi.forced()`, not from the config, because `--dpi-scale`
   and the environment can force a size the config has never heard of. A control that disagreed with
-  the window it sits in would be worse than no control. A forced size the preset list does not offer
-  is added to the list rather than rounded to the nearest one it knows.
+  the window it sits in would be worse than no control. A size the preset list does not offer —
+  typed, or forced from outside — is added to the list rather than rounded to the nearest one it
+  knows, and for the same reason a rebuild does not restore this field from the prefill.
 
 Choosing a size **rebuilds the window**, exactly as the theme button does and for a related reason:
 the size reaches each widget through `tk scaling`, which is read when that widget is created, so an

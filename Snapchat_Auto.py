@@ -129,22 +129,38 @@ def text_size_choices():
     return TEXT_SIZES if current in TEXT_SIZES else (*TEXT_SIZES, current)
 
 
-def text_size_setting(label):
-    """What to save for what the control shows. "" is "follow the display"."""
-    return "" if label == TEXT_SIZES[0] else str(label).strip().rstrip("%")
+def parse_text_size(label):
+    """``(ok, dpi)`` for what the control holds. A *dpi* of None means "follow the display".
+
+    The list is presets, not the whole choice — an examiner can type into this control, because
+    between 100% and 200% there are 55 sizes that render differently and 30 of them are below 150%,
+    so rounding somebody to the nearest preset would be throwing away steps they can see. That makes
+    "not a size at all" a third outcome: it has to be distinguishable from Auto, since quietly
+    treating a typo as Auto would misreport what is in force.
+    """
+    text = str(label).strip()
+    if not text or text.casefold() == TEXT_SIZES[0].casefold():
+        return True, None
+    value = hidpi.parse_scale(text)
+    return value is not None, value
 
 
-def apply_text_size(cfg, label):
-    """Put the chosen size in force and remember it. The caller rebuilds the window.
+def text_size_setting(value):
+    """What to save for a resolved DPI: a percentage, or "" for "follow the display"."""
+    return "" if value is None else str(round(value / hidpi.BASE_DPI * 100))
+
+
+def apply_text_size(cfg, value):
+    """Put a resolved DPI (or None for Auto) in force and remember it. The caller rebuilds.
 
     Saved before the rebuild, like the appearance, so the choice survives an examiner who then
     cancels out of the form. It reaches the *next* run through ``dpi_scale`` in the saved settings,
     which :func:`scripts.hidpi.configure` reads before the first window exists — the same key
     ``--dpi-scale`` writes to on the command line, so there is one setting rather than two.
     """
-    cfg["dpi_scale"] = text_size_setting(label)
+    cfg["dpi_scale"] = text_size_setting(value)
     save_config(cfg)
-    hidpi.force_dpi(hidpi.parse_scale(cfg["dpi_scale"]) if cfg["dpi_scale"] else None)
+    hidpi.force_dpi(value)
 
 
 #: One point up from FreeSimpleGUI's default, which is small on a high-DPI laptop, and a hint one
@@ -1403,10 +1419,12 @@ def build_settings_window(cfg, prefill=None, relations=None):
         [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
          sg.Text("Text size"),
          sg.Combo(text_size_choices(), default_value=text_size_label(), key="text_size",
-                  readonly=True, enable_events=True, size=(7, 1),
+                  enable_events=True, size=(7, 1),
                   tooltip="How large the whole window is drawn. Auto follows the display, which "
                           f"is reporting {round(hidpi.display_dpi() / hidpi.BASE_DPI * 100)}% "
-                          "here. Applies at once and is remembered between runs."),
+                          "here. The list is only the common sizes — type any percentage from "
+                          f"{hidpi.MIN_SCALE} to {hidpi.MAX_SCALE} and press Enter. Applies at "
+                          "once and is remembered between runs."),
          sg.Button(appearance_label(cfg.get("appearance", "os")), key="appearance_toggle",
                    tooltip="Follow the OS setting, or force light or dark. Remembered "
                            "between runs.")],
@@ -1524,10 +1542,16 @@ def build_settings_window(cfg, prefill=None, relations=None):
         window[key].bind("<FocusIn>", "+FOCUSIN")
         window[key].bind("<FocusOut>", "+FOCUSOUT")
         _show_path(window, real, key, focused=False)
+    # A typed size applies on Enter, and deliberately not on focus-out: applying rebuilds the
+    # window, and doing that as the examiner clicks Browse would pull the dialog's parent out from
+    # under it. An un-entered size is simply not applied, which costs nothing — it is cosmetic.
+    window["text_size"].bind("<Return>", "+ENTER")
     if relations:
         relation_state = relations
     for key, value in (prefill or {}).items():
-        if key not in window.AllKeysDict or isinstance(value, (list, tuple)):
+        # text_size is left out: the control derives its value from what is actually in force, so
+        # restoring half-typed text over it would show something the window is not drawn at.
+        if key in ("text_size",) or key not in window.AllKeysDict or isinstance(value, (list, tuple)):
             continue
         if key in PATH_KEYS:
             _set_path(window, real, key, value)             # keeps `real` and the elision in step
@@ -1660,15 +1684,23 @@ def main(args):
             window.close()
             window, real, relation_state = build_settings_window(cfg, prefill=values,
                                                                  relations=relation_state)
-        elif event == "text_size":
-            # Same rebuild as the appearance button, for the same reason: the size reaches the
-            # widgets through `tk scaling`, which is read when each one is created, so an existing
-            # window cannot be resized into the new size — it has to be built again at it.
-            apply_text_size(cfg, values["text_size"])
-            apply_theme(cfg.get("appearance", "os"))         # re-issues set_options(scaling=...)
-            window.close()
-            window, real, relation_state = build_settings_window(cfg, prefill=values,
-                                                                 relations=relation_state)
+        elif event in ("text_size", "text_size+ENTER"):
+            ok, size = parse_text_size(values["text_size"])
+            if not ok:
+                sg.popup(f"Choose Auto, or type a percentage between {hidpi.MIN_SCALE} and "
+                         f"{hidpi.MAX_SCALE}.", title="Text size", keep_on_top=True)
+                window["text_size"].update(text_size_label())    # put back what is in force
+            elif size == hidpi.forced():
+                window["text_size"].update(text_size_label())    # unchanged: tidy "125" to "125%"
+            else:
+                # Same rebuild as the appearance button, for the same reason: the size reaches the
+                # widgets through `tk scaling`, which is read when each one is created, so an
+                # existing window cannot be resized into it — it has to be built again at it.
+                apply_text_size(cfg, size)
+                apply_theme(cfg.get("appearance", "os"))     # re-issues set_options(scaling=...)
+                window.close()
+                window, real, relation_state = build_settings_window(cfg, prefill=values,
+                                                                     relations=relation_state)
         elif event == "relations_edit":
             _relations_dialog(relation_state)
         elif event == "Ok":

@@ -183,13 +183,42 @@ def test_a_size_the_list_does_not_offer_is_still_shown(monkeypatch):
     assert set(app.TEXT_SIZES) < set(app.text_size_choices())
 
 
-@pytest.mark.parametrize("shown, saved", [("Auto", ""), ("125%", "125"), ("100%", "100")])
-def test_what_the_control_saves_is_what_dpi_scale_reads(shown, saved):
+def test_the_control_is_typed_into_as_well_as_picked_from(window):
+    """The presets are the common sizes, not the whole choice.
+
+    Between 100% and 200% there are 55 percentages that render differently, 30 of them below 150%,
+    so somebody who can see the difference between 115% and 118% must be able to say so.
+    """
+    win = window[0]
+
+    assert win["text_size"].Readonly is False
+
+
+@pytest.mark.parametrize("typed, dpi", [
+    ("Auto", None), ("auto", None), ("", None),              # every spelling of "follow the display"
+    ("125", 120), ("125%", 120), (" 125 % ", 120), ("1.25", 120),   # and of a size
+    ("118", 113),                                            # one the list does not offer
+])
+def test_what_can_be_typed_into_it(typed, dpi):
+    assert app.parse_text_size(typed) == (True, dpi)
+
+
+@pytest.mark.parametrize("typed", ["big", "9", "900", "%", "-125"])
+def test_what_cannot_be_typed_into_it(typed):
+    """A typo has to be a third outcome, not silently folded into Auto: the control would then be
+    reporting a size the window is not drawn at."""
+    ok, _ = app.parse_text_size(typed)
+
+    assert ok is False
+
+
+@pytest.mark.parametrize("value, saved", [(None, ""), (120, "125"), (96, "100"), (113, "118")])
+def test_what_the_control_saves_is_what_dpi_scale_reads(value, saved):
     """One setting, not two: the key the GUI writes is the one --dpi-scale writes and that
     hidpi.configure reads back before the next run's first window."""
-    assert app.text_size_setting(shown) == saved
+    assert app.text_size_setting(value) == saved
     if saved:
-        assert app.hidpi.parse_scale(saved) == app.hidpi.parse_scale(shown)
+        assert app.hidpi.parse_scale(saved) == value
 
 
 def test_choosing_a_size_puts_it_in_force_and_remembers_it(tmp_path, monkeypatch):
@@ -197,16 +226,20 @@ def test_choosing_a_size_puts_it_in_force_and_remembers_it(tmp_path, monkeypatch
     rebuilt from — in force for this run, and on disk for the next one."""
     import json
     monkeypatch.setattr(app, "CONFIG_PATH", str(tmp_path / "gui.json"))
-    monkeypatch.setattr(app.hidpi, "display_dpi", lambda: 96)
+    saved = lambda: json.loads((tmp_path / "gui.json").read_text(encoding="utf-8"))["dpi_scale"]
     cfg = {}
 
-    app.apply_text_size(cfg, "150%")
+    app.apply_text_size(cfg, app.parse_text_size("150%")[1])
     assert app.hidpi.forced() == 144                          # this run
-    assert json.loads((tmp_path / "gui.json").read_text(encoding="utf-8"))["dpi_scale"] == "150"
+    assert saved() == "150"                                   # and the next one
 
-    app.apply_text_size(cfg, "Auto")
+    app.apply_text_size(cfg, app.parse_text_size("118")[1])   # not a preset, and still round-trips
+    assert app.hidpi.forced() == 113
+    assert saved() == "118"
+
+    app.apply_text_size(cfg, app.parse_text_size("Auto")[1])
     assert app.hidpi.forced() is None                         # back to following the display
-    assert json.loads((tmp_path / "gui.json").read_text(encoding="utf-8"))["dpi_scale"] == ""
+    assert saved() == ""
 
 
 def test_a_rebuild_carries_the_form_across(window):
