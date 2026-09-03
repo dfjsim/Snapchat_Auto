@@ -33,10 +33,11 @@ Memories / My Eyes Only.
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,
   and supplies the two things that must then follow it: `tk_scaling()` for the point-sized fonts and
   `px()`/`px2()` for every constant the GUI writes in pixels. Without it the window is a 96-dpi bitmap
-  that Windows stretches, which is the soft text on a scaled screen or over RDP. Adjustable on the
-  command line (`--dpi-awareness`, `--dpi-scale`, `--dpi-report`), from the environment and from the
-  saved GUI settings — `--dpi-awareness unaware` reproduces the pre-1.6 rendering in the current
-  build, because "is this sharper?" cannot be answered without something to compare against. See
+  that Windows stretches, which is the soft text on a scaled screen or over RDP. The size is the
+  GUI's own "Text size" control (Auto, or 100–200%), which writes the same `dpi_scale` setting the
+  command line does; `--dpi-awareness`, `--dpi-scale` and `--dpi-report` are the CLI side, and
+  `--dpi-awareness unaware` reproduces the pre-1.6 rendering in the current build, because "is this
+  sharper?" cannot be answered without something to compare against. See
   [hidpi_scaling.md](docs/hidpi_scaling.md).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video

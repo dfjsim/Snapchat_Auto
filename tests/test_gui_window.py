@@ -161,6 +161,54 @@ def test_the_button_shows_the_saved_setting(window):
     assert win["appearance_toggle"].get_text() == "Theme: dark"
 
 
+def test_the_text_size_control_shows_the_size_actually_in_force(window, monkeypatch):
+    """It reads hidpi, not the config: --dpi-scale and the environment can force a size too, and a
+    control disagreeing with the window it sits in would be worse than no control."""
+    win = window[0]
+
+    assert win["text_size"].get() == "Auto"                  # nothing forced when this was built
+
+    monkeypatch.setattr(app.hidpi, "forced", lambda: 120)
+    assert app.text_size_label() == "125%"
+    assert "125%" in app.text_size_choices()
+
+
+def test_a_size_the_list_does_not_offer_is_still_shown(monkeypatch):
+    """A hand-edited config or a command line can name one; showing the nearest thing instead would
+    make the control quietly lie about what is in force."""
+    monkeypatch.setattr(app.hidpi, "forced", lambda: 128)    # 133%, not one of the presets
+
+    assert app.text_size_label() == "133%"
+    assert app.text_size_choices()[-1] == "133%"
+    assert set(app.TEXT_SIZES) < set(app.text_size_choices())
+
+
+@pytest.mark.parametrize("shown, saved", [("Auto", ""), ("125%", "125"), ("100%", "100")])
+def test_what_the_control_saves_is_what_dpi_scale_reads(shown, saved):
+    """One setting, not two: the key the GUI writes is the one --dpi-scale writes and that
+    hidpi.configure reads back before the next run's first window."""
+    assert app.text_size_setting(shown) == saved
+    if saved:
+        assert app.hidpi.parse_scale(saved) == app.hidpi.parse_scale(shown)
+
+
+def test_choosing_a_size_puts_it_in_force_and_remembers_it(tmp_path, monkeypatch):
+    """The window is rebuilt at the new size, so what has to be right here is the state it is
+    rebuilt from — in force for this run, and on disk for the next one."""
+    import json
+    monkeypatch.setattr(app, "CONFIG_PATH", str(tmp_path / "gui.json"))
+    monkeypatch.setattr(app.hidpi, "display_dpi", lambda: 96)
+    cfg = {}
+
+    app.apply_text_size(cfg, "150%")
+    assert app.hidpi.forced() == 144                          # this run
+    assert json.loads((tmp_path / "gui.json").read_text(encoding="utf-8"))["dpi_scale"] == "150"
+
+    app.apply_text_size(cfg, "Auto")
+    assert app.hidpi.forced() is None                         # back to following the display
+    assert json.loads((tmp_path / "gui.json").read_text(encoding="utf-8"))["dpi_scale"] == ""
+
+
 def test_a_rebuild_carries_the_form_across(window):
     """Switching theme rebuilds the window — a toolkit theme cannot be applied to one that exists —
     so anything already filled in has to survive, or the button costs more than it is worth."""
