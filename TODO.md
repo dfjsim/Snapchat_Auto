@@ -1,7 +1,8 @@
-# Corpus test-run notes — the fixes themselves are DONE (see DONE.md, "Corpus test-run fixes (v1.5.0)")
+# Corpus test-run notes — correct answers, not defects
 
 Kept here because they are the things a future run should NOT re-investigate: on the four-device
-corpus these are the correct answers, not defects.
+corpus these are the correct answers. The fixes that came out of the same pass are in
+[CHANGELOG.md](CHANGELOG.md) under 1.5.0.
 
 - On the iOS 26 dual-account device, the Memories with no media are a data-availability fact, not
   a matching failure: that extraction holds 26 `caching-media` folders against 87 in an earlier
@@ -29,12 +30,12 @@ corpus these are the correct answers, not defects.
 - The WAL carver only reads superseded `-wal` frames. Free space inside live pages (and in the
   main database file) can hold deleted rows too and is not searched.
 
-# Snapchat Conversations / Contacts reports  [the reports themselves: DONE — see DONE.md]
-- Add a way to select only specific conversations or parts of conversations and their associated contacts and output them to PDF with attachments.
-  - The selection half exists: conversations are selectable on the index (kind `conv`) and
-    individual messages on a detail page (kind `msg`), shared with every other report through
-    `Reports/selection.js`. What is missing is the export.
-- **Both legacy reports are now OFF by default** (v1.6.0-beta.4): the GUI's "Include the legacy
+# Snapchat Conversations / Contacts reports
+- Output selected conversations, or parts of conversations, and their contacts to **PDF with
+  attachments**. The selection half exists (kind `conv` on the index, kind `msg` on a detail page,
+  shared through `Reports/selection.js`) and `--selection` builds a partial report of exactly those
+  rows. What is missing is the PDF — see "The print / PDF view" under *Planned features*.
+- **Both legacy reports are OFF by default** (since 1.6.0-beta.4): the GUI's "Include the legacy
   reports" checkbox on the main window, `--legacy-reports yes` headlessly. That is one step short of
   removal and it already buys the correctness argument below — a run that does not produce them does
   not write into the extracted evidence copy at all.
@@ -53,28 +54,15 @@ corpus these are the correct answers, not defects.
     `ParseSnapchat_iOS.main` (move the attachment copying to the Conversations report), the
     "Communications (legacy)" entry in `write_index`, and the v2 branch of
     `cache_controller_report.load_chat_links`.
-- [FIXED-v1.5.0] Text sent *with* media used to be lost (the parser replaced the message content
-  with the attachment). The parsed content is now preserved as "Message Text" and the Conversations
-  report shows it; the legacy report still shows only the attachment.
 
 # Snapchat Memories report
-
-- ~~Fold a Memory group behind its lead row, and filter by time.~~ **Done** — a group is one row with
-  its members inside it, and both the Memories and Conversations reports have the shared date/time
-  window (the latter with a conversation / message / both scope selector). See DONE.md,
-  [report_memories.md](docs/report_memories.md#a-group-is-one-row-with-its-members-inside-it),
-  [report_ui.md](docs/report_ui.md#folded-rows-cfolded-scvfoldhits-openfoldhits) and
-  [report_conversations.md](docs/report_conversations.md#the-time-filter-and-its-scope-control).
-- Add a way to select only specific Memories and their associated media files and output them to PDF with attachments.
-  - The **selection and report half is done** — `--selection` builds a partial report holding only the
-    ticked Memories (and whatever related items are asked for), see docs/report_partial.md. The PDF
-    half is not: it is the last, gated phase of that work.
-- ~~Some published Memory media is never referenced by any page.~~ **Fixed** — identical content is now
-  published once and every Memory that recovered it links to that one copy, see DONE.md and
-  [report_memories.md](docs/report_memories.md#one-copy-per-distinct-content-in-media).
+- Output selected Memories and their media files to **PDF with attachments**. The selection and
+  report half is done — `--selection` builds a partial report holding only the ticked Memories and
+  whatever related items are asked for, see docs/report_partial.md. The PDF half is the last, gated
+  phase of that work (see *Planned features*).
 - We need to be able to filter/search by URL.
-- ~~Fix MEO decryption that fails in some cases.~~ **Fixed in v1.5.2** — four separate causes, see
-  DONE.md ("Snapchat Memories report"). Still open in this area:
+- In our Memories report, we need to be able to search/filter by IV/KEY.
+- My Eyes Only, still open after the 1.5.2 fixes:
   - A My Eyes Only Memory captured *directly* into MEO (not moved into it) still needs the
     keychain's `persistedkey`, and there is no way around that — it is the correct outcome, not a
     defect. Worth re-confirming on a device that has both kinds.
@@ -139,7 +127,7 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 - Likely candidates: the SQLCipher path (`memories_media_report.decrypt_gallery_db` stages a copy, but
   `scdb-27.sqlite3` is also read on that path), or the bundled `sqlcipher3.exe` invocation. Compare
   each database's `-shm` mtime before and after a run to narrow it down.
-- Related goal already recorded below: stop writing into `ExtractedData` at all (see the legacy
+- Related goal already recorded above: stop writing into `ExtractedData` at all (see the legacy
   Memories / SnapFixedVideos cleanup).
 - Why it matters beyond tidiness: `scripts/source_fingerprint.py` deliberately does **not**
   fingerprint the `-shm` because of this. If the tool stopped touching it, the `-shm` could be
@@ -148,21 +136,6 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   that teaches an examiner to wave a sidecar difference through.
 
 # Code cleanup, performance and optimization
-- ~~Two locale-encoding defects, found while triaging the test-run warnings.~~ **Fixed in
-  1.6.0-beta.5**, together with a third the fix uncovered — see DONE.md. What they were:
-  - `scripts/data/poster_worker.py` `_spawn()` passes `text=True, errors="replace"` with no
-    `encoding=`, so the pipes carrying file paths use the locale encoding (cp1252 on our machines).
-    A workdir path with a character cp1252 cannot represent degrades to "?", the worker's
-    `START/OK <src>` echo then no longer matches what the parent sent, and that video is silently
-    recorded as having no poster frame.
-  - And the one that only showed up once the path arrived intact: `cv2.imwrite` goes through the
-    ANSI API on Windows, so it returned False and wrote nothing for the same paths. The frame is
-    encoded with `cv2.imencode` and written by Python now.
-  - `scripts/DecryptLocalMemories_iOS.py:657` writes the legacy Memories HTML with `open(..., 'w')`
-    and no encoding — the only locale-encoded text write left in the shipped code — and its content
-    comes from `to_html(escape=False)`. A Memory caption holding an emoji raises UnicodeEncodeError
-    and loses that report. Exposure dropped when the legacy reports became opt-in (79ea835), which is
-    also why this has not been seen. Fix: `encoding="utf-8"`, or drop it with the legacy report.
 - Warnings policy for the test suite, after the beta. Today's two warnings are both third-party and
   invisible outside pytest; `-W error::DeprecationWarning` with just those two ignored passes the
   whole suite, so nothing of ours is deprecated. The policy worth adopting is scoped by module —
@@ -185,64 +158,43 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 - Check whether anything is worth copying from the standalone `keychain_decoder.py` in the
   `bplist_base64_decoder` project.
 
-# New report for `cache_controller.db` data. [DONE — see DONE.md]
-- Remaining/uncertain: `CACHE_KEY_VIRTUALIZATION` was empty in every test extraction, so the
+# cache_controller.db report — open items
+- `CACHE_KEY_VIRTUALIZATION` was empty in every test extraction, so the
   `VIRTUAL_CACHE_KEY` ↔ `CACHE_KEY` semantics are unconfirmed — its rows are listed but no linking
   logic depends on them. Revisit once a populated sample is available.
 - We need to be able to filter/search by URL.
 
-# New report for other cached files in `Library/Caches/*`
-- See `docs/snapchat_ios_cache_media.md`
-- ~~The "modified" column is our extraction time, not a device time.~~ **Fixed** — it is read from the
-  archive entry's `UT` field, which carries the file's mtime **on the device**, and the extracted copies
-  are stamped with it too. See DONE.md and
-  [snapchat_ios_cache_media.md](docs/snapchat_ios_cache_media.md#the-modified-column).
-
-# Add support for offline tile map server [DONE — see DONE.md]
-- Remaining ideas (not done):
-  - A map on the Memories *index* (the index only shows coordinates + OSM/Google links today).
-  - One overview map plotting every geolocated Memory of the case.
-  - Configurable zoom / map size (currently zoom 15, 3x3 tiles).
+# Offline tile map server — remaining ideas
+- A map on the Memories *index* (the index only shows coordinates + OSM/Google links today).
+- One overview map plotting every geolocated Memory of the case.
+- Configurable zoom / map size (currently zoom 15, 3x3 tiles).
 - Example URL: http://hostname:port/#map=15/40.000000/-70.000000
   - With our OSM tile server, this URL brings us to the Ubuntu Apache2 default page.
     https://github.com/dfjsim/osm-tirex
 
-# UI bugs [DONE — see DONE.md "Report UI bugs (v1.4.2)"]
-- The whole list (tab reuse / anchors, extensionless media, small view icons, big-table performance,
-  unviewable encrypted + bundled cache files, two attachments in one message) was fixed in v1.4.2.
-  Shared UI code now lives in `scripts/report_ui.py`; see `docs/report_ui.md`.
-- Selections (v1.4.2): a `file://` page has no storage that survives closing the tab or that two
-  pages of the same run can share (measured — see `docs/report_ui.md`), so selections live in
+# Report UI
+- Selections: a `file://` page has no storage that survives closing the tab or that two pages of
+  the same run can share (measured — see `docs/report_ui.md`), so selections live in
   `Reports/selection.js`, which the examiner saves from the report. Worth revisiting if we ever
   ship a small local server or a desktop shell, which would allow silent persistence.
-- Still worth re-checking on other extractions:
-  - ~~The 15 cache entries that remain "🔒 encrypted" on the iOS 16 test device — are any of them
-    decryptable from a source we already have (chat media keys)?~~ **Answered and fixed in
-    v1.5.0** (see DONE.md, "Corpus test-run fixes"). Almost none of them were encrypted at all: of
-    the 253 files 2023 used to padlock, 208 are LZC lens bundles and only 7 are genuinely
-    encrypted. The one encrypted *Memory* file there is a My Eyes Only snap whose
-    key is wrapped and for which that keychain holds no `persistedkey` — so it is correctly
-    unrecoverable, and now says so.
-  - Row cells in the virtualized index tables have a fixed height and clip long values (the full
-    value is always in the row detail / detail page). Confirm that reads well on other datasets,
-    e.g. accounts with many cache tokens per Memory.
+- Row cells in the virtualized index tables have a fixed height and clip long values (the full
+  value is always in the row detail / detail page). Confirm that reads well on other datasets,
+  e.g. accounts with many cache tokens per Memory.
 
 # Planned features
 - Integrate Snapchat_Download support with guardrails (reminding the user to have proper legal authorization).
-- ~~Implement feature to recreate a partial report from the selected elements only, asking whether to
-  include the elements related to the ones selected.~~ **Done** — `--selection` builds one, the relations
-  are the per-item choice, and the examiner can now expand, check and adjust before building
-  (`--expand-selection`, then review in the full report). See
-  [docs/guide_partial_reports.md](docs/guide_partial_reports.md) and
-  [docs/report_partial.md](docs/report_partial.md). Still open in this area:
+- Partial reports — still open after 1.6.0 (the feature itself: `--selection`, `--expand-selection`,
+  see [docs/guide_partial_reports.md](docs/guide_partial_reports.md) and
+  [docs/report_partial.md](docs/report_partial.md)):
   - **The print / PDF view** (plan phase 8, on ice): one combined `print.html` per extract so the
     examiner can produce a paginated PDF from the browser. Gated on it being clean and its in-document
-    links working.
+    links working. This is the export half of the two PDF items above.
   - **Field-level exclusion** (plan phase 5): leaving named fields or whole blocks out of an extract,
-    with each stated as withheld rather than silently missing.
-- ~~Fix messages decoding from arroyo.db... we are currently missing many that are displayed by at
-  least one other tool.~~ **Fixed in v1.5.2** — see DONE.md ("Snapchat conversations / contacts
-  reports"). Still open in this area:
+    with each stated as withheld rather than silently missing. In the GUI this belongs in an
+    "advanced settings" section of the Related-items step, where the user can exclude some details and
+    fields from the final report (for example, some of the fields in the `ZGALLERYSNAP values` section
+    of the Memory details page) and save the choice as a default config for future reports.
+- Chat decoding, still open after the 1.5.2 fixes:
   - The other event kinds under `4.4.8` — fields `2`, `5`, `6`, `8` and `22`, of which `2` is by far
     the most common — are identified as events but not named. They are labelled `System message`
     with no description.
@@ -250,8 +202,3 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   - `proto_to_msg` still concatenates every string in the protobuf, and `message_content` still
     depends on that for the cache join. Worth reading the media id from its own field too, so the
     concatenation can go.
-
-- When we ask the user to decide if he wants to include related artifacts in the subset report, we should
-  also have an "advanced settings" section where the user can decide to exclude some details and fields
-  in the final report (for example, some of the fields in the `ZGALLERYSNAP values` section of the
-  Memory details page). The user should also be able to save his settings as a default config for future reports.
