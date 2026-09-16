@@ -49,6 +49,15 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   than two, and it is saved before the window is rebuilt, so the choice survives a Cancel. The list
   is editable on purpose: walking `tk scaling` across 100–200% gives 55 distinct renderings of the
   form's fonts, most of them between the presets.
+- **The update folder says on the form when it could not be read.** A share that is not connected
+  at startup meant no update would ever be offered, and the only trace was a warning in the log.
+  The startup check now reports what it found (`dfjsim_shared_tools` 0.4.0,
+  `check_for_update()` returns an `UpdateCheck` with a status), and when the folder could not be
+  read — or the running version cannot be compared — a one-line note under the folder field says so
+  and points at **Check**, which clears it. Deliberately not a dialog: a share that is
+  down every morning must not greet every start. A folder with no build in it yet, or an update
+  the examiner declined, gets no note. `Snapchat_Auto.startup_update_check`.
+
 ### Fixed
 - **A `<details>` opened inside an expanded index row closed itself a frame later.** The virtual
   table redraws a row from its static detail string on every re-measure, which reset the element;

@@ -108,8 +108,8 @@ wheels = [
 
 [[package]]
 name = "dfjsim-shared-tools"
-version = "0.3.0"
-source = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git?tag=v0.3.0#4ff6aec1e5fd796cbe8a89a9f8062afc5e704a44" }
+version = "0.4.0"
+source = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git?tag=v0.4.0#6a6eead284f456e06b3b6ee1a569ea4351e3750b" }
 dependencies = [
     { name = "packaging" },
     { name = "pydantic" },
@@ -450,7 +450,7 @@ sqlcipher3-wheels = [
 [package.metadata]
 requires-dist = [
     { name = "blackboxprotobuf" },
-    { name = "dfjsim-shared-tools", git = "https://github.com/dfjsim/dfjsim_shared_tools.git?tag=v0.3.0" },
+    { name = "dfjsim-shared-tools", git = "https://github.com/dfjsim/dfjsim_shared_tools.git?tag=v0.4.0" },
     { name = "filetype" },
     { name = "freesimplegui" },
     { name = "nuitka", url = "https://github.com/Nuitka/Nuitka/archive/main.zip" },

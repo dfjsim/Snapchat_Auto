@@ -43,11 +43,16 @@ def not_the_developers_own_text_size():
     app.hidpi.force_dpi(forced)
 
 
+# What the startup update check had to say. It is a Text, so it is not in `values` and would be
+# lost by a rebuild that did not pass it again — which is why the fixture builds with it.
+UPDATE_NOTE = "Could not be read at startup, so no update was offered."
+
+
 @pytest.fixture(scope="module")
 def window():
     app.apply_theme(CFG["appearance"])
     try:
-        built = app.build_settings_window(CFG, prefill=PREFILL)
+        built = app.build_settings_window(CFG, prefill=PREFILL, update_note=UPDATE_NOTE)
     except Exception as error:                              # no display, or no Tk on this host
         pytest.skip(f"no GUI available here: {error}")
     yield built
@@ -281,6 +286,15 @@ def test_a_rebuild_carries_the_form_across(window):
     assert real["zip"] == SAVED_ZIP                          # a path, through the elision
     assert win["case_ref"].get() == "EXHIBIT-9"              # plain text
     assert win["expand_only"].get() is True                  # a checkbox
+
+
+def test_what_the_startup_update_check_said_is_under_the_folder_field(window):
+    """A share that is not connected means no update is ever offered, and a log line is where
+    nobody looks. The note sits under the field it is about, and is not a dialog — a share that is
+    down every morning must not greet every start."""
+    win = window[0]
+
+    assert win["installer_note"].get() == UPDATE_NOTE
 
 
 # --------------------------------------------------------------------------- the legacy reports

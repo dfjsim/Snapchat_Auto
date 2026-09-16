@@ -11,7 +11,8 @@ The check itself is not implemented here: it lives in `dfjsim_shared_tools.auto_
 (`check_for_update`, `describe_installer_dir`, `newest_installer`), pinned to a tag in
 `pyproject.toml`, which is what makes the filename convention below stable and lets the sister
 applications share it. What this repository owns is in [`Snapchat_Auto.py`](../Snapchat_Auto.py):
-where the folder path comes from, and the GUI field and "Check" button that set it.
+where the folder path comes from, the GUI field and "Check" button that set it, and what the form
+says when the startup check could not do its job (`startup_update_check`).
 
 The import is deliberately guarded (`_updater()`): `requirements.txt`, the pip route the README
 documents, does not carry the shared package, and an update check must never be what stops the
@@ -88,3 +89,12 @@ over the previous one; the tag only ever lives in the filename and in the versio
 - **Never fatally.** A disconnected share, a folder full of junk, an unreadable version: all are
   logged as a warning and the tool starts normally. An update check is a convenience; the run is
   the job.
+- **Never silently *failing*, either.** `check_for_update` returns an `UpdateCheck` — a status
+  (`off`, `unreachable`, `no_installer`, `uncomparable`, `up_to_date`, `declined`, `accepted`,
+  `error`) and a one-line note — and `startup_update_check` turns the ones that mean "no update will
+  ever be offered while this lasts" into a note under the folder field: the share could not be read
+  (connect it, then **Check**), or this build's version cannot be compared. Pressing **Check**
+  clears it — the examiner has just read something more current about the same folder. It is a line on the form and not a dialog on purpose: a share that is down every
+  morning would otherwise greet every start, and a modal that is dismissed by reflex tells nobody
+  anything. A folder with no installer in it yet is the normal state right after it is set up, and a
+  declined update was declined by the person at the screen — neither gets a note.
