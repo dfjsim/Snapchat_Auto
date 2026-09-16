@@ -55,3 +55,80 @@ def test_a_missing_update_helper_leaves_the_gui_working(monkeypatch):
 
     assert not ok
     assert "dfjsim_shared_tools" in message
+
+
+class _Outcome:
+    """What the helper's check_for_update returns, reduced to what the note is decided from."""
+
+    def __init__(self, status, note="", problem=None):
+        self.status, self.note = status, note
+        self.problem = status in ("unreachable", "uncomparable", "error") if problem is None else problem
+
+
+def _helper_returning(monkeypatch, outcome):
+    class Helper:
+        calls = []
+
+        @staticmethod
+        def check_for_update(name, directory, running):
+            Helper.calls.append((name, directory, running))
+            return outcome
+
+    monkeypatch.setattr(Snapchat_Auto, "_updater", lambda: Helper)
+    return Helper
+
+
+def test_an_unreachable_folder_becomes_a_note_that_says_what_to_do(monkeypatch):
+    """The state in which no update will ever be offered, and the one nobody would otherwise know
+    about: the note names the cause and the button that confirms the fix."""
+    _helper_returning(monkeypatch, _Outcome("unreachable", "Update folder cannot be read: X:/gone"))
+
+    note = Snapchat_Auto.startup_update_check("X:/gone")
+
+    assert "no update was offered" in note
+    assert "Check" in note
+
+
+def test_a_check_that_could_not_compare_is_reported_in_the_helpers_words(monkeypatch):
+    _helper_returning(monkeypatch, _Outcome("uncomparable", "No update can be offered: version 'unknown'"))
+
+    assert Snapchat_Auto.startup_update_check("X:/builds") ==         "No update can be offered: version 'unknown' — see Check."
+
+
+@pytest.mark.parametrize("status", ["off", "no_installer", "up_to_date", "declined"])
+def test_nothing_is_said_when_there_is_nothing_to_fix(monkeypatch, status):
+    """An empty folder is the normal state right after it is set up; a declined update was declined
+    by the person at the screen. A note for either would teach examiners to ignore the note."""
+    _helper_returning(monkeypatch, _Outcome(status, "there is a note, but not for the form"))
+
+    assert Snapchat_Auto.startup_update_check("X:/builds") == ""
+
+
+def test_an_empty_folder_setting_runs_no_check_at_all(monkeypatch):
+    helper = _helper_returning(monkeypatch, _Outcome("unreachable", "must not be reached"))
+
+    assert Snapchat_Auto.startup_update_check("") == ""
+    assert Snapchat_Auto.startup_update_check("   ") == ""
+    assert helper.calls == []
+
+
+def test_the_note_survives_the_helper_not_being_installed(monkeypatch):
+    monkeypatch.setattr(Snapchat_Auto, "_updater", lambda: None)
+
+    assert Snapchat_Auto.startup_update_check("X:/builds") == ""
+
+
+def test_an_older_helper_that_returns_nothing_is_tolerated(monkeypatch):
+    """A pip install may carry a helper release from before check_for_update returned anything."""
+    _helper_returning(monkeypatch, None)
+
+    assert Snapchat_Auto.startup_update_check("X:/builds") == ""
+
+
+def test_the_real_helper_reports_a_missing_folder_as_unreachable(tmp_path, monkeypatch):
+    """End to end with the pinned helper, so a change in its vocabulary shows up here and not on
+    an examiner's screen."""
+    monkeypatch.setattr(Snapchat_Auto, "_updater", lambda: auto_update)
+
+    assert "no update was offered" in Snapchat_Auto.startup_update_check(str(tmp_path / "not-connected"))
+    assert Snapchat_Auto.startup_update_check(str(tmp_path)) == ""      # readable, nothing there

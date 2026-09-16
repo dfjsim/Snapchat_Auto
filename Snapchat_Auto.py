@@ -69,6 +69,28 @@ def check_installer_dir(directory):
     return updater.describe_installer_dir(get_project_name(), directory, get_version())
 
 
+def startup_update_check(directory):
+    """Run the startup update check; return the one-line note the form shows for it, or ''.
+
+    Accepting an offered update launches the installer and never returns. Everything else does,
+    and the note is what the form says under the folder field afterwards — only when the check
+    could not do its job (the share is not connected, the version cannot be compared), because
+    that is the state in which no update will *ever* be offered and nobody would know. A folder
+    with no build in it yet, an update the examiner declined: nothing to say. A dialog is
+    deliberately not used — a share that is down every morning would then greet every start.
+    """
+    updater = _updater()
+    if updater is None or not (directory or "").strip():
+        return ""
+    outcome = updater.check_for_update(get_project_name(), directory, get_version())
+    if not getattr(outcome, "problem", False):
+        return ""
+    if outcome.status == "unreachable":
+        return ("Could not be read at startup, so no update was offered — if it is a network "
+                "share, connect it, then Check.")
+    return f"{outcome.note} — see Check."
+
+
 # Remembered GUI selections persist here between runs.
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".snapchat_auto_gui.json")
 
@@ -1395,7 +1417,7 @@ def _viewport_size(screen=None):
             max(low[1], min(high[1], height - margin[1])))
 
 
-def build_settings_window(cfg, prefill=None, relations=None):
+def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
     """The settings window, its path bookkeeping and the relation policy it starts with.
 
     Returns ``(window, real, relation_state)``. Split out of ``main()`` so that it can be
@@ -1406,6 +1428,9 @@ def build_settings_window(cfg, prefill=None, relations=None):
     *prefill* and *relations* carry a window's state across a rebuild. A toolkit theme only applies
     to windows built after it is set, so switching appearance means building a new window — and
     losing what the examiner had already filled in would make the button cost more than it is worth.
+    *update_note* is what the startup update check had to say (``startup_update_check``), shown
+    under the folder field; it is passed on every build for the same reason, since a Text is not in
+    ``values`` and would not survive a rebuild otherwise.
     """
     has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
     # The relation policy for a partial run, remembered between runs (the selection file and the case
@@ -1522,6 +1547,8 @@ def build_settings_window(cfg, prefill=None, relations=None):
          sg.FolderBrowse(target="installer_dir", key="installer_browse",
                          initial_folder=cfg.get("installer_dir") or "."),
          sg.Button('Check', key="installer_check")],
+        [sg.Text(update_note, key="installer_note", font=HINT_FONT,
+                 text_color="#ffb0b0" if update_note else hint_color())],
         ]
 
     # It scrolls when it must, but opening already scrolled is most of what "crammed" means — so the
@@ -1618,8 +1645,8 @@ def main(args):
     # Only for an examiner who pointed the tool at a folder of newer builds (GUI field below).
     # It runs before anything else because accepting an update launches the installer and ends
     # this process; a headless run never gets here, and must not — nobody is there to answer.
-    if (updater := _updater()):
-        updater.check_for_update(get_project_name(), cfg.get("installer_dir", ""), get_version())
+    # What it could not do is said under the field, not in a dialog (see startup_update_check).
+    update_note = startup_update_check(cfg.get("installer_dir", ""))
     show_disclaimer(cfg)
 
     def _browse_start(this_val, other_val, saved_key):
@@ -1629,7 +1656,7 @@ def main(args):
                 return os.path.dirname(candidate)
         return "."
 
-    window, real, relation_state = build_settings_window(cfg)
+    window, real, relation_state = build_settings_window(cfg, update_note=update_note)
     while True:
         event, values = window.read()
         values = reconcile_paths(values, real)
@@ -1674,6 +1701,11 @@ def main(args):
             # at the field, instead of silently never offering an update.
             ok, message = check_installer_dir(values["installer_dir"])
             (sg.popup if ok else sg.popup_error)(message, title="Update checks", keep_on_top=True)
+            if update_note:
+                # Whatever the startup check had to say, the examiner has just read something
+                # more current about the same folder.
+                update_note = ""
+                window["installer_note"].update("")
         elif event == "selection_browse":
             picked = sg.popup_get_file("Select a saved selection", no_window=True, keep_on_top=True,
                                        file_types=(("Selection", "*.json *.js"), ("All", "*.*")),
@@ -1691,7 +1723,8 @@ def main(args):
             apply_theme(cfg["appearance"])
             window.close()
             window, real, relation_state = build_settings_window(cfg, prefill=values,
-                                                                 relations=relation_state)
+                                                                 relations=relation_state,
+                                                                 update_note=update_note)
         elif event in ("text_size", "text_size+ENTER"):
             ok, size = parse_text_size(values["text_size"])
             if not ok:
@@ -1708,7 +1741,8 @@ def main(args):
                 apply_theme(cfg.get("appearance", "os"))     # re-issues set_options(scaling=...)
                 window.close()
                 window, real, relation_state = build_settings_window(cfg, prefill=values,
-                                                                     relations=relation_state)
+                                                                     relations=relation_state,
+                                                                     update_note=update_note)
         elif event == "relations_edit":
             _relations_dialog(relation_state)
         elif event == "Ok":

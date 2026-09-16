@@ -55,7 +55,7 @@
         # Pinned to a tag, not a branch: a build has to be reproducible, and this repository is
         # public so anyone cloning it can resolve the dependency. It replaces a local editable path
         # that only existed on one machine.
-        dfjsim_shared_tools = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git", tag = "v0.3.0" }
+        dfjsim_shared_tools = { git = "https://github.com/dfjsim/dfjsim_shared_tools.git", tag = "v0.4.0" }
 
 [tool.setuptools.packages.find]
     where   = ["."]
