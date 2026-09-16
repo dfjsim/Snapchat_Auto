@@ -43,10 +43,13 @@ Memories / My Eyes Only.
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
   thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
-  and `sniff.py`, the shared magic-byte identifier. Identify content with `sniff.classify`, never by
+  `sniff.py`, the shared magic-byte identifier — identify content with `sniff.classify`, never by
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
-  encrypted").
+  encrypted" — and `media_meta.py`, which reads what a media file says about **itself**: EXIF/XMP,
+  PNG text, an MP4's `mvhd` and QuickTime user data. Every timestamp it returns says what clock it
+  is on, and only one whose zone the file states becomes an instant; a naive EXIF wall clock is
+  handed back as the string it is).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app

@@ -160,7 +160,7 @@ To keep the report usable with many Memories, it is split (`generate_report`):
 
 * **`Memories_report.html`** — a lightweight, **sortable/filterable index table** (global search,
   per-column sort, a with/without-thumbnail filter, a user filter, a recovered-media filter, a
-  geolocation filter and a time window).
+  geolocation filter, an embedded-metadata filter and a time window).
   One **row per Memory (snap)**
   with: thumbnail, kind, user, `ZSNAPID` / `ZENTRYID` / `ZMEDIAID`, cache-file tokens, the media
   **MD5 / SHA-256**, created time, geolocation, and a link to the detail sub-page. Each row carries
@@ -171,10 +171,15 @@ To keep the report usable with many Memories, it is split (`generate_report`):
   cache-token cell shows the first two and counts the rest). It also carries the **pager** and the
   **selection** controls, and a **My Eyes Only** filter. Keep the `data/` and `media/` folders next
   to the HTML file. See [report_ui.md](report_ui.md).
-  The search text behind each row also carries the Memory's **CDN URLs** (media / overlay /
-  thumbnail, download and redirect), so a full or partial URL — pasted from `scdb-27`, from a
-  detail page, or from the cache_controller report — finds its Memory. The URLs themselves are
-  shown on the detail sub-page.
+  The search text behind each row also carries what the row has no column for: the Memory's
+  **CDN URLs** (media / overlay / thumbnail, download and redirect), so a full or partial URL —
+  pasted from `scdb-27`, from a detail page, or from the cache_controller report — finds its
+  Memory; its **AES-256 key and IV in hex**, so a key seen in another tool finds the Memory it
+  decrypts; and the **fields found inside its media files** (camera make and model, software,
+  GPS, the file's own timestamps — see below). All of these are listed in the row's expanded area,
+  behind *CDN URLs, AES key / IV, embedded metadata — also matched by Search*, which is where to
+  confirm what a search hit on. The block is a collapsed `<details>` because six URLs are taller
+  than the row; opening it tells the virtual table to re-measure (`SCV.remeasure`).
 * **`pages/<key>.html`** — one **detail sub-page per group**, holding the full detail (metadata,
   location, per-snap AES key/IV, ZGALLERYSNAP/ZGALLERYENTRY values, CDN URLs, timestamp tables, and
   the media-files table with hashes/paths and the 🗄 cache-entry links). MEDIA ID and SNAP IDs are
@@ -201,8 +206,8 @@ cost, and the reason the fold is the default, is that sorting then scatters a gr
 wherever their own values put them.
 
 The expansion is not only for groups: **every** row's expanded area lists that Memory's timestamps,
-which is where the time filter's matches can be seen (the index has room for one time column, and the
-filter searches them all).
+each with where it was read from, which is where the time filter's matches can be seen (the index has
+room for one time column, and the filter searches them all).
 
 **A lead row carries two checkboxes.** The first is that row's own Memory — the same tick as its detail
 page, and what the selection file records. The second stands for the whole group: filled when every
@@ -217,21 +222,89 @@ Note the deliberate difference from **Select all shown**, which follows the filt
 Memories that match, which may be some members of a group and not the rest — which is exactly the state
 the group box's middle mark exists to show.
 
+### Every timestamp says where it came from
+
+Three different things record a time for one Memory, and they need not agree: the app's database, the
+media file's own header, and the device's filesystem. The report keeps them apart and **tags every
+value with its source** rather than folding them into one column (`_memory_times` returns
+`(label, value, source)`; the row's expanded area draws the source as a third, muted column, and the
+`?` beside *Timestamps* — `TIME_SOURCES_HINT` — explains the tags):
+
+| Tag | What it is | Clock |
+|---|---|---|
+| `scdb-27 › ZGALLERYSNAP.<col>` / `ZGALLERYENTRY.<col>` | the app's record — every `*TIME*`/`*DATE*` column of the snap row and of the entry/album row it belongs to | Cocoa seconds (since 2001-01-01 UTC), converted to the run's timezone |
+| `inside <file>` | written **into** the recovered media by whatever produced it: EXIF `DateTime*`, XMP `CreateDate`, PNG `Creation Time`, an MP4's `mvhd` creation/modification time, a QuickTime `creationdate` (`©day` / `com.apple.quicktime.creationdate`), the EXIF GPS stamp | converted to the run's timezone when the file **states** its zone (EXIF `OffsetTime*`, an ISO 8601 offset); marked *UTC assumed* where only the format defines the field as UTC (`mvhd`, the GPS stamp); otherwise shown *as written* and tagged *no timezone in the file* — a wall clock on the writing device's clock, never guessed into an instant |
+| `extraction archive › <path>` | the cache file's mtime **on the device**, from the archive entry's `UT` field via `extraction_manifest.json` (the same record the Library/Caches report reads — see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-modified-column)); never the extracted copy's own mtime, which is when *we* unzipped it | UTC seconds, converted to the run's timezone; *not recorded* when the archive carried none |
+
+The index's **Created** column header carries a `?` naming its field (`ZGALLERYSNAP.ZCREATETIMEUTC`).
+On the detail sub-page each source is shown **once, where it belongs**: the two database tables say
+which store and encoding they came from; a file's own timestamps sit under that file's *Embedded
+metadata* block as a small table (field, the value *as written*, the value in the report's timezone —
+or *not converted* / *UTC assumed* — and the reason), not repeated anywhere else; and the cache file's
+mtime on the device sits on the line of the path it dates, in the *Media files* table's source-path
+cell (a file rebuilt from byte-range parts has an mtime per part, bounded as earliest … latest). In the
+index row the parts are bounded the same way, so the row stays a row.
+
+**Zones are never assumed silently.** A file time is converted to the run's timezone only when the
+file *states* its zone (EXIF `OffsetTime*`, an ISO 8601 offset). Where the file states none but the
+format defines the field as UTC — an `mvhd` time, the EXIF GPS stamp — the conversion is shown with
+*UTC assumed* beside it, because encoders (Apple's among them) have written local time there. Where
+nothing is known the value is shown as written. `media_meta` records this as the time's `basis`
+(`stated` / `format` / none); `report_ui.file_time_rows` turns it into the caveat.
+
+Two things are excluded on purpose. A **poster frame** this tool generated is never read: it is ours,
+not evidence, and its encoder's stamps would be this run's. And `gallery.encrypteddb` rows (keys,
+coordinates) carry no time of their own; they are dated only by the snap row they belong to.
+
+### Embedded metadata — what the file says about itself
+
+`scripts/data/media_meta.py` reads the metadata **inside** each recovered file, once per distinct
+content, at the point every published file passes through (`_save_media` → `stub["meta"]`): EXIF and
+XMP in a JPEG or WebP, text chunks in a PNG, the `mvhd` header and QuickTime user data (`©xyz`
+location, `©mak`, `keys`/`ilst` items) in an ISO base media file. Only Pillow and the standard library
+are used; HEIF/HEIC is **not** read in this build (no HEIF codec), and the page says so rather than
+reporting "no metadata". The reader never raises — a truncated or hostile header costs that file its
+block, not the report.
+
+It is shown three ways. On the detail sub-page, **Embedded metadata — inside the media files** sits
+directly under the id band, next to the thumbnail: per file, the container and pixel size, the fields
+that identify a device or place (`KEY_TAGS`: make, model, software, lens, orientation, serials,
+`KEY_QT` for QuickTime), the GPS fix as an OpenStreetMap link (labelled as *the file's own fix, not
+the app's*), the file's own timestamps as a table, and everything else the file holds behind **all
+fields — N more**. The renderer is `report_ui.embedded_meta_html`, shared with the two cache reports,
+so the same file reads the same way wherever the examiner meets it. A file with nothing inside says so — *none — the file carries no EXIF, XMP or dated
+header* — because "no EXIF" is itself a finding. On the index, an **EXIF** chip in the Kind column and
+an **Embedded metadata** filter (*with* / *none found*, counted), and the fields in the row's expanded
+area and its search text.
+
+Expect *none found* to be the common state: Snapchat's servers re-encode media, so a cached file
+usually carries nothing. When one does carry EXIF it most often came from the camera roll, and then its
+make, model and GPS fix describe the device that took the picture — not necessarily this one. The
+hints say so (`report_ui.EMBEDDED_BASIS`, `_META_FILTER_HINT`). Pixel size and orientation alone do
+not make a file *notable* (`media_meta.STRUCTURAL`): every encoder writes those, and on a real device
+three quarters of the cached JPEGs carry exactly that set and nothing else — a chip on all of them
+would say nothing. The **EXIF** chip, the filter and the search token follow `notable`; the block on
+the detail page shows whatever is there.
+
 ### Finding a Memory by time
 
 The toolbar's **Time** control (shared — see
 [report_ui.md](report_ui.md#the-datetime-window-report_uitime_filter-time_js)) filters on **every**
-timestamp a Memory carries: the capture time in the index column plus every `ZGALLERYSNAP` and
-`ZGALLERYENTRY` time column, which are otherwise only on the detail sub-page. Either a range
+timestamp a Memory carries: the capture time in the index column, every `ZGALLERYSNAP` and
+`ZGALLERYENTRY` time column, the timestamps inside its media files and the cache files' device
+mtimes, which are otherwise only in the row's expanded area. Either a range
 (*between*) or a tolerance (*within ± N minutes/hours/days of*); a Memory matches when any one of its
 times falls in the window, and expanding the row shows which. A Memory inside a folded group is found
 by its own times too, and the group opens with the matching member highlighted.
 
 Two consequences to know. The keys come from the displayed strings, so the window means the time **as
-the report shows it**, in the run's timezone. And a Memory with no readable timestamp — a **carved**
-Memory has no `ZGALLERYSNAP` row at all, so no times — is hidden while a window is set: it cannot be
-shown to fall inside one. Its detail says so in place of the timestamps, and clearing the filter brings
-it back.
+the report shows it**, in the run's timezone — and a file time whose zone the file did not state is
+compared *as written*, which the row's source tag says. And a Memory with no readable timestamp at all
+— a **carved** Memory has no `ZGALLERYSNAP` row, and if its media carries no dated header and the
+archive recorded no mtime it has nothing — is hidden while a window is set: it cannot be shown to fall
+inside one. Its detail says so in place of the timestamps, and clearing the filter brings it back. A
+carved Memory whose media *does* carry an `mvhd` time or whose cache file has a recorded mtime is
+findable by those, with the expansion stating that no database time exists.
 
 ### My Eyes Only
 A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the

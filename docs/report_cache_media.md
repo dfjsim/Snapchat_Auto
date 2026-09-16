@@ -52,6 +52,17 @@ with every step recorded in the row's "?":
 | **zstd** | decompressed with the standard library's `compression.zstd` (Python 3.14, PEP 784 — no third-party binding needed), then re-sniffed; a Snapchat resource bundle has its member names listed |
 | `LZC` / TSAF / font | identified and classified, not treated as media |
 
+Every recovered **media** file is then read for what it says about *itself* — from the recovered
+bytes, so a decrypted payload is read too (`media_meta.extract_bytes`) — and shown as an **Embedded
+metadata** block through the renderer the Memories and cache_controller reports share
+(`report_ui.embedded_meta_html`): EXIF/XMP fields, PNG text, and for any ISO base media container
+the `mvhd` creation/modification time, duration and QuickTime user data. This replaces the report's
+own `mvhd` grid, and keeps its caveat: an `mvhd` time is UTC by the format's definition, not by
+anything the file records, and Apple encoders have not been faithful to that, so the converted value
+is marked *UTC assumed* and should be corroborated against the *modified on the device* column before a
+zone is stated in a report. A file's own timestamps with a stated zone (EXIF `OffsetTime*`, a
+QuickTime `creationdate`) convert cleanly; one with none is shown as written.
+
 ### The story-cache key
 
 `Documents/ClientEncryptionService.plist` is a **Snap TSAF container, not a plist** — `plistlib`

@@ -1135,6 +1135,19 @@ function init(o){
  pager=o.pager?document.getElementById(o.pager):null;
  pageSize=o.pageSize||0;
  mount.addEventListener('click',onClick);
+ /* A <details> inside an expanded row: its open state has to survive a redraw, because the detail
+    is one static string and every redraw (a scroll, a re-measure) rewrites it closed — which is why
+    opening one used to show its content for a frame and then lose it. `toggle` does not bubble, so
+    it is caught in the capture phase. The row is re-measured because its height just changed. */
+ mount.addEventListener('toggle',function(ev){
+  var d=ev.target;
+  if(!d||d.tagName!=='DETAILS')return;
+  var vr=d.closest('.vr');
+  if(!vr)return;
+  var all=vr.querySelectorAll('details'),k=-1;
+  for(var j=0;j<all.length;j++)if(all[j]===d){k=j;break;}
+  if(d.open)openDet[vr.id+'|'+k]=1;else delete openDet[vr.id+'|'+k];
+  remeasure();},true);
  /* The group box carries no data-id, so SELECT_JS's own handler ignores it: what it means is "every
     Memory of this fold", which only this module knows the membership of. */
  mount.addEventListener('change',function(ev){
@@ -1312,6 +1325,7 @@ function render(){
  lastA=a;lastB=b;dirty=false;
  markFoldHits();
  markGroupBoxes();
+ restoreDetails();
  /* Hand-written checkboxes inside an expanded row come from static detail HTML, so their state has
     to be put back after every redraw — see scSyncBoxes. Guarded because the selection code is not
     loaded on every page that uses this table. */
@@ -1327,6 +1341,14 @@ function markFoldHits(){
   if(!host)continue;
   var el=host.querySelector('[data-mem="'+foldHit[id]+'"]');
   if(el)el.classList.add('mhit');}}
+
+/* Put back the <details> the examiner opened inside expanded rows — see the toggle listener. */
+var openDet={};
+function restoreDetails(){
+ var vrs=win.querySelectorAll('.vr.open');
+ for(var i=0;i<vrs.length;i++){
+  var all=vrs[i].querySelectorAll('details');
+  for(var j=0;j<all.length;j++)if(openDet[vrs[i].id+'|'+j])all[j].open=true;}}
 
 /* Re-measure the open rows after something inside one changed size — an image or a video that
    finished loading, say. Without this the row keeps the height it had while the media was still
@@ -1582,6 +1604,161 @@ function scFvReset(id){var e=document.getElementById(id);if(e)e.value='';}
 def _write_js(path, text):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
+
+
+# --------------------------------------------------------------------------- embedded metadata
+#
+# What a media file says about ITSELF — EXIF / XMP / PNG text, an MP4's mvhd and QuickTime user data
+# — read by scripts/data/media_meta.py and shown the same way in every report that publishes media:
+# the Memories detail pages, the cache_controller rows and the Library/Caches rows. One renderer, so
+# the same file reads the same way wherever the examiner meets it.
+
+EMBEDDED_BASIS = (
+    "What the recovered media file says about ITSELF — metadata stored inside the file by whatever "
+    "produced it, read from the recovered bytes: EXIF and XMP in a JPEG or WebP, text chunks in a PNG, "
+    "the mvhd header and QuickTime user data (©day, ©xyz, com.apple.quicktime.*) in an MP4 or MOV. It "
+    "is independent of everything the app's databases say. Snapchat's servers re-encode media, so a "
+    "cached file usually carries little of it; one that does most often came from the camera roll, "
+    "and then its camera make/model, software and GPS fix are the device that took it, not "
+    "necessarily this one. The fields shown first are the ones that identify a device or place; "
+    "everything else the file holds is behind «all fields». A poster frame this tool generated is "
+    "never read — it is ours, not evidence. HEIF/HEIC is not read in this build, and says so.")
+
+FILE_TIME_BASIS = (
+    "Timestamps written INSIDE the media file by whatever produced it — an EXIF DateTimeOriginal "
+    "from a camera, an XMP CreateDate from an editor, an MP4's mvhd creation time from the encoder, a "
+    "QuickTime creationdate from iOS. They are independent of the app's database and of the "
+    "filesystem: a different program wrote them from a different clock, which is why they are worth "
+    "comparing and why they can legitimately differ. «As written» is the exact value in the file. «In "
+    "this report's timezone» is a clean conversion only when the file STATES its zone (EXIF "
+    "OffsetTime*, an ISO 8601 offset); where the file states none but the format defines the field as "
+    "UTC — an mvhd time, the GPS stamp — it is marked «UTC assumed», because encoders (Apple's among "
+    "them) have been known to write local time there: corroborate against the filesystem and database "
+    "times before stating a zone. A value with no zone at all is a wall clock on the writing device's "
+    "clock and is never converted.")
+
+EMBEDDED_CSS = """
+ .metafile{border-left:2px solid #e2e2ee;padding:4px 0 6px 10px;margin-top:6px}
+ .metahd a,.metahd span{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#2d2d71;
+   text-decoration:none;font-weight:700;overflow-wrap:anywhere} .metahd a:hover{text-decoration:underline}
+ .metasrc{font-size:10.5px;color:#8a8aa0;margin:1px 0 2px}
+ .metafile .grid{display:grid;grid-template-columns:auto 1fr;gap:2px 14px;font-size:12px;margin-top:4px}
+ .metafile .grid .k{color:#666} .metafile .grid .v{overflow-wrap:anywhere}
+ details.metaall{margin-top:4px;font-size:12px} details.metaall summary{cursor:pointer;color:#2d2d71;font-weight:600}
+ table.ftimes{border-collapse:collapse;margin-top:6px;font-size:12px;width:100%}
+ table.ftimes th{background:#2d2d71;color:#fff;text-align:left;padding:4px 8px;font-weight:600}
+ table.ftimes td{border:1px solid #e0e0e8;padding:4px 8px;vertical-align:top}
+ table.ftimes td.mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;white-space:nowrap}
+ table.ftimes td.note{color:#666;font-size:11px;max-width:360px;white-space:normal}
+ .assumed{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;
+   font-size:10px;white-space:nowrap;margin-left:4px}
+"""
+
+
+def file_time_rows(meta, epochfmt):
+    """The timestamps one file carries, formatted for a run: ``[{label, shown, wall, naive, assumed,
+    caveat, note}]``.
+
+    Three strengths, said in one word each where the value is shown: a zone the file STATES converts
+    cleanly; one the FORMAT defines (mvhd, the GPS stamp) converts on an assumption the caveat names;
+    none at all is left as written, because converting a wall clock of unknown zone would be a guess
+    presented as a fact. ``epochfmt`` is the run's Unix-seconds formatter, so a converted value lines
+    up with the database's in the same table.
+    """
+    rows = []
+    for t in (meta or {}).get("times") or []:
+        naive = t.get("epoch") is None
+        assumed = t.get("basis") == "format"
+        caveat = ("no timezone in the file — shown as written" if naive else
+                  f"{t['zone']} assumed: the format defines it so, the file states no zone"
+                  if assumed else "")
+        rows.append({"label": t["label"],
+                     "shown": t["wall"] if naive else epochfmt(t["epoch"]),
+                     "wall": t["wall"] + ("" if naive else f" {t['zone']}"),
+                     "zone": t.get("zone"), "naive": naive, "assumed": assumed, "caveat": caveat,
+                     "note": t.get("note", "")})
+    return rows
+
+
+def file_times_table(times):
+    """The timestamps one file carries inside itself, as a small table: the field, the value as
+    written, the value in the report's timezone — or why it is not converted — and the file's own
+    note. Empty when there are none, silently: the surrounding block already says what the file
+    does carry."""
+    rows = []
+    for t in times or []:
+        if t.get("naive"):
+            shown = "<span class='muted'>not converted — no timezone in the file</span>"
+        elif t.get("assumed"):
+            shown = (html.escape(t["shown"]) + f" <span class='assumed' title='{html.escape(t['caveat'])}'>"
+                     f"{html.escape(t.get('zone') or 'UTC')} assumed</span>")
+        else:
+            shown = html.escape(t["shown"])
+        rows.append(f"<tr><td>{html.escape(t['label'])}</td><td class='mono'>{html.escape(t['wall'])}</td>"
+                    f"<td class='mono'>{shown}</td><td class='note'>{html.escape(t.get('note', ''))}</td></tr>")
+    if not rows:
+        return ""
+    return ("<table class='ftimes'><tr><th>Timestamp in the file</th><th>As written in the file</th>"
+            "<th>In this report's timezone</th><th>Note</th></tr>" + "".join(rows) + "</table>")
+
+
+def embedded_meta_html(meta, times, *, label="", href=""):
+    """One file's «Embedded metadata» block: what it carries inside itself, key fields first, its own
+    timestamps as a table, the rest behind «all fields».
+
+    Rendered for a file with nothing too, because «no EXIF» is itself a finding an examiner wants
+    stated rather than inferred from an absent block. ``meta`` is what `media_meta.extract` returned
+    (``None`` for a format not read here); ``times`` is `file_time_rows` of it.
+    """
+    name = html.escape(label or "")
+    head = (f"<div class='metahd'><a href='{html.escape(href)}' target='_blank'>{name}</a></div>"
+            if href else f"<div class='metahd'><span>{name}</span></div>") if label else ""
+    if meta is None:
+        return (f"<div class='metafile'>{head}<div class='muted'>not a format whose embedded "
+                "metadata is read here</div></div>")
+    if not meta.get("present"):
+        why = meta.get("note") or "the file carries no EXIF, XMP or dated header"
+        return f"<div class='metafile'>{head}<div class='muted'>none — {html.escape(why)}</div></div>"
+    pairs = []
+    if meta.get("container"):
+        pairs.append(("Container", meta["container"]))
+    if meta.get("pixels"):
+        pairs.append(("Pixels", meta["pixels"]))
+    pairs += list(meta.get("key") or [])
+    grid = "".join(f"<div class='k'>{html.escape(str(k))}</div><div class='v'>{html.escape(str(v))}</div>"
+                   for k, v in pairs if v not in (None, ""))
+    gps = meta.get("gps") or {}
+    if gps:
+        lat, lon = gps.get("lat", 0), gps.get("lon", 0)
+        alt = f" · altitude {gps['alt']:.1f} m" if gps.get("alt") is not None else ""
+        grid += (f"<div class='k'>GPS in the file</div><div class='v'>"
+                 f'<a href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}" '
+                 f'target="_blank">{lat:.6f}, {lon:.6f}</a>{alt} '
+                 f"<span class='muted'>— the file's own fix, not the app's</span></div>")
+    other = meta.get("other") or []
+    more = ""
+    if other:
+        more = (f"<details class='metaall'><summary>all fields — {len(other)} more</summary><div class='grid'>"
+                + "".join(f"<div class='k'>{html.escape(str(k))}</div><div class='v'>{html.escape(str(v))}</div>"
+                          for k, v in other) + "</div></details>")
+    srcs = ", ".join(meta.get("sources") or [])
+    return (f"<div class='metafile'>{head}<div class='metasrc'>read from: "
+            f"{html.escape(srcs or 'the file header')}</div>"
+            f"<div class='grid'>{grid}</div>{file_times_table(times)}{more}</div>")
+
+
+def embedded_search_terms(meta, times, structural=()):
+    """What the search box should match for a file's embedded metadata: the fields that name a
+    device, a program or a place (not the pixel size every encoder writes), the GPS fix, and every
+    timestamp as this report shows it."""
+    terms = [str(v) for k, v in (meta or {}).get("key") or [] if k not in structural]
+    gps = (meta or {}).get("gps") or {}
+    if gps:
+        terms.append(f"{gps.get('lat', 0):.5f}, {gps.get('lon', 0):.5f}")
+    terms += [t["shown"] for t in times or []]
+    if (meta or {}).get("notable"):
+        terms.append("exif xmp embedded metadata")
+    return terms
 
 
 def write_rows(data_dir, rows):

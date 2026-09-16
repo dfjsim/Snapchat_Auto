@@ -269,6 +269,17 @@ stays a sensible size. `remeasure()` only measures: re-rendering would rewrite t
 `innerHTML`, which recreates those media elements, which fire their load event again — an endless
 loop. `measure()` rebuilds only when a height really changed, so it settles after one round.
 
+### A `<details>` inside an expanded row stays open
+
+The detail is one static string, and every redraw — a scroll, a re-measure — rewrites it, which puts
+every `<details>` back to closed. Opening one therefore showed its content for a frame and lost it:
+the toggle changed the row's height, the height change triggered a re-measure, and the redraw closed
+the block. The table now records which `<details>` of which row are open (`openDet`, keyed by row id
+and the element's ordinal within the row), restores them after every render (`restoreDetails`), and
+re-measures the row on the toggle. The `toggle` event does not bubble, so it is caught in the capture
+phase on the mount. A report needs no `ontoggle` of its own — the Memories index's *CDN URLs, AES
+key / IV, embedded metadata* block is the first user.
+
 ## Clicking inside a row
 
 In the cache_controller table a row toggles its detail when clicked, but clicks on a **link**, a

@@ -182,6 +182,25 @@ The note next to each viewer states exactly which of these happened. Encrypted c
 hashed (as stored) but never published — see *Encrypted and bundled files* below. All field labels
 use the **real DB column names with the description in parentheses**.
 
+Two more things about the bytes themselves, both new and both shared with the Memories and
+Library/Caches reports so a file reads the same way in all three:
+
+* **Embedded metadata** — every published file (and every published bundle child) is read for what
+  it says about *itself* (`scripts/data/media_meta.py`: EXIF/XMP in a JPEG or WebP, PNG text, an
+  MP4's `mvhd` and QuickTime user data) and shown through `report_ui.embedded_meta_html`: key fields
+  first, the file's own timestamps as a table (*as written* / *in this report's timezone* / note),
+  the rest behind *all fields*. A timestamp is converted only when the file **states** its zone; one
+  the format merely defines as UTC (`mvhd`) is converted and marked *UTC assumed*, since encoders have
+  written local time there; one with no zone is left as written. The fields join the row's search
+  text. Most cached files carry nothing beyond pixel size, and the block says so.
+* **Modified on the device** — beside every on-disk path, the cache file's mtime on the device's
+  filesystem, from `extraction_manifest.json` (the archive entry's `UT` field; see
+  [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-modified-column)). Never the
+  extracted copy's own mtime, which is when *we* unzipped it — and not a claim time either:
+  `CREATION_TIMESTAMP_MILLIS` is when the app registered the claim, this is when the bytes were last
+  written. Parts of a split file are bounded (earliest … latest); *not recorded* where the archive
+  carried none. Searchable.
+
 ### Bundles: the child files are the content
 For a bundle (`TYPE = 3`) the file named after the `CACHE_KEY` is **only the CHILDREN descriptor**
 (a few dozen bytes), and the content sits in one file per child, named
