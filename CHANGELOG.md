@@ -9,14 +9,51 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 ## [1.6.1-beta.1] — unreleased
 
 ### Added
+- **Every timestamp in the Memories report says where it was read from.** A Memory's times come
+  from three different things that need not agree — the app's database, the media file's own
+  header, and the device's filesystem — and the report now tags each value with its source instead
+  of folding them into one column: `scdb-27 › ZGALLERYSNAP.<column>` / `ZGALLERYENTRY.<column>`
+  (Cocoa seconds, converted to the run's timezone), `inside <file>` (EXIF, XMP, PNG text, an MP4's
+  `mvhd`, QuickTime `creationdate` — converted only when the file *states* its zone, marked
+  *UTC assumed* where only the format defines it so, otherwise shown *as written*), and
+  `extraction archive › <path>` (the cache file's mtime **on the device**, from the archive entry's
+  `UT` field via `extraction_manifest.json`, never the extracted copy's own). The index row's
+  expanded area draws the source as a third column with a `?` explaining the tags; the *Created*
+  column header names its field; on the detail page the two database tables say which store and
+  encoding they came from, a file's own timestamps sit under its *Embedded metadata* block (as
+  written / in the report's timezone / why), and the device mtime sits on the line of the path it
+  dates in the *Media files* table. All of them are keys for the time filter. A poster frame this
+  tool generated is never read.
+- **Embedded metadata (EXIF and the like) is read from every recovered media file** —
+  `scripts/data/media_meta.py`, Pillow and the standard library only: EXIF and XMP in a JPEG or
+  WebP, text chunks in a PNG, the `mvhd` header and QuickTime user data (`©xyz` location, `©mak`,
+  `keys`/`ilst`) in an MP4 or MOV. The detail page gets an **Embedded metadata** section beside the
+  thumbnail: per file, the container, pixel size, the fields that identify a device or place (make,
+  model, software, lens, serials, the GPS fix as a map link labelled as the file's own), the file's
+  timestamps, and everything else behind *all fields — N more*. A file with nothing says so, since
+  "no EXIF" is itself a finding. The index gets an **EXIF** chip and an **Embedded metadata** filter
+  (with / none found, counted), and the fields join the row's search text. HEIF/HEIC is not read
+  in this build and the page says so rather than reporting nothing. The same block, through the
+  same renderer (`report_ui.embedded_meta_html`), appears in the **cache_controller** report for
+  every published cache file and bundle child, and in the **Library/Caches** report for every
+  recovered media file — where it replaces that report's own `mvhd` grid and keeps its caveat. The
+  cache_controller report also dates every on-disk path with the file's mtime on the device.
+- **Search the Memories index by AES key / IV and by what the file says about itself.** The key
+  and IV in hex, camera make and model, software and GPS join the CDN URLs (already searchable) in
+  each row's search text. A new collapsed block in the row's expanded area — *CDN URLs, AES key /
+  IV, embedded metadata — also matched by Search* — lists them all, each with its source, so a hit
+  can be confirmed.
 - **A "Text size" control on the main window**, beside the appearance button: *Auto* (follow the
   display) or any percentage from 50 to 400, typed or picked from the common sizes, applied on
   Enter. It writes the same `dpi_scale` setting as `--dpi-scale`, so there is one setting rather
   than two, and it is saved before the window is rebuilt, so the choice survives a Cancel. The list
   is editable on purpose: walking `tk scaling` across 100–200% gives 55 distinct renderings of the
   form's fonts, most of them between the presets.
-
 ### Fixed
+- **A `<details>` opened inside an expanded index row closed itself a frame later.** The virtual
+  table redraws a row from its static detail string on every re-measure, which reset the element;
+  the table now remembers which `<details>` are open per row and restores them after each redraw
+  (`report_ui.VTABLE_JS`).
 - **Rebuilding the window (theme or text size) blanked the two Browse buttons.** `window.read()`
   reports a `FolderBrowse` in `values` with an empty string, and the rebuild passed every value to
   `Element.update()` — whose first argument, for a button, is its label. Buttons are skipped now and

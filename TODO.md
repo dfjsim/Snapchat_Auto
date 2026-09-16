@@ -56,12 +56,14 @@ corpus these are the correct answers. The fixes that came out of the same pass a
     `cache_controller_report.load_chat_links`.
 
 # Snapchat Memories report
+- Embedded metadata (EXIF) is not read from HEIF/HEIC media — Pillow has no HEIF codec in this
+  build, and the EXIF sits in an `iloc`-addressed item rather than a `moov` box. The report says
+  "HEIF container — not read" for those. Worth a small ISO BMFF `meta`/`iinf`/`iloc` walker, or
+  `pillow-heif` if its wheels prove acceptable for the Nuitka build.
 - Output selected Memories and their media files to **PDF with attachments**. The selection and
   report half is done — `--selection` builds a partial report holding only the ticked Memories and
   whatever related items are asked for, see docs/report_partial.md. The PDF half is the last, gated
   phase of that work (see *Planned features*).
-- We need to be able to filter/search by URL.
-- In our Memories report, we need to be able to search/filter by IV/KEY.
 - My Eyes Only, still open after the 1.5.2 fixes:
   - A My Eyes Only Memory captured *directly* into MEO (not moved into it) still needs the
     keychain's `persistedkey`, and there is no way around that — it is the correct outcome, not a
@@ -162,7 +164,6 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 - `CACHE_KEY_VIRTUALIZATION` was empty in every test extraction, so the
   `VIRTUAL_CACHE_KEY` ↔ `CACHE_KEY` semantics are unconfirmed — its rows are listed but no linking
   logic depends on them. Revisit once a populated sample is available.
-- We need to be able to filter/search by URL.
 
 # Offline tile map server — remaining ideas
 - A map on the Memories *index* (the index only shows coordinates + OSM/Google links today).

@@ -46,12 +46,14 @@ from scripts.data import sqlite_open
 from scripts.data import sniff
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.memories_media_report import (
+    load_device_mtimes, manifest_key, _collapse_paths_with_mtimes,
     find_app_container, find_profiles, index_sccontent, device_path,
-    load_path_manifest, make_time_formatter, _collapse_part_paths, guess_media,
+    load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
+from scripts.data import media_meta
 
 try:
     import blackboxprotobuf                                    # already a project dependency
@@ -646,7 +648,7 @@ def publish_posters(entries, files_dir, get_view=None,
 
 
 def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
-                       max_reconstruct_bytes=1024 * 1024 * 1024):
+                       max_reconstruct_bytes=1024 * 1024 * 1024, epochfmt=None):
     """For every entry with an on-disk copy, compute the **actual cached bytes'** MD5/SHA-256 and
     make the file viewable when it is recognizable plaintext media, so the examiner can open it
     even when the entry links to no Memory or conversation.
@@ -661,8 +663,25 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 
     Encrypted cache bytes are still hashed (as stored) but never published — for those, the report
     links to the copy the Memories report already decrypted, when there is one.
+
+    Every file published is also read for what it says about **itself** — EXIF, XMP, an MP4's mvhd
+    and QuickTime user data (``embedded`` / ``embedded_times``, see ``scripts/data/media_meta.py``)
+    — because a cached JPEG that still carries a camera's EXIF, or a video whose header dates its
+    encoding, is evidence the index row knows nothing about. ``epochfmt`` puts those timestamps in
+    the run's timezone; without one they are left as the file states them.
     """
     os.makedirs(files_dir, exist_ok=True)
+
+    def read_embedded(target, view):
+        if not view:
+            return
+        target["embedded"] = media_meta.extract(os.path.join(files_dir, os.path.basename(view)))
+        target["embedded_times"] = report_ui.file_time_rows(target["embedded"],
+                                                            epochfmt or (lambda sec: ""))
+        if epochfmt is None:                                # nothing to convert with: as written
+            for t in target["embedded_times"]:
+                t["shown"] = t["wall"]
+
     for e in entries:
         if not e["on_disk"]["found"]:
             continue
@@ -691,6 +710,7 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                                           max_reconstruct_bytes)
                 e["view"], e["view_is_image"] = view, ext in ("jpg", "png", "webp")
                 e["view_ext"], e["view_note"] = ext, note
+                read_embedded(e, view)
 
         # bundle children: each is its own file with its own type
         kids = []
@@ -714,6 +734,7 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                 kid["view"], kid["note"] = publish_view(cpaths, files_dir, base, kid["type"],
                                                         total, max_reconstruct_bytes)
                 kid["view_is_image"] = kid["type"] in ("jpg", "png", "webp")
+                read_embedded(kid, kid.get("view"))
             kids.append(kid)
         e["child_files"] = kids
         # the bundle's own "viewable" file is its largest recognizable child
@@ -1334,6 +1355,16 @@ def _file_cell(entry, rel_prefix, closure=None):
 _META_DIFF_COLS = ("FILE_SIZE_BYTES", "TOTAL_DISK_USED_BYTES", "KNOWN_CONTENT_LENGTH_BYTES",
                    "TYPE", "STORAGE_TYPE", "SHARD_INDEX", "LAST_READ_TIMESTAMP_MILLIS")
 
+DEVICE_MTIME_BASIS = (
+    "Beside each path: the cache file's modification time on the DEVICE's filesystem, read from the "
+    "extraction archive's own record of it (the ZIP entry's UT field, UTC seconds) and shown in this "
+    "report's timezone. It is NOT the timestamp of the copy on this machine, which is when this tool "
+    "unzipped it. It is also not a claim time: CREATION_TIMESTAMP_MILLIS above is when the app "
+    "registered the claim in cache_controller.db, this is when the bytes were last written. For a "
+    "file split into byte-range parts every part has its own; the earliest and latest are shown. «not "
+    "recorded» means the archive carried no timestamp for that entry, or the extraction folder was "
+    "produced by a build older than this and holds none.")
+
 ENCRYPTED_BASIS = (
     "The bytes on disk match no known file signature, their Shannon entropy is at least 7.5 bits "
     "per byte, and the file's length is a multiple of the AES block size (16 bytes) — the "
@@ -1465,9 +1496,16 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
         for p in e["on_disk"]["paths"]:
             groups.setdefault(sbp.get(p) or "(unknown scope)", []).append(p)
         blocks = []
+        mtimes = e.get("ondisk_mtimes") or {}
         for scope, plist in sorted(groups.items(), key=lambda kv: (kv[0] in cross, kv[0])):
-            collapsed = _collapse_part_paths(device_path(p, src_root, manifest) for p in plist)
-            listed = "<br>".join(_esc(pp) for pp in collapsed)
+            # each path carries the file's mtime ON THE DEVICE, from the extraction archive — the
+            # one timestamp of the bytes themselves, as opposed to the claim's (see the basis)
+            pairs = [(device_path(p, src_root, manifest), mtimes.get(p, "")) for p in plist]
+            listed = "<br>".join(
+                _esc(line) + " <span class='mt'>modified on the device: "
+                + ("<span class='muted'>not recorded</span>" if stamp == "not recorded"
+                   else _esc(stamp)) + "</span>"
+                for line, stamp in _collapse_paths_with_mtimes(pairs))
             badge = ((" <span class='xscope'>⚠ different account scope</span>" + _info(_cross_scope_basis(e)))
                      if scope in cross else "")
             blocks.append(f"<div class='scopehdr'>SCContent scope: <span class='mono'>{_esc(scope)}</span>"
@@ -1520,8 +1558,14 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                                       f"▶ view cached file</a>{note}" + why)
         elif e.get("view_note"):                               # recognized media too large to embed
             hview.append(f"<div class='muted'>▶ {_esc(e['view_note'])}</div>")
-        parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present</div>"
-                     + "".join(blocks) + "".join(hview))
+        parts.append(f"<div class='sect'>Cache file(s) on disk — {_fmt_bytes(e['on_disk']['bytes'])} present"
+                     + _info(DEVICE_MTIME_BASIS) + "</div>" + "".join(blocks) + "".join(hview))
+        if e.get("view") and "embedded" in e and not str(e.get("view_note", "")).startswith("bundle child"):
+            parts.append("<div class='sect'>Embedded metadata — inside the cached file, with its own "
+                         "timestamps" + _info(report_ui.EMBEDDED_BASIS + " " + report_ui.FILE_TIME_BASIS)
+                         + "</div>" + report_ui.embedded_meta_html(e["embedded"], e.get("embedded_times"),
+                                                                   label=os.path.basename(e["view"]),
+                                                                   href=e["view"]))
     else:
         parts.append("<div class='sect'>Cache file(s) on disk</div>"
                      "<div class='muted'>no matching file found in the SCContent folders</div>")
@@ -1557,6 +1601,14 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                      + "</div><table class='sub'><tr><th>child</th><th>detected type</th>"
                        "<th>size</th><th>MD5 / SHA-256 of the child</th><th>view</th></tr>"
                      + "".join(krows) + "</table>")
+        read = [k for k in e["child_files"] if "embedded" in k]
+        if read:
+            parts.append("<div class='sect'>Embedded metadata — inside the child files, with their own "
+                         "timestamps" + _info(report_ui.EMBEDDED_BASIS + " " + report_ui.FILE_TIME_BASIS)
+                         + "</div>" + "".join(
+                             report_ui.embedded_meta_html(k["embedded"], k.get("embedded_times"),
+                                                          label=str(k.get("name")), href=k.get("view", ""))
+                             for k in read))
 
     # decrypted copy produced by the Memories report (encrypted cache bytes)
     here = _decrypted_here(e, closure)
@@ -1702,6 +1754,12 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
         for k in e.get("child_files") or []:
             searchable += [str(k.get("name") or ""), k.get("md5") or "", k.get("sha256") or ""]
+            searchable += report_ui.embedded_search_terms(k.get("embedded"), k.get("embedded_times"),
+                                                          media_meta.STRUCTURAL)
+        # what the cached file says about itself, and when the device last wrote it
+        searchable += report_ui.embedded_search_terms(e.get("embedded"), e.get("embedded_times"),
+                                                      media_meta.STRUCTURAL)
+        searchable += [stamp for stamp in (e.get("ondisk_mtimes") or {}).values() if stamp]
         for p in e["on_disk"]["paths"]:
             searchable.append(os.path.basename(p))
         rows.append([
@@ -1742,7 +1800,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat cache_controller.db</title><style>
+<title>Snapchat cache_controller.db</title><style>{report_ui.EMBEDDED_CSS}
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
@@ -1787,6 +1845,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  table.sub td{{border:1px solid #e0e0e8;padding:3px 8px;overflow-wrap:anywhere;vertical-align:middle}}
  table.sub td.hex{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7a1f5a}}
  .paths{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;margin-top:4px;overflow-wrap:anywhere}}
+ .paths .mt{{color:#8a8aa0;font-size:10px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;white-space:nowrap}}
  .muted{{color:#999}}
  /* The index row's Links cell — see the note in _links_html. No mask/filter/transform on this:
     they would become the containing block for the "?" popover, which is position:fixed exactly so
@@ -1971,6 +2030,9 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     manifest = load_path_manifest(src_root, app_or_root, app)
     outdir = outdir or ("./Snapchat_CacheController_report_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
     ms_fmt, tz_label = make_ms_formatter(tz)
+    # the cache files' mtimes ON THE DEVICE, from the extraction archive — never the extracted
+    # copy's own, which is when we unzipped it (see memories_media_report.load_device_mtimes)
+    device_mtimes = load_device_mtimes(src_root, app_or_root, app)
 
     scfull, scparts = index_sccontent(app)
     mem_index = load_memory_index(app)
@@ -2010,6 +2072,13 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         all_entries.extend(orphans)
         all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
 
+    for e in all_entries:
+        stamps = {}
+        for path in e["on_disk"]["paths"]:
+            stamp = device_mtimes.get(manifest_key(path)) if device_mtimes else None
+            stamps[path] = ms_fmt(int(stamp) * 1000) if stamp is not None else ""
+        e["ondisk_mtimes"] = stamps
+
     # The closure's view. Rows keep the order established above, which `render` preserves: poster
     # extraction runs under an overall budget, so re-ordering the publish could change which frames
     # get extracted.
@@ -2029,7 +2098,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                                 virtual=virtual, wal_infos=wal_infos, tz_label=tz_label,
                                 rel_prefix=rel_prefix, rdir=rdir, scfull=scfull, scparts=scparts,
                                 manifest=manifest, src_root=src_root, memory_media=memory_media,
-                                cache_media=cache_media)
+                                cache_media=cache_media, ms_fmt=ms_fmt)
 
 
 def _drop_sqlite_views(outdir):
@@ -2058,7 +2127,9 @@ def render(stage, closure=None, prov=None):
 
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
-    materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir)
+    ms_fmt = stage["ms_fmt"]
+    materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir,
+                       epochfmt=lambda seconds: ms_fmt(int(seconds) * 1000))
     posters, no_poster, not_tried = publish_posters(all_entries, os.path.join(outdir, "files"))
     if posters or no_poster or not_tried:
         logger.info(f"  {posters} poster frame(s) extracted from cached video (derived thumbnails, "

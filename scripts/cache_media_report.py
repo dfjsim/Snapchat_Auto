@@ -52,7 +52,9 @@ from scripts import partial_report
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
+from scripts.data import media_meta
 from scripts.memories_media_report import (
+    manifest_key,
     find_app_container, index_sccontent, device_path, load_path_manifest, make_time_formatter,
     guess_media, url_token, _UUID_RE,
 )
@@ -100,12 +102,11 @@ sniff_content = sniff.sniff_content
 
 _IMAGE_EXTS = ("jpg", "png", "webp", "gif")
 
-# Everything sniff.guess_media resolves an "....ftyp" container to. They all carry the same magic
-# bytes and only the brand tells them apart, so the mvhd atom (creation/modification time, duration)
-# is worth looking for in any of them — an audio recording's timestamps are as much evidence as a
-# video's. read_mvhd returns {} when the atom is absent, which is the answer for the still-image
-# brands.
-_ISOBMFF_EXTS = ("mp4", "mov", "m4v", "m4a", "3gp", "heic", "avif")
+# What a recovered media file says about ITSELF — EXIF/XMP in an image, the mvhd atom and QuickTime
+# user data in any ISO base media container (a voice note's timestamps are as much evidence as a
+# video's) — is read by scripts/data/media_meta.py and shown through report_ui.embedded_meta_html,
+# the same way the Memories and cache_controller reports show it. For a render at the Caches root
+# those are the only timestamps that exist besides the filesystem's.
 
 
 # --------------------------------------------------------------------------- key material
@@ -304,7 +305,7 @@ def decode_payload(raw, key=None, iv=None):
         "The bytes match no format this tool recognises, and no available key decrypts them."]
 
 
-# --------------------------------------------------------------------------- mvhd
+# --------------------------------------------------------------------------- resource bundles
 
 # A Snapchat resource bundle (the zstd-compressed bodies in the Cronet HTTP cache) is a run of
 # length-prefixed members: a name like "res/theme_lightpurple_background.png" followed by the
@@ -325,83 +326,6 @@ def bundle_members(data, limit=200):
         if len(out) >= limit:
             break
     return out
-
-
-_MVHD_EPOCH = datetime(1904, 1, 1)
-
-
-def read_mvhd(path):
-    """``{created, modified, duration_s, timescale}`` from an MP4/MOV ``moov/mvhd``, or {}.
-
-    These are the only timestamps on a root-level cache render that are not filesystem-derived, so
-    they are worth having even though the file has no database row anywhere.
-    """
-    try:
-        with open(path, "rb") as fh:
-            return _find_mvhd(fh, 0, os.path.getsize(path))
-    except (OSError, struct.error, ValueError):
-        return {}
-
-
-def _find_mvhd(fh, start, end, depth=0):
-    """Walk the atom tree for moov/mvhd. Only containers on the path are descended into."""
-    if depth > 4:
-        return {}
-    pos = start
-    while pos < end - 8:
-        fh.seek(pos)
-        header = fh.read(8)
-        if len(header) < 8:
-            return {}
-        size, kind = struct.unpack(">I4s", header)
-        body = pos + 8
-        if size == 1:                                          # 64-bit extended size
-            size = struct.unpack(">Q", fh.read(8))[0]
-            body += 8
-        elif size == 0:
-            size = end - pos
-        if size < 8:
-            return {}
-        if kind == b"mvhd":
-            fh.seek(body)
-            data = fh.read(min(size - (body - pos), 120))
-            return _parse_mvhd(data)
-        if kind in (b"moov", b"trak", b"mdia"):
-            found = _find_mvhd(fh, body, pos + size, depth + 1)
-            if found:
-                return found
-        pos += size
-    return {}
-
-
-def _parse_mvhd(data):
-    if len(data) < 4:
-        return {}
-    version = data[0]
-    try:
-        if version == 1:
-            created, modified, timescale, duration = struct.unpack(">QQIQ", data[4:36])
-        else:
-            created, modified, timescale, duration = struct.unpack(">IIII", data[4:20])
-    except struct.error:
-        return {}
-    if not timescale:
-        return {}
-
-    def when(seconds):
-        try:
-            return (_MVHD_EPOCH + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
-        except (OverflowError, OSError, ValueError):
-            return ""
-    return {"created": when(created), "modified": when(modified),
-            "duration_s": round(duration / timescale, 2), "timescale": timescale}
-
-
-MVHD_BASIS = (
-    "Read from the MP4/MOV container's own moov/mvhd atom, not from any database or from the "
-    "filesystem — for a render at the Caches root it is the only timestamp that exists. mvhd times "
-    "are specified as UTC, but Apple encoders are not consistently faithful to that, so corroborate "
-    "against the filesystem timestamps before stating a timezone in a report.")
 
 
 # --------------------------------------------------------------------------- producer tag
@@ -855,23 +779,10 @@ _DEVICE_MTIME_BASIS = (
     "or the extraction folder was produced by a build older than this and holds none.")
 
 
-#: Where the extraction wrote each file: `extract_zip` keys the manifest on the path from the container
-#: segment onward, so a lookup has to be built the same way. `rel` here is relative to Library/Caches
-#: instead, which is why it cannot be the key.
-_CONTAINER_RE = re.compile(r"(?:^|/)(Application|AppGroup)/", re.I)
-
-
-def _manifest_key(full):
-    """The path `extract_zip` recorded this file under, or "" if it is not under a container.
-
-    The separators are normalised **before** matching rather than matched as a character class: an
-    escaped backslash inside one is one editing slip away from a class that only accepts a forward
-    slash, which matches nothing on Windows and shows every file as having no recorded time. Which is
-    exactly what it did.
-    """
-    text = (full or "").replace("\\", "/")
-    match = _CONTAINER_RE.search(text)
-    return text[match.start(1):] if match else ""
+#: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to be
+#: built the same way; `rel` here is relative to Library/Caches, which is why it cannot be the key. One
+#: implementation, shared with the Memories report, which dates its cache files from the same manifest.
+_manifest_key = manifest_key
 
 
 def _device_mtime(full, mtimes, ms_fmt):
@@ -1120,6 +1031,8 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
     """
     renamed = renamed or {}
     by_content, stats = {}, {"files": 0, "bytes": 0, "decoded": 0, "failed": 0}
+    # the file's own timestamps, in the run's timezone — the same formatter the claims go through
+    epochfmt = (lambda seconds: ms_fmt(int(seconds) * 1000)) if ms_fmt else (lambda seconds: "")
     for full, rel in walk_caches(app):
         try:
             size = os.path.getsize(full)
@@ -1152,6 +1065,12 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
 
         category, cat_note = classify(rel, kind, ext)
         url = decode_cache_key_url(name)
+        # Read from the RECOVERED bytes — a decrypted payload has no file of its own yet — or from the
+        # file on disk when it was too large to read whole (the header is all the reader needs).
+        embedded = None
+        if kind == "media":
+            embedded = (media_meta.extract(full) if size > MAX_DECODE_BYTES
+                        else media_meta.extract_bytes(content, name))
         copy = {
             "path": full, "rel": rel, "name": name, "bytes": size,
             "raw_md5": md5, "raw_sha256": sha,
@@ -1173,7 +1092,8 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
                 "inner_url": inner_bolt_url(url),
                 "decoded": payload is not None and payload is not raw,
                 "recovered": payload is not None,
-                "mvhd": read_mvhd(full) if ext in _ISOBMFF_EXTS else {},
+                "embedded": embedded,
+                "embedded_times": report_ui.file_time_rows(embedded, epochfmt),
                 "tsaf": tsaf_fields(content) if kind == "tsaf" else [],
             "members": bundle_members(content) if kind == "bundle" else [],
                 "links": [],
@@ -1470,14 +1390,13 @@ def _detail_html(entry, rel_prefix, closure=None):
             "order to reproduce the result independently.") + "</div><ol class='steps'>"
             + "".join(f"<li>{_esc(s)}</li>" for s in entry["steps"]) + "</ol>")
 
-    if entry.get("mvhd"):
-        m = entry["mvhd"]
-        parts.append("<div class='sect'>MP4/MOV mvhd atom" + _info(MVHD_BASIS) + "</div>"
-                     "<div class='grid'>"
-                     f"<div class='k'>creation time</div><div class='v'>{_esc(m.get('created'))}</div>"
-                     f"<div class='k'>modification time</div><div class='v'>{_esc(m.get('modified'))}</div>"
-                     f"<div class='k'>duration</div><div class='v'>{_esc(m.get('duration_s'))} s</div>"
-                     "</div>")
+    if entry["kind"] == "media":
+        parts.append("<div class='sect'>Embedded metadata — inside the recovered file, with its own "
+                     "timestamps" + _info(report_ui.EMBEDDED_BASIS + " " + report_ui.FILE_TIME_BASIS)
+                     + "</div>" + report_ui.embedded_meta_html(entry.get("embedded"),
+                                                               entry.get("embedded_times"),
+                                                               label=entry["name"],
+                                                               href=entry.get("view") or ""))
 
     if entry.get("tsaf"):
         parts.append("<div class='sect'>TSAF fields</div><div class='paths'>"
@@ -1590,6 +1509,8 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
         for link in e["links"]:
             searchable += [link.get("key", ""), link.get("snap_id", ""),
                            (link.get("rec") or {}).get("conversation_id", "")]
+        searchable += report_ui.embedded_search_terms(e.get("embedded"), e.get("embedded_times"),
+                                                      media_meta.STRUCTURAL)
         rows.append([
             anchor, cells, " ".join(s for s in searchable if s).lower(),
             {"1": e["category"], "2": e["rel"], "4": len(e["copies"]),
@@ -1619,7 +1540,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
                 + (_info(CLIENT_KEY_BASIS) if key_info.get("key") else ""))
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat Library/Caches media</title><style>
+<title>Snapchat Library/Caches media</title><style>{report_ui.EMBEDDED_CSS}
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}

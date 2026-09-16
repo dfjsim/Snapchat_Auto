@@ -57,6 +57,7 @@ from scripts.data import sqlite_open
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
 from scripts.data import sniff
+from scripts.data import media_meta
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
 from scripts import app_version
@@ -182,19 +183,40 @@ def make_time_formatter(tz_spec):
             target, label = timezone.utc, "UTC"
 
     def fmt(ts):
-        dt = cocoa_to_dt(ts)
-        if dt is None:
+        return _format_dt(cocoa_to_dt(ts), target)
+
+    return fmt, label
+
+
+def _format_dt(dt, target):
+    """An aware datetime as the report's ``YYYY-MM-DD HH:MM:SS <zone>`` string in ``target``."""
+    if dt is None:
+        return ""
+    local = dt.astimezone() if target is None else dt.astimezone(target)
+    base = local.strftime("%Y-%m-%d %H:%M:%S")
+    if target is timezone.utc:
+        return base + " UTC"
+    off = local.strftime("%z")                              # e.g. -0400
+    off_fmt = f"UTC{off[:3]}:{off[3:]}" if off else ""
+    abbr = local.strftime("%Z")                             # e.g. EDT (or verbose on Windows)
+    if abbr and len(abbr) <= 5 and abbr[0] not in "+-":
+        return f"{base} {abbr} ({off_fmt})" if off_fmt else f"{base} {abbr}"
+    return f"{base} {off_fmt}" if off_fmt else base
+
+
+def make_epoch_formatter(tz_spec):
+    """Like :func:`make_time_formatter`, for **Unix seconds** — the clock the extraction archive's
+    mtimes and a media file's own header are on. Same zone, same string, so a time from either
+    source lines up with the database's in the same table."""
+    cocoa_fmt, label = make_time_formatter(tz_spec)
+
+    def fmt(seconds):
+        if seconds in (None, ""):
             return ""
-        local = dt.astimezone() if target is None else dt.astimezone(target)
-        base = local.strftime("%Y-%m-%d %H:%M:%S")
-        if target is timezone.utc:
-            return base + " UTC"
-        off = local.strftime("%z")                          # e.g. -0400
-        off_fmt = f"UTC{off[:3]}:{off[3:]}" if off else ""
-        abbr = local.strftime("%Z")                         # e.g. EDT (or verbose on Windows)
-        if abbr and len(abbr) <= 5 and abbr[0] not in "+-":
-            return f"{base} {abbr} ({off_fmt})" if off_fmt else f"{base} {abbr}"
-        return f"{base} {off_fmt}" if off_fmt else base
+        try:
+            return cocoa_fmt(float(seconds) - 978307200)
+        except (TypeError, ValueError, OverflowError):
+            return ""
 
     return fmt, label
 
@@ -1401,7 +1423,11 @@ def _save_media(outdir, name, data, published=None):
     out = os.path.join(outdir, name)
     with open(out, "wb") as o:
         o.write(data)
-    stub = {"out": name, "bytes": len(data), "dim": _dims(out)}
+    # What the file says about itself — EXIF / XMP / PNG text, or an MP4's moov header and QuickTime
+    # user data. Read here, once per distinct content, because this is the one place every published
+    # file passes through; never raises (see scripts/data/media_meta.py).
+    stub = {"out": name, "bytes": len(data), "dim": _dims(out),
+            "meta": media_meta.extract(out) if data else None}
     if md5 is not None:
         published[md5] = dict(stub)
     return stub
@@ -1771,6 +1797,43 @@ def load_path_manifest(*roots):
     return {}
 
 
+def load_device_mtimes(*roots):
+    """``{path on disk (from the container segment on): mtime on the device}`` — Unix seconds UTC,
+    written by `extract_zip` out of each archive entry's ``UT`` field. Empty when no manifest is
+    found, or for an extraction folder produced before this was recorded; the report then says the
+    time was *not recorded* rather than falling back to the extracted copy's own mtime, which is
+    when *we* unzipped the file and says nothing about the evidence."""
+    for root in roots:
+        if not root:
+            continue
+        mf = os.path.join(root, "extraction_manifest.json")
+        if os.path.isfile(mf):
+            try:
+                with open(mf, encoding="utf-8") as f:
+                    return json.load(f).get("mtimes", {}) or {}
+            except Exception as error:
+                logger.debug(f"Could not read extraction manifest {mf}: {error}")
+    return {}
+
+
+#: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to
+#: be built the same way from whatever absolute path the report holds.
+_CONTAINER_RE = re.compile(r"(?:^|/)(Application|AppGroup)/", re.I)
+
+
+def manifest_key(full):
+    """The path `extract_zip` recorded a file under, or "" if it is not under a container.
+
+    The separators are normalised **before** matching rather than matched as a character class: an
+    escaped backslash inside one is one editing slip away from a class that only accepts a forward
+    slash, which matches nothing on Windows and shows every file as having no recorded time. Which is
+    exactly what it once did (see the Library/Caches report's history).
+    """
+    text = (full or "").replace("\\", "/")
+    match = _CONTAINER_RE.search(text)
+    return text[match.start(1):] if match else ""
+
+
 def _apply_manifest(display, manifest):
     """Prepend the truncated ZIP prefix to a ``/Application/<UUID>/…`` display path when known."""
     if not manifest:
@@ -1976,6 +2039,24 @@ _MEDIA_STATE_HINT = (
     "last two.")
 
 
+_META_FILTER_HINT = (
+    "Whether any recovered media file of the Memory carries metadata INSIDE the file itself worth a "
+    "look — a timestamp of its own (EXIF DateTime*, an MP4's mvhd creation time, a QuickTime "
+    "creationdate), a GPS fix, or a field naming a device or program (camera make and model, "
+    "software, lens). Pixel size and orientation alone do not count: every encoder writes those, and "
+    "most cached JPEGs carry nothing else. What was found is shown in the row's expanded area and on "
+    "the detail page, and is matched by Search. Snapchat's servers re-encode most media, so «none "
+    "found» says nothing about the capture; a file that does carry camera EXIF usually came from the "
+    "camera roll. A poster frame this tool generated never counts.")
+
+_CREATED_COL_HINT = (
+    "scdb-27.sqlite3 › ZGALLERYSNAP.ZCREATETIMEUTC — the app's own creation time for this snap, "
+    "stored as a Cocoa timestamp (seconds since 2001-01-01 UTC) and shown converted to this report's "
+    "timezone. Expand the row for every other timestamp the Memory carries, each with where it was "
+    "read from: the other database columns, what the media file says about itself, and the cache "
+    "file's modification time on the device.")
+
+
 def _media_state(files, n_part):
     """Which of four states this memory's recovered media is in, for the index filter.
 
@@ -2035,21 +2116,34 @@ def _cross_scope_note(f):
 
 def _render_src_paths(f, src_root, manifest):
     """Render a media file's source paths, grouped by the account SCContent scope they live in so a
-    copy in a different account's scope than the Memory owner is visibly flagged."""
+    copy in a different account's scope than the Memory owner is visibly flagged.
+
+    Each path carries the file's modification time **on the device**, from the extraction archive
+    (see :data:`DEVICE_MTIME_BASIS`), on the line of the path it dates: the two are one fact about
+    one file, and listing the same paths again in a table of their own said nothing more.
+    """
+    mtimes = dict(f.get("src_mtimes") or [])
     scope_by = f.get("scope_by_path") or {}
     cross = set(f.get("cross_scope") or [])
+
+    def lines(paths):
+        shown_paths = [device_path(s, src_root, manifest) for s in paths]
+        pairs = [(shown, mtimes.get(shown, "")) for shown in shown_paths]
+        return "<br>".join(
+            html.escape(line) + "<div class='mt'>modified on the device: "
+            + ("<span class='muted'>not recorded</span>" if stamp == "not recorded"
+               else html.escape(stamp)) + "</div>"
+            for line, stamp in _collapse_paths_with_mtimes(pairs))
+
     if not scope_by:                                       # caching-media / generated: no scope info
-        return "<br>".join(html.escape(s) for s in
-                           _collapse_part_paths(device_path(s, src_root, manifest) for s in f["src"]))
+        return lines(f["src"])
     groups = {}
     for s in f["src"]:
         groups.setdefault(scope_by.get(s), []).append(s)
     blocks = []
     for scope, plist in sorted(groups.items(), key=lambda kv: (kv[0] in cross, str(kv[0]))):
-        listed = "<br>".join(html.escape(s) for s in
-                             _collapse_part_paths(device_path(s, src_root, manifest) for s in plist))
         badge = " <span class='xscope'>⚠ different account scope</span>" if scope in cross else ""
-        blocks.append(listed + badge)
+        blocks.append(lines(plist) + badge)
     return "<br>".join(blocks)
 
 
@@ -2113,22 +2207,140 @@ def _ts_table(members, cols, attr, labels, single):
             f"{''.join(body)}</table>{legend}</div>")
 
 
-def _memory_times(m):
-    """``[(label, displayed value)]`` — every timestamp this Memory has, in one flat list.
+#: Where a Memory's timestamps come from, said once. Every place this report shows a time points here,
+#: and every time carries one of these tags beside it, so a reader never has to guess whether a value
+#: is the app's record, the file's own header or the device's filesystem.
+TIME_SOURCES_HINT = (
+    "Every timestamp in this report says where it was read from, because the same moment can be "
+    "recorded by several different things and they need not agree:\n\n"
+    "• «scdb-27 › ZGALLERYSNAP.<column>» / «ZGALLERYENTRY.<column>» — the app's own database "
+    "(scdb-27.sqlite3). Stored as Cocoa timestamps (seconds since 2001-01-01 UTC) and converted to "
+    "this report's timezone. The column name is the field.\n\n"
+    "• «inside <file>» — written INTO the media file by whatever produced it: EXIF / XMP in an image, "
+    "the mvhd header or QuickTime user data in a video. Converted to the report's timezone when the "
+    "file STATES its zone (EXIF OffsetTime*, an ISO 8601 offset). Where the file states none but the "
+    "format defines the field as UTC (an mvhd time, the GPS stamp) the conversion is shown with "
+    "«UTC assumed» beside it — encoders have been known to write local time there. Where nothing is "
+    "known the value is shown exactly as written: a wall clock on the writing device's clock — "
+    "compare with care.\n\n"
+    "• «extraction archive › <path>» — the cache file's modification time on the DEVICE's "
+    "filesystem, as the extraction archive recorded it (the ZIP entry's UT field). Not the time this "
+    "tool unzipped it. «not recorded» means the archive carried none.\n\n"
+    "gallery.encrypteddb rows (keys, coordinates) carry no time of their own; they are dated only "
+    "by the snap row they belong to.")
 
-    The same values the detail sub-page shows in its two timestamp tables, plus the capture time the
-    index column already carries, gathered so one place can both render them and derive the keys the
-    time filter matches on. Empty columns are dropped: a label with no value tells the examiner
-    nothing and would only make the list longer than the row it sits in.
+
+SNAP_DB_TIME_BASIS = (
+    "Read from scdb-27.sqlite3, table ZGALLERYSNAP — the app's own record of this snap. Each value is "
+    "stored as a Cocoa timestamp (seconds since 2001-01-01 UTC) and is shown converted to this "
+    "report's timezone; the column name under each heading is the field it came from. NULL means the "
+    "column is empty on the device, not that it was not read.")
+
+ENTRY_DB_TIME_BASIS = (
+    "Read from scdb-27.sqlite3, table ZGALLERYENTRY — the entry / album row this snap belongs to, "
+    "which is a different record from the snap itself and dated independently (an album's "
+    "ZCREATETIMEUTC is when the album was made, not when this snap was). Cocoa timestamps, converted "
+    "to this report's timezone; the column name under each heading is the field.")
+
+FILE_TIME_BASIS = report_ui.FILE_TIME_BASIS
+
+DEVICE_MTIME_BASIS = (
+    "The cache file's modification time on the DEVICE's filesystem, read from the extraction "
+    "archive's own record of it (the ZIP entry's UT field, UTC seconds) and shown in this report's "
+    "timezone. It is NOT the timestamp of the copy on this machine: unzipping gives a file a new "
+    "mtime, so the extracted copy's is the moment this tool — or an earlier run — wrote it, and says "
+    "nothing about the evidence. For media rebuilt from several byte-range parts, every part has its "
+    "own. «not recorded» means the archive carried no timestamp for that entry, or the extraction "
+    "folder was produced by a build older than this and holds none.")
+
+
+def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None):
+    """Give every recovered media file the times it carries, formatted for this run.
+
+    Two sources per file, kept apart from the database's and from each other (see
+    :data:`TIME_SOURCES_HINT`): what the file says about itself (``file_times``, out of the
+    ``meta`` `_save_media` read) and what the device's filesystem said about the cache file(s) it was
+    rebuilt from (``src_mtimes``, out of the extraction manifest). Both are put in the run's timezone
+    by the same formatter the database times go through, so they line up in one table — except a
+    file time whose zone the file did not state, which is shown exactly as written and flagged
+    ``naive``: converting a wall clock of unknown zone would be a guess presented as a fact.
+    """
+    epochfmt, _label = make_epoch_formatter(tz)
+    for m in memories.values():
+        for f in m.get("media_files") or []:
+            f["file_times"] = report_ui.file_time_rows(f.get("meta"), epochfmt)
+            stamps = []
+            for path in f.get("src") or []:
+                stamp = mtimes.get(manifest_key(path)) if mtimes else None
+                stamps.append((device_path(path, src_root, manifest),
+                               epochfmt(stamp) if stamp is not None else ""))
+            f["src_mtimes"] = stamps
+
+
+def _memory_times(m):
+    """``[(label, displayed value, source)]`` — every timestamp this Memory has, in one flat list.
+
+    The database values the detail sub-page shows in its two timestamp tables, then what each
+    recovered media file says about itself, then what the device's filesystem said about the cache
+    files — gathered so one place can both render them and derive the keys the time filter matches
+    on. Each carries its **source** (see :data:`TIME_SOURCES_HINT`), because the same list mixes the
+    app's record, the file's own header and the filesystem, and a value without its origin is a
+    number the reader cannot weigh. Empty columns are dropped: a label with no value tells the
+    examiner nothing and would only make the list longer than the row it sits in.
     """
     out = []
-    if m.get("create_utc"):
-        out.append(("Created (index column)", m["create_utc"]))
-    for attr, labels in (("times", SNAP_TIME_LABELS), ("entry_times", ENTRY_TIME_LABELS)):
-        for col, value in (m.get(attr) or {}).items():
-            if value:
-                out.append((labels.get(col, col), value))
+    times = m.get("times") or {}
+    for col, value in times.items():
+        if value:
+            out.append((SNAP_TIME_LABELS.get(col, col), value, f"scdb-27 › ZGALLERYSNAP.{col}"))
+    if m.get("create_utc") and not times.get("ZCREATETIMEUTC"):
+        out.append(("Created", m["create_utc"], "scdb-27 › ZGALLERYSNAP.ZCREATETIMEUTC"))
+    for col, value in (m.get("entry_times") or {}).items():
+        if value:
+            out.append((ENTRY_TIME_LABELS.get(col, col), value, f"scdb-27 › ZGALLERYENTRY.{col}"))
+    seen = set()
+    for f in m.get("media_files") or []:
+        if f.get("generated"):                             # a poster frame is ours, not evidence
+            continue
+        for t in f.get("file_times") or []:
+            key = (t["label"], t["shown"], f.get("out"))
+            if key in seen:
+                continue
+            seen.add(key)
+            source = f"inside {f.get('out', '')}"
+            if t.get("caveat"):
+                source += " — " + t["caveat"]
+            out.append((t["label"], t["shown"], source))
+        stamps = [(path, shown) for path, shown in (f.get("src_mtimes") or []) if shown]
+        if len(stamps) == 1:
+            path, shown = stamps[0]
+            out.append(("Cache file modified on the device", shown, f"extraction archive › {path}"))
+        elif stamps:
+            # a file rebuilt from byte-range parts has one mtime per part: bound them rather than list
+            # them, since the parts are one media file and the row has to stay a row
+            earliest = min(stamps, key=lambda ps: ps[1])
+            latest = max(stamps, key=lambda ps: ps[1])
+            out.append((f"Cache parts modified on the device — earliest of {len(stamps)}",
+                        earliest[1], f"extraction archive › {earliest[0]}"))
+            if latest[1] != earliest[1]:
+                out.append((f"Cache parts modified on the device — latest of {len(stamps)}",
+                            latest[1], f"extraction archive › {latest[0]}"))
     return out
+
+
+def _embedded_fields(f):
+    """The embedded-metadata fields of one file worth putting in the search string — the ones that
+    name a device, a program or a place, not the pixel size every encoder writes."""
+    return report_ui.embedded_search_terms(f.get("meta"), f.get("file_times"),
+                                           structural=media_meta.STRUCTURAL)
+
+
+def _has_embedded(files):
+    """Whether any recovered (not generated) file carries embedded metadata worth flagging — a
+    timestamp, a GPS fix, or a field beyond the pixel size and orientation every encoder writes.
+    Read on a real device, three quarters of the cached JPEGs carry exactly that structural set and
+    nothing else; a chip on all of them would say nothing. `media_meta` decides (``notable``)."""
+    return any((f.get("meta") or {}).get("notable") for f in files if not f.get("generated"))
 
 
 FOLD_BASIS = (
@@ -2166,9 +2378,56 @@ GROUP_BOX_HINT = (
 
 TIME_FILTER_HINT = (
     "Every timestamp a Memory carries is searched, not only the Created column: the ZGALLERYSNAP "
-    "capture and placeholder times and every ZGALLERYENTRY album time, which are otherwise only on "
-    "the detail page. Expand a row to see them all, and which one matched. A Memory inside a folded "
-    "group is found by its own times too — the group opens with the member that matched pointed out.")
+    "capture and placeholder times, every ZGALLERYENTRY album time, the timestamps written inside "
+    "the media file itself (EXIF, mvhd) and the cache file's modification time on the device — all "
+    "otherwise only in the row's expanded area. Expand a row to see them all, each with where it was "
+    "read from, and which one matched. A file's own timestamp with no zone is compared as written. A "
+    "Memory inside a folded group is found by its own times too — the group opens with the member "
+    "that matched pointed out.")
+
+
+MORE_IDS_HINT = (
+    "Everything the search box matches for this Memory that the row has no column for: its CDN URLs "
+    "(each named by the scdb-27 column it came from), the AES-256 key and IV its media is encrypted "
+    "with — in hex, exactly as another tool would print them — and the fields found inside the media "
+    "files (camera make and model, software, GPS). Typing any part of one of these into Search finds "
+    "this row; this block is where to confirm what matched.")
+
+
+def _index_more(m):
+    """The collapsed block under a row's timestamps: URLs, key / IV and embedded fields.
+
+    Searchable values that the row has no column for. Collapsed because six URLs are taller than the
+    row; the virtual table itself keeps a ``details`` open across its redraws and re-measures the row
+    when one is toggled (see the ``toggle`` listener in ``report_ui.VTABLE_JS``).
+    """
+    pairs = []
+    for col, url in (m.get("urls") or {}).items():
+        pairs.append((f"{col}", url, "scdb-27 › ZGALLERYSNAP"))
+    if m.get("key") and m.get("iv"):
+        pairs.append(("AES-256 key", m["key"].hex(), "gallery.encrypteddb snap_key_iv / "
+                                                    "ZGALLERYSNAP.ZENCRYPTION"))
+        pairs.append(("IV", m["iv"].hex(), ""))
+    elif m.get("key_wrapped"):
+        pairs.append(("AES-256 key", "wrapped — My Eyes Only, no persistedkey for this account",
+                      ""))
+    for f in m.get("media_files") or []:
+        if f.get("generated"):
+            continue
+        meta = f.get("meta") or {}
+        for field, value in meta.get("key") or []:
+            pairs.append((field, value, f"inside {f.get('out', '')}"))
+        if meta.get("gps"):
+            g = meta["gps"]
+            pairs.append(("GPS in the file", f"{g.get('lat', 0):.5f}, {g.get('lon', 0):.5f}",
+                          f"inside {f.get('out', '')}"))
+    if not pairs:
+        return ""
+    grid = "".join(f"<div class='k'>{html.escape(k)}</div><div class='v'>{html.escape(str(v))}</div>"
+                   f"<div class='s'>{html.escape(src)}</div>" for k, v, src in pairs)
+    return (f"<details class='moreids'><summary>CDN URLs, AES key / IV, "
+            f"embedded metadata — also matched by Search{report_ui.info_icon(MORE_IDS_HINT)}"
+            f"</summary><div class='grid tsgrid'>{grid}</div></details>")
 
 
 def _index_detail(members, key, this_sid, group=(), lead_sid=""):
@@ -2187,11 +2446,23 @@ def _index_detail(members, key, this_sid, group=(), lead_sid=""):
     for m in members:
         sid = m["snap_id"]
         times = _memory_times(m)
+        # label / value / where it was read from — the third column is what lets the same list hold
+        # the app's record, the file's own header and the filesystem without the reader guessing
         grid = "".join(f"<div class='k'>{html.escape(label)}</div>"
-                       f"<div class='v'>{html.escape(value)}</div>" for label, value in times)
+                       f"<div class='v'>{html.escape(value)}</div>"
+                       f"<div class='s' title='{html.escape(source)}'>{html.escape(source)}</div>"
+                       for label, value, source in times)
         if not grid:
             grid = ("<div class='k'>Timestamps</div><div class='v muted'>none — no ZGALLERYSNAP row "
-                    "survives for this Memory, so it has no time of its own to filter on</div>")
+                    "survives for this Memory, its media carries no dated header, and the archive "
+                    "recorded no filesystem time, so it has no time of its own to filter on</div>"
+                    "<div class='s'></div>")
+        elif not (m.get("times") or {}).get("ZCREATETIMEUTC") and not m.get("create_utc"):
+            grid = ("<div class='k muted'>No database time</div><div class='v muted'>no ZGALLERYSNAP "
+                    "row survives for this Memory — the times below are the media file's own and the "
+                    "device filesystem's</div><div class='s'></div>") + grid
+        grid = (f"<div class='tshd'>Timestamps{report_ui.info_icon(TIME_SOURCES_HINT)}</div>"
+                f"<div class='grid tsgrid'>{grid}</div>{_index_more(m)}")
         # The same box, id and keys as this Memory's own row and its detail sub-page: one selection,
         # wherever it is ticked. `data-keys` is inline because these are hand-written boxes.
         mem_keys = {"snap": sid}
@@ -2211,7 +2482,7 @@ def _index_detail(members, key, this_sid, group=(), lead_sid=""):
             f"<a class='openbtn' target='scauto_memory_page' "
             f"href='pages/{key}.html#mem-{html.escape(sid)}' "
             f"title='open this Memory on the group&#39;s detail page'>Details ▸</a></div>"
-            f"<div class='grid tsgrid'>{grid}</div></div>")
+            f"{grid}</div>")
     head = ""
     if len(members) > 1:
         head = (f"<div class='foldhd'>🔗 <b>{len(members)}</b> Memories are grouped here"
@@ -2537,6 +2808,8 @@ _BASE_CSS = """
  .mem + .mem{border-top:1px dashed #cfcfe0;margin-top:8px}
  .mem .snapid{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;font-weight:700;color:#1b1b1f;overflow-wrap:anywhere}
  .mem .snaplab{color:#666;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;margin-right:8px}
+ /* the device mtime under each source path */
+ table.files td.path .mt{color:#8a8aa0;font-size:10px;margin:1px 0 4px;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
  .tswrap{overflow-x:auto;margin-top:4px}
  table.ts{border-collapse:collapse;font-size:11.5px;width:auto;min-width:100%}
  table.ts th{background:#efeff7;color:#2d2d71;text-align:left;padding:3px 8px;font-weight:600;white-space:nowrap;vertical-align:bottom}
@@ -2663,6 +2936,56 @@ PACK_IN_CACHEMEDIA_BASIS = (
 
 
 # --------------------------------------------------------------------------- detail sub-page
+
+EMBEDDED_BASIS = report_ui.EMBEDDED_BASIS
+
+
+def _file_label(f):
+    """How the metadata sections name one recovered file: its role, type and published name."""
+    return f"{f.get('role', '')} · {f.get('ext', '')} · {f.get('out', '')}"
+
+
+def _embedded_meta_html(files, media_prefix="../"):
+    """The «Embedded metadata» section: per recovered file, what it carries inside itself — through
+    the renderer every report shares (`report_ui.embedded_meta_html`), so a file reads the same way
+    here as in the two cache reports. Shown for every file, including those with nothing, because
+    «no EXIF» is itself a finding an examiner wants stated rather than inferred from an absent
+    block; a poster frame this tool generated is skipped, being ours."""
+    blocks = [report_ui.embedded_meta_html(f.get("meta"), f.get("file_times"), label=_file_label(f),
+                                           href=f"{media_prefix}{f.get('path', '')}")
+              for f in sorted((f for f in files if not f.get("generated")),
+                              key=lambda f: (f.get("source", ""), -f.get("bytes", 0)))]
+    if not blocks:
+        return "<div class='muted'>no recovered media to read</div>"
+    return "".join(blocks)
+
+
+def _collapse_paths_with_mtimes(pairs):
+    """Like `_collapse_part_paths`, for ``[(display path, device mtime or "")]``: one line per whole
+    file or per set of byte-range parts, each with its device mtime — a single value, or the
+    earliest and latest across the parts — or «not recorded» where the archive carried none."""
+    order, groups = [], {}
+    for path, when in pairs:
+        d, _, name = path.replace("\\", "/").rpartition("/")
+        mo = _SC_SPLIT_RE.match(name)
+        key = (d, mo.group(1), True) if mo else (d, name, False)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(when)
+    out = []
+    for d, name, split in order:
+        whens = [w for w in groups[(d, name, split)] if w]
+        line = (f"{d}/{name}_*" if d else f"{name}_*") if split else (f"{d}/{name}" if d else name)
+        if not whens:
+            stamp = "not recorded"
+        elif len(set(whens)) == 1:
+            stamp = whens[0] + (f" (all {len(groups[(d, name, split)])} parts)" if split else "")
+        else:
+            stamp = f"{min(whens)} … {max(whens)} ({len(whens)} parts)"
+        out.append((line, stamp))
+    return out
+
 
 def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                          src_root, manifest, userids, media_prefix="../", cc_prefix="../../",
@@ -2878,7 +3201,8 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     role_header = "Role" + ("" if single else _info(SHARED_MEDIA_BASIS))
     files_table = (f"<table class='files'><tr><th>{role_header}</th><th>Source cache</th><th>Type</th>"
                    "<th>Dimensions</th><th>Size</th><th>File</th><th>Hashes (MD5 / SHA-256)</th>"
-                   "<th>Source path(s) in extraction</th></tr>"
+                   "<th>Source path(s) in extraction · modified on the device"
+                   + _info(DEVICE_MTIME_BASIS) + "</th></tr>"
                    + "".join(frows) + "</table>") if frows else "<div class='muted'>no cached media recovered</div>"
 
     return f"""
@@ -2889,10 +3213,11 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           <div class="kind">{kind}{meo}</div>
           {partial_banner}
           {idband}
+          <div class="sect">Embedded metadata — inside the media files, with their own timestamps{_info(EMBEDDED_BASIS + " " + FILE_TIME_BASIS)}</div>{_embedded_meta_html(files, media_prefix)}
           {shared_html}
           {''.join(mem_blocks)}
-          <div class="sect">Timestamps — Snap (ZGALLERYSNAP)</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
-          <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY)</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
+          <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
+          <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
           <div class="sect">Media files</div>{files_table}
         </div>
       </div>"""
@@ -2927,7 +3252,7 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
-           f'<style>{_BASE_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
+           f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
            f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
@@ -3217,6 +3542,11 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             if n_part:                                     # only part of the media is on the device
                 kind += (f"<div class='part' title='{n_part} recovered media file(s) are "
                          f"incomplete — the cache holds only part of the original'>PART</div>")
+            has_meta = _has_embedded(own)
+            if has_meta:                                   # the file itself carries EXIF / a header
+                kind += ("<div class='exif' title='a recovered media file carries embedded metadata "
+                         "worth a look — its own timestamp, a GPS fix or a device / software name "
+                         "(EXIF / XMP / container header); expand the row or open Details'>EXIF</div>")
             # Deleted since scdb-27's last checkpoint: THIS Memory's row survives only in the
             # database file without its -wal, so the app itself no longer lists it. The flag is
             # per-row, not per-group — one deleted snap must not badge its whole group.
@@ -3259,6 +3589,14 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # alone only match the last path segment.
             searchable = ([zsnap, str(zentry), str(zmedia), str(uid), md5, sha, m["create_utc"]]
                           + list(tokens) + list(dict.fromkeys(m["urls"].values())))
+            # The AES key and IV in hex, as another tool prints them, so a key seen elsewhere finds
+            # its Memory here; and what the media files say about themselves (camera, software, GPS,
+            # their own timestamps), which no column of the row shows.
+            if m.get("key") and m.get("iv"):
+                searchable += [m["key"].hex(), m["iv"].hex()]
+            for f in own:
+                if not f.get("generated"):
+                    searchable += _embedded_fields(f)
             if is_meo:
                 searchable.append("meo my eyes only")
             if n_part:
@@ -3284,12 +3622,13 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  # the same function the geolocation cell uses, so the filter and the cell cannot
                  # disagree about what this Memory has
                  "geo": _geo_state(m),
+                 "meta": "y" if has_meta else "n",
                  "wal": ("carved" if carved else
                          "gone" if gone else ("changed" if changed else "")),
                  # Every timestamp this Memory has, as the wall clock the report displays (see
                  # report_ui.ts_key) — including the columns only the detail shows, which is the
                  # point: a capture time is findable without knowing which column holds it.
-                 "ts": report_ui.ts_keys(*(value for _label, value in _memory_times(m))),
+                 "ts": report_ui.ts_keys(*(value for _label, value, _src in _memory_times(m))),
                  # The row this one is folded behind — on the lead too, pointing at itself, so one
                  # field answers "which group is this row in". Omitted for a Memory that is a group
                  # of one: there is nothing to fold, and every byte here is paid per row.
@@ -3304,7 +3643,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     # list and the fold's lead id, which are not states and have nothing to count.
     counts = {}
     for row in rows:
-        for key in ("img", "meo", "part", "geo"):
+        for key in ("img", "meo", "part", "geo", "meta"):
             value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
     part_opts = _media_filter_options(counts.get("part", {}))
@@ -3316,6 +3655,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                           ("ondevice", "on the device, none recovered"),
                                           ("no", "no location")),
                                          counts.get("geo", {}))
+    meta_opts = report_ui.counted_options((("y", "with embedded metadata"),
+                                           ("n", "none worth a look")),
+                                          counts.get("meta", {}))
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -3355,6 +3697,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walchg{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2 .exif{background:#e2f2e6;color:#1f5e2e;border:1px solid #a9d3b4;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5,.vcells>.vc.c6{
@@ -3384,9 +3728,16 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .thisrow{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0;border-radius:9px;
    font-size:9.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;text-transform:uppercase}
  .memfold .selrow{font-size:11px;color:#444;display:inline-flex;align-items:center;gap:4px}
- .tsgrid{display:grid;grid-template-columns:max-content 1fr;gap:1px 12px;margin-top:5px;
-   font-size:11.5px;max-width:620px}
- .tsgrid .k{color:#666} .tsgrid .v{color:#1b1b1f;font-family:ui-monospace,Consolas,monospace}
+ .tsgrid{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);gap:1px 12px;
+   margin-top:5px;font-size:11.5px;max-width:980px}
+ .tsgrid .k{color:#666} .tsgrid .v{color:#1b1b1f;font-family:ui-monospace,Consolas,monospace;
+   overflow-wrap:anywhere}
+ /* where the value was read from — the database column, the file's own header, the archive */
+ .tsgrid .s{color:#8a8aa0;font-size:10.5px;font-family:ui-monospace,Consolas,monospace;
+   overflow-wrap:anywhere;align-self:center}
+ .tshd{margin-top:6px;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;
+   color:#666}
+ .moreids{margin-top:6px;font-size:11.5px} .moreids summary{cursor:pointer;color:#2d2d71;font-weight:600}
 """
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
@@ -3406,7 +3757,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'{partial_banner_html}{banner}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
-           f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, user…" oninput="flt()">'
+           f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, AES key / IV, camera, user…" oninput="flt()">'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
            f'<label title="Whether the index row can show a still for this Memory. A video with no '
            f'cached still gets one only if a poster frame could be extracted from it, so «no '
@@ -3422,6 +3773,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<label>Geolocation{report_ui.info_icon(_GEO_FILTER_HINT)} '
            f'<select id="geo" onchange="flt()"><option value="">any</option>'
            f'{geo_opts}</select></label>'
+           f'<label>Embedded metadata{report_ui.info_icon(_META_FILTER_HINT)} '
+           f'<select id="meta" onchange="flt()"><option value="">any</option>'
+           f'{meta_opts}</select></label>'
            f'<label title="Memories recovered by reading scdb-27 without its write-ahead log — '
            f'rows the app itself no longer lists, or that it rewrote after the last checkpoint">'
            f'-wal <select id="wal" onchange="flt()"><option value="">any</option>'
@@ -3449,7 +3803,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="vc" onclick="SCV.setSort(4)">IDs (ZMEDIAID / ZSNAPID / ZENTRYID) <span class="ar">↕</span></div>'
            f'<div class="vc nosort">Cache tokens</div>'
            f'<div class="vc nosort">Media MD5 / SHA-256</div>'
-           f'<div class="vc" onclick="SCV.setSort(7)">Created <span class="ar">↕</span></div>'
+           f'<div class="vc" onclick="SCV.setSort(7)">Created{report_ui.info_icon(_CREATED_COL_HINT)} '
+           f'<span class="ar">↕</span></div>'
            f'<div class="vc nosort">Geolocation</div><div class="vc nosort">Detail</div></div></div>'
            f'<div class="vwrap" id="vwrap"><div class="vpad" id="vpad"></div>'
            f'<div class="vwin" id="vwin"></div></div>'
@@ -3478,9 +3833,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
-           'ge=document.getElementById("geo").value;'
+           'ge=document.getElementById("geo").value,me=document.getElementById("meta").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&scTimeHit(scTimeWin("t"),m.ts)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!me||m.meta===me)'
+           '&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
            'selectedOnly:scSelOnly,'
            'selCount:scSelCount,'
@@ -3494,6 +3850,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
            'document.getElementById("wal").value="";document.getElementById("geo").value="";'
+           'document.getElementById("meta").value="";'
            'scTimeReset("t");'
            # The fold hides rows, so "show me everything again" has to include unfolding — and it is
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
@@ -3630,6 +3987,10 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
     for m in all_memories.values():
         for f in m["media_files"]:
             f["path"] = "media/" + f["out"]
+    # What each file says about itself and what the device's filesystem said about its cache files,
+    # in the run's timezone — the two timestamp sources this report shows beside the database's.
+    annotate_file_times(all_memories, tz, load_device_mtimes(src_root, app_or_root, app),
+                        src_root=src_root, manifest=manifest)
 
     # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
     # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds
