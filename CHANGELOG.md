@@ -6,7 +6,24 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
-## [1.6.1-beta.1] — unreleased
+## [1.6.2-beta.1] — 2026-09-16
+
+### Added
+- **The device filesystem's whole record of every cache file, from the extraction archive**
+  (`scripts/data/device_fs.py`; `msgpack` becomes a dependency). A Cellebrite UFED archive carries
+  `metadata<N>/metadata.msgpack`, a stat record for every path on the volume — created (birth),
+  modified, accessed and inode-changed times at **nanosecond** precision, owner, mode, inode, data-
+  protection class and xattrs; a GrayKey archive writes four timestamps into each entry's `UT` extra
+  field, the non-standard fourth being the birth time. `extract_zip` reads the richest record the
+  archive has (streaming the UFED table, keeping only the extracted paths) into
+  `extraction_manifest.json` under `fs`, keeps `mtimes` for older readers, and gives the extracted
+  copies their sub-second mtime. Every report shows the record under the source path it belongs
+  to, through one renderer: identical instants merged onto one line, a split file's parts bounded,
+  the source and precision named, with the caveat that *accessed* and *inode changed* can be the
+  acquisition's own. The Memories index lists each recorded timestamp with its source and the time
+  filter matches on all of them.
+
+## [1.6.1-beta.1] — 2026-09-16
 
 ### Added
 - **Every timestamp in the Memories report says where it was read from.** A Memory's times come

@@ -1761,6 +1761,44 @@ def embedded_search_terms(meta, times, structural=()):
     return terms
 
 
+# --------------------------------------------------------------------------- the device's own record
+#
+# What the device's filesystem recorded about a cache file — created / modified / accessed / inode
+# changed, owner, mode, inode, protection class — read from the extraction archive by
+# scripts/data/device_fs.py and shown the same way under every source path in every report.
+
+DEVICE_FS_CSS = """
+ .devfs{color:#5a5a6e;font-size:10.5px;margin:1px 0 4px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+   line-height:1.5}
+ .devfs b{color:#3a3a5a;font-weight:600} .devfs .muted{color:#999}
+ .devfs .ts{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#1b1b1f}
+ .devfs .src{color:#8a8aa0;margin-left:4px}
+"""
+
+
+def device_fs_html(records, epochfmt, *, missing="device filesystem record: not recorded"):
+    """The device's record of one file (or of the parts of one file) as two compact lines: its
+    timestamps — identical instants merged, several parts bounded — then its attributes. Each time
+    carries its caveat as a tooltip, and the block names which store of the archive it was read from.
+    ``records`` is ``[record or None]``; a file the archive recorded nothing for says so rather than
+    showing a blank, which would read as «nothing happened»."""
+    from scripts.data import device_fs                     # local: report_ui is imported by data/
+    lines, attrs = device_fs.summarize(records, epochfmt)
+    if not lines and not attrs:
+        return f"<div class='devfs'><span class='muted'>{html.escape(missing)}</span></div>"
+    source = device_fs.source_label(next((r for r in records if r), None))
+    parts = []
+    for labels, shown, note, _kinds in lines:
+        parts.append(f"<span title='{html.escape(note)}'><b>{html.escape(labels)}</b> "
+                     f"<span class='ts'>{html.escape(shown)}</span></span>")
+    out = ("<div class='devfs'>on the device: " + " · ".join(parts)
+           + f"<span class='src'>— {html.escape(source)}</span></div>")
+    if attrs:
+        out += ("<div class='devfs'>" + " · ".join(
+            f"<b>{html.escape(label)}</b> {html.escape(value)}" for label, value in attrs) + "</div>")
+    return out
+
+
 def write_rows(data_dir, rows):
     """Write ``<data_dir>/index.js`` — the compact row payload the virtual table renders from.
 

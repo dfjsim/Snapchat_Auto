@@ -234,16 +234,18 @@ value with its source** rather than folding them into one column (`_memory_times
 |---|---|---|
 | `scdb-27 › ZGALLERYSNAP.<col>` / `ZGALLERYENTRY.<col>` | the app's record — every `*TIME*`/`*DATE*` column of the snap row and of the entry/album row it belongs to | Cocoa seconds (since 2001-01-01 UTC), converted to the run's timezone |
 | `inside <file>` | written **into** the recovered media by whatever produced it: EXIF `DateTime*`, XMP `CreateDate`, PNG `Creation Time`, an MP4's `mvhd` creation/modification time, a QuickTime `creationdate` (`©day` / `com.apple.quicktime.creationdate`), the EXIF GPS stamp | converted to the run's timezone when the file **states** its zone (EXIF `OffsetTime*`, an ISO 8601 offset); marked *UTC assumed* where only the format defines the field as UTC (`mvhd`, the GPS stamp); otherwise shown *as written* and tagged *no timezone in the file* — a wall clock on the writing device's clock, never guessed into an instant |
-| `extraction archive › <path>` | the cache file's mtime **on the device**, from the archive entry's `UT` field via `extraction_manifest.json` (the same record the Library/Caches report reads — see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-modified-column)); never the extracted copy's own mtime, which is when *we* unzipped it | UTC seconds, converted to the run's timezone; *not recorded* when the archive carried none |
+| `extraction archive › <path>` | what the **device's filesystem** recorded about the cache file — created (birth), modified, accessed, inode changed — from a UFED archive's `metadata.msgpack` or the ZIP entry's `UT` field via `extraction_manifest.json` (see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)); never the extracted copy's own times, which are when *we* unzipped it | UTC, converted to the run's timezone at the source's precision (nanoseconds from UFED, seconds from `UT`); identical instants on one line, a split file's parts bounded; *accessed* and *inode changed* can be the acquisition's; *not recorded* when the archive carried none |
 
 The index's **Created** column header carries a `?` naming its field (`ZGALLERYSNAP.ZCREATETIMEUTC`).
 On the detail sub-page each source is shown **once, where it belongs**: the two database tables say
 which store and encoding they came from; a file's own timestamps sit under that file's *Embedded
 metadata* block as a small table (field, the value *as written*, the value in the report's timezone —
-or *not converted* / *UTC assumed* — and the reason), not repeated anywhere else; and the cache file's
-mtime on the device sits on the line of the path it dates, in the *Media files* table's source-path
-cell (a file rebuilt from byte-range parts has an mtime per part, bounded as earliest … latest). In the
-index row the parts are bounded the same way, so the row stays a row.
+or *not converted* / *UTC assumed* — and the reason), not repeated anywhere else; and the device's
+record of the cache file — its four timestamps, protection class, inode, owner — sits on the line of the
+path it belongs to, in the *Media files* table's source-path cell (a file rebuilt from byte-range parts
+has a record per part, each timestamp bounded as earliest … latest). In the index row every recorded
+timestamp is a line — *created*, *modified / accessed* when they coincide, *inode changed* — bounded
+the same way, so the row stays a row.
 
 **Zones are never assumed silently.** A file time is converted to the run's timezone only when the
 file *states* its zone (EXIF `OffsetTime*`, an ISO 8601 offset). Where the file states none but the

@@ -70,6 +70,36 @@ Three details that decide the implementation:
 * **The lookup key is the path from the `Application` / `AppGroup` segment on**, which is what the
   manifest is keyed by; the walker's own `rel` is relative to `Library/Caches` and cannot be used.
 
+### The device's whole record of the file
+
+The mtime is one field of a stat record the archive carries in full, and the two acquisition tools
+carry it differently (`scripts/data/device_fs.py` reads both into one shape):
+
+| | GrayKey ZIP | Cellebrite UFED (CLBX) | any other ZIP |
+|---|---|---|---|
+| where | each entry's `UT` extra field, plus Info-ZIP `ux` | `metadata<N>/metadata.msgpack` — one map of **every path on the volume** to its stat record, beside `filesystem<N>/` (`filesystem.msgpack` gives the mount point) | the entry's `UT` field |
+| mtime / atime / ctime | seconds | **nanoseconds** | mtime (seconds) |
+| birth time | a **fourth** `UT` value — not in the specification, read as the birth time because it is at or before mtime in practically every entry | `btime`, nanoseconds | — |
+| inode, links, mode, uid/gid | uid/gid | all | — |
+| data-protection class, xattrs | — | `prot`, `xattr` | — |
+
+`extract_zip` records the record of every extracted file under `fs` in `extraction_manifest.json`
+(times as integer nanoseconds UTC, with `source` and `precision`), keeping `mtimes` beside it for
+readers of older manifests. The UFED table is **streamed** pair by pair (`msgpack.Unpacker.read_map_header`)
+and only the extracted paths are kept: it covers half a million entries on a phone, and loading it whole
+would cost hundreds of megabytes for a few thousand of interest. The extracted copies get the
+sub-second mtime too (`os.utime(ns=…)`).
+
+Every report shows the record under the source path it belongs to, through `report_ui.device_fs_html`:
+*created / modified / accessed / inode changed* with identical instants merged onto one line and the
+parts of a split file bounded (earliest … latest), then the protection class, inode, mode, owner and
+xattrs, and which store the record was read from. Two things the hints say and the reader has to keep
+in mind: **accessed** and **inode changed** can be set by the acquisition itself — on the GrayKey device
+in the corpus both commonly sit at the acquisition time — so they date the last read or metadata
+change, not the user's activity; and a nanosecond value is shown with its fraction while a whole-second
+one is not, so precision is never dressed up. The GrayKey archive also carries a tool-computed
+SHA-256 per entry (`S2`) and two undocumented fields (`NI`, `KG`) — recorded in TODO.md, not yet read.
+
 ## Inventory by naming scheme
 
 What matters for tooling is not the folder but **how the filename is formed**, because

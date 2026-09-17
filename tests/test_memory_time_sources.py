@@ -221,8 +221,8 @@ def test_the_detail_page_sets_the_three_kinds_of_time_apart(tmp_path):
     assert page.count("<td>EXIF DateTimeOriginal</td>") == 1
     assert "2024-05-01 12:00:00 +02:00" in page             # as written
     assert "not converted — no timezone in the file" in page
-    # the cache file's device mtime sits on the line of the path it dates, in the Media files table
-    assert "modified on the device: 2024-05-01 10:01:40 UTC" in page
+    # the cache file's device record sits on the line of the path it dates, in the Media files table
+    assert "<b>modified</b> <span class='ts'>2024-05-01 10:01:40 UTC</span>" in page
     assert "Timestamps — cache files on the device" not in page
     # the database sections say which store and which encoding they were read from
     assert "table ZGALLERYSNAP" in page and "table ZGALLERYENTRY" in page

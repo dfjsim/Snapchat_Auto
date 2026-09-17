@@ -59,8 +59,10 @@ metadata** block through the renderer the Memories and cache_controller reports 
 the `mvhd` creation/modification time, duration and QuickTime user data. This replaces the report's
 own `mvhd` grid, and keeps its caveat: an `mvhd` time is UTC by the format's definition, not by
 anything the file records, and Apple encoders have not been faithful to that, so the converted value
-is marked *UTC assumed* and should be corroborated against the *modified on the device* column before a
-zone is stated in a report. A file's own timestamps with a stated zone (EXIF `OffsetTime*`, a
+is marked *UTC assumed* and should be corroborated against the device's own record of the file in the
+*Copies on disk* table — its created / modified / accessed / inode-changed times, protection class and
+owner, see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)
+— before a zone is stated in a report. A file's own timestamps with a stated zone (EXIF `OffsetTime*`, a
 QuickTime `creationdate`) convert cleanly; one with none is shown as written.
 
 ### The story-cache key

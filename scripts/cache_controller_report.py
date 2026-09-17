@@ -45,8 +45,9 @@ from scripts import partial_report
 from scripts.data import sqlite_open
 from scripts.data import sniff
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
+from scripts.data import device_fs
 from scripts.memories_media_report import (
-    load_device_mtimes, manifest_key, _collapse_paths_with_mtimes,
+    load_device_mtimes, load_fs_records, manifest_key, _collapse_paths,
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
@@ -1355,15 +1356,7 @@ def _file_cell(entry, rel_prefix, closure=None):
 _META_DIFF_COLS = ("FILE_SIZE_BYTES", "TOTAL_DISK_USED_BYTES", "KNOWN_CONTENT_LENGTH_BYTES",
                    "TYPE", "STORAGE_TYPE", "SHARD_INDEX", "LAST_READ_TIMESTAMP_MILLIS")
 
-DEVICE_MTIME_BASIS = (
-    "Beside each path: the cache file's modification time on the DEVICE's filesystem, read from the "
-    "extraction archive's own record of it (the ZIP entry's UT field, UTC seconds) and shown in this "
-    "report's timezone. It is NOT the timestamp of the copy on this machine, which is when this tool "
-    "unzipped it. It is also not a claim time: CREATION_TIMESTAMP_MILLIS above is when the app "
-    "registered the claim in cache_controller.db, this is when the bytes were last written. For a "
-    "file split into byte-range parts every part has its own; the earliest and latest are shown. «not "
-    "recorded» means the archive carried no timestamp for that entry, or the extraction folder was "
-    "produced by a build older than this and holds none.")
+DEVICE_MTIME_BASIS = device_fs.DEVICE_FS_BASIS
 
 ENCRYPTED_BASIS = (
     "The bytes on disk match no known file signature, their Shannon entropy is at least 7.5 bits "
@@ -1496,16 +1489,17 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
         for p in e["on_disk"]["paths"]:
             groups.setdefault(sbp.get(p) or "(unknown scope)", []).append(p)
         blocks = []
-        mtimes = e.get("ondisk_mtimes") or {}
+        fs_records = e.get("ondisk_fs") or {}
+        epochfmt = e.get("_epochfmt") or (lambda seconds: "")
         for scope, plist in sorted(groups.items(), key=lambda kv: (kv[0] in cross, kv[0])):
-            # each path carries the file's mtime ON THE DEVICE, from the extraction archive — the
-            # one timestamp of the bytes themselves, as opposed to the claim's (see the basis)
-            pairs = [(device_path(p, src_root, manifest), mtimes.get(p, "")) for p in plist]
+            # under each path, what the DEVICE's filesystem recorded about the file — created,
+            # modified, accessed, inode changed, protection class — as opposed to the claim's own
+            # timestamps above (see the basis)
+            by_shown = {device_path(p, src_root, manifest): p for p in plist}
             listed = "<br>".join(
-                _esc(line) + " <span class='mt'>modified on the device: "
-                + ("<span class='muted'>not recorded</span>" if stamp == "not recorded"
-                   else _esc(stamp)) + "</span>"
-                for line, stamp in _collapse_paths_with_mtimes(pairs))
+                _esc(line) + report_ui.device_fs_html([fs_records.get(by_shown.get(p)) for p in group],
+                                                      epochfmt)
+                for line, group in _collapse_paths(list(by_shown)))
             badge = ((" <span class='xscope'>⚠ different account scope</span>" + _info(_cross_scope_basis(e)))
                      if scope in cross else "")
             blocks.append(f"<div class='scopehdr'>SCContent scope: <span class='mono'>{_esc(scope)}</span>"
@@ -1800,7 +1794,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat cache_controller.db</title><style>{report_ui.EMBEDDED_CSS}
+<title>Snapchat cache_controller.db</title><style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
@@ -1845,7 +1839,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  table.sub td{{border:1px solid #e0e0e8;padding:3px 8px;overflow-wrap:anywhere;vertical-align:middle}}
  table.sub td.hex{{font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7a1f5a}}
  .paths{{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#555;margin-top:4px;overflow-wrap:anywhere}}
- .paths .mt{{color:#8a8aa0;font-size:10px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;white-space:nowrap}}
+ .paths .devfs{{white-space:normal}}
  .muted{{color:#999}}
  /* The index row's Links cell — see the note in _links_html. No mask/filter/transform on this:
     they would become the containing block for the "?" popover, which is position:fixed exactly so
@@ -2033,6 +2027,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     # the cache files' mtimes ON THE DEVICE, from the extraction archive — never the extracted
     # copy's own, which is when we unzipped it (see memories_media_report.load_device_mtimes)
     device_mtimes = load_device_mtimes(src_root, app_or_root, app)
+    device_fs_records = load_fs_records(src_root, app_or_root, app)
 
     scfull, scparts = index_sccontent(app)
     mem_index = load_memory_index(app)
@@ -2073,11 +2068,19 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
 
     for e in all_entries:
-        stamps = {}
+        stamps, records = {}, {}
         for path in e["on_disk"]["paths"]:
-            stamp = device_mtimes.get(manifest_key(path)) if device_mtimes else None
-            stamps[path] = ms_fmt(int(stamp) * 1000) if stamp is not None else ""
+            key = manifest_key(path)
+            record = device_fs_records.get(key)
+            stamp = device_mtimes.get(key) if device_mtimes else None
+            if record is None and stamp is not None:      # an older extraction folder: mtime only
+                record = {"source": "zip-ut", "precision": "s", "mtime": stamp * device_fs.NS}
+            records[path] = record
+            stamps[path] = (device_fs.format_ns(record["mtime"], lambda s: ms_fmt(s * 1000),
+                                                record.get("precision", "s"))
+                            if record and record.get("mtime") is not None else "")
         e["ondisk_mtimes"] = stamps
+        e["ondisk_fs"] = records
 
     # The closure's view. Rows keep the order established above, which `render` preserves: poster
     # extraction runs under an overall budget, so re-ordering the publish could change which frames
@@ -2128,8 +2131,11 @@ def render(stage, closure=None, prov=None):
     # hash the actual cached bytes and publish viewable plaintext media (hard-linked where possible,
     # always under a name with a real extension so browsers open it).
     ms_fmt = stage["ms_fmt"]
+    epochfmt = lambda seconds: ms_fmt(int(seconds) * 1000)   # noqa: E731 - one formatter, two readers
+    for e in all_entries:
+        e["_epochfmt"] = epochfmt
     materialize_ondisk(all_entries, scfull, scparts, os.path.join(outdir, "files"), outdir,
-                       epochfmt=lambda seconds: ms_fmt(int(seconds) * 1000))
+                       epochfmt=epochfmt)
     posters, no_poster, not_tried = publish_posters(all_entries, os.path.join(outdir, "files"))
     if posters or no_poster or not_tried:
         logger.info(f"  {posters} poster frame(s) extracted from cached video (derived thumbnails, "

@@ -55,6 +55,17 @@ corpus these are the correct answers. The fixes that came out of the same pass a
     "Communications (legacy)" entry in `write_index`, and the v2 branch of
     `cache_controller_report.load_chat_links`.
 
+# Extraction archives — what is still not read
+- A **GrayKey** archive carries, per entry, a tool-computed **SHA-256 of the content** in extra field
+  `0x3253` (`S2`, 32 bytes — verified equal to the entry's bytes on every sample), plus two
+  undocumented fields: `0x4e49` (`NI`, 12 bytes — looks like the inode as 8 LE bytes plus 4 bytes of
+  flags) and `0x4b47` (`KG`, 6 bytes, `010103000000` on every sample). The hash is an
+  acquisition-time record we could verify our extracted bytes and reported hashes against — a
+  chain-of-custody line per file, and a candidate input for `source_fingerprint`. Not read yet;
+  `device_fs.from_zip_entry` is where it would go.
+- A UFED (CLBX) archive's `Log.txt` (UTF-16) records the UFED version and the acquisition log;
+  `extra/KeychainDump/` holds the keychain. Neither is surfaced in a report yet.
+
 # Snapchat Memories report
 - Embedded metadata (EXIF) is not read from HEIF/HEIC media — Pillow has no HEIF codec in this
   build, and the EXIF sits in an `iloc`-addressed item rather than a `moov` box. The report says
