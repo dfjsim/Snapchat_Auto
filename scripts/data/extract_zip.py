@@ -11,6 +11,8 @@ import re
 import plistlib
 from io import BytesIO
 
+from scripts.data import device_fs
+
 logger = logging.getLogger(__name__)
 
 # Each iOS container (app sandbox, app group, plugin) has this metadata file at its root,
@@ -253,6 +255,14 @@ Rename the folder and run again to extract Snapchat data from zip
             # the manifest rather than applied to the extracted copy: see zip_mtime for why a report
             # has to be able to say "not recorded".
             mtimes = {}
+            # relative path on disk -> everything the device's filesystem recorded about the file
+            # (all four timestamps, owner, mode, inode, protection class), from the richest source
+            # the archive has: a UFED archive's metadata.msgpack, else the entry's own extra fields.
+            # See scripts/data/device_fs.py. `mtimes` stays beside it for manifests older readers
+            # understand.
+            fs = {}
+            fs_meta = device_fs.load_ufed_metadata(
+                zip1, files_in_zip, lambda name: _in_snapchat(name) and wanted(name, files_to_extract))
             caches_bytes = sanitized = 0
             try:
                 for i in files_in_zip:
@@ -282,10 +292,18 @@ Rename the folder and run again to extract Snapchat data from zip
                             if len(tail) >= 2:
                                 container_prefixes.setdefault("/".join(tail[:2]),
                                                               i[:index].replace("\\", "/").strip("/"))
+                            record = None
                             try:
-                                stamp = zip_mtime(zip1.getinfo(i))
-                                if stamp is not None:
+                                info = zip1.getinfo(i)
+                                stamp = zip_mtime(info)
+                                # a directory entry is recorded by neither: it is not a file the
+                                # reports show, and its stat record would only be noise
+                                if stamp is not None and not i.endswith("/"):
                                     mtimes[rel.replace("\\", "/")] = stamp
+                                if not i.endswith("/"):
+                                    record = fs_meta.get(i) or device_fs.from_zip_entry(info)
+                                if record:
+                                    fs[rel.replace("\\", "/")] = record
                             except Exception:
                                 stamp = None                  # no timestamp is a state, not a failure
                             if not os.path.exists(os.path.dirname(filename)):
@@ -306,8 +324,13 @@ Rename the folder and run again to extract Snapchat data from zip
                                     # extraction folder made by an older build carries our unzip times
                                     # with no way to say so.
                                     try:
-                                        os.utime(filename, (stamp, stamp))
-                                    except OSError:
+                                        if record and record.get("precision") == "ns":
+                                            # the nanosecond record, where the archive has one
+                                            os.utime(filename, ns=(record.get("atime") or record["mtime"],
+                                                                   record["mtime"]))
+                                        else:
+                                            os.utime(filename, (stamp, stamp))
+                                    except (OSError, KeyError, TypeError):
                                         pass                  # a time the filesystem will not take
                             except PermissionError:
                                 pass
@@ -332,7 +355,11 @@ Rename the folder and run again to extract Snapchat data from zip
                                # path on disk -> the file's mtime ON THE DEVICE, unix seconds UTC.
                                # The extracted copy's own mtime is when we unzipped it and says
                                # nothing about the evidence, so a report must read this instead.
-                               "mtimes": mtimes}, mf, indent=2)
+                               "mtimes": mtimes,
+                               # path on disk -> the device filesystem's whole record of the file:
+                               # btime/mtime/atime/ctime as integer nanoseconds UTC with the source
+                               # and its precision, owner, mode, inode, protection class, xattrs.
+                               "fs": fs}, mf, indent=2)
             except Exception as err:
                 logger.debug(f"Could not write extraction manifest: {err}")
             if not os.path.exists(_out("Application")):

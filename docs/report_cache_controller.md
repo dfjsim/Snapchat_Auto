@@ -193,13 +193,14 @@ Library/Caches reports so a file reads the same way in all three:
   the format merely defines as UTC (`mvhd`) is converted and marked *UTC assumed*, since encoders have
   written local time there; one with no zone is left as written. The fields join the row's search
   text. Most cached files carry nothing beyond pixel size, and the block says so.
-* **Modified on the device** — beside every on-disk path, the cache file's mtime on the device's
-  filesystem, from `extraction_manifest.json` (the archive entry's `UT` field; see
-  [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-modified-column)). Never the
-  extracted copy's own mtime, which is when *we* unzipped it — and not a claim time either:
-  `CREATION_TIMESTAMP_MILLIS` is when the app registered the claim, this is when the bytes were last
-  written. Parts of a split file are bounded (earliest … latest); *not recorded* where the archive
-  carried none. Searchable.
+* **The device's record of the file** — under every on-disk path: created (birth), modified, accessed
+  and inode-changed times, protection class, inode, mode and owner, from `extraction_manifest.json`
+  (a UFED archive's `metadata.msgpack` at nanosecond precision, else the entry's `UT` field; see
+  [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)).
+  Never the extracted copy's own times, which are when *we* unzipped it — and not a claim time
+  either: `CREATION_TIMESTAMP_MILLIS` is when the app registered the claim, *modified* is when the
+  bytes were last written. Parts of a split file are bounded (earliest … latest); *not recorded*
+  where the archive carried none. The mtime is searchable.
 
 ### Bundles: the child files are the content
 For a bundle (`TYPE = 3`) the file named after the `CACHE_KEY` is **only the CHILDREN descriptor**

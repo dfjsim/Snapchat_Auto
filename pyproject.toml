@@ -1,6 +1,6 @@
 [project]
     name = "Snapchat_Auto"
-    version = "1.6.1-beta.1+build.20260916"
+    version = "1.6.2-beta.1+build.20260916"
     description = "Add your description here"
     readme = "README.md"
     requires-python = ">=3.14,<3.15"
@@ -20,7 +20,8 @@
         # produce a selection without taking on anything above. The application imports the same
         # module (scripts/selection_file.py re-exports it) so there is one implementation.
         "snapchat-auto-selection",
-    ]
+        "msgpack>=1.2.2",
+]
 
 
     [project.optional-dependencies]
@@ -73,7 +74,7 @@
     # The date lives in the fourth field, which Windows Installer **ignores** when comparing versions.
     # That is safe here only because the bundled WiX template sets AllowSameVersionUpgrades="yes":
     # without it, a second beta sharing these first three fields would not be seen as an upgrade.
-    version = "1.6.1.20260916"
+    version = "1.6.2.20260916"
 
 [tool.wix-build]
     # Copied next to the built executable and into the MSI. pyproject.toml is how the installed

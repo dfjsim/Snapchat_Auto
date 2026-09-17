@@ -49,7 +49,10 @@ Memories / My Eyes Only.
   encrypted" — and `media_meta.py`, which reads what a media file says about **itself**: EXIF/XMP,
   PNG text, an MP4's `mvhd` and QuickTime user data. Every timestamp it returns says what clock it
   is on, and only one whose zone the file states becomes an instant; a naive EXIF wall clock is
-  handed back as the string it is).
+  handed back as the string it is; and `device_fs.py`, the device filesystem's own record of each
+  extracted file — all four timestamps, owner, mode, inode, protection class — read from a UFED
+  archive's `metadata.msgpack` (nanoseconds; `msgpack` is a dependency for it) or the ZIP entry's
+  `UT` field, into one shape every report renders the same way).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app

@@ -54,11 +54,17 @@ def _cc_entry(tmp_path):
     ms_fmt, _label = cc.make_ms_formatter("utc")
     entry = cc.orphan_entries(scfull, scparts, set(), ms_fmt)[0]
     mtimes = mr.load_device_mtimes(root)
+    epochfmt = lambda seconds: ms_fmt(int(seconds) * 1000)   # noqa: E731
     entry["ondisk_mtimes"] = {p: ms_fmt(mtimes[mr.manifest_key(p)] * 1000)
                               for p in entry["on_disk"]["paths"]}
+    # what index() derives when the manifest holds only mtimes: a record with the one time
+    entry["ondisk_fs"] = {p: {"source": "zip-ut", "precision": "s",
+                              "mtime": mtimes[mr.manifest_key(p)] * 1_000_000_000}
+                          for p in entry["on_disk"]["paths"]}
+    entry["_epochfmt"] = epochfmt
     out = str(tmp_path / "Reports" / "CacheController")
     cc.materialize_ondisk([entry], scfull, scparts, os.path.join(out, "files"), out,
-                          epochfmt=lambda seconds: ms_fmt(int(seconds) * 1000))
+                          epochfmt=epochfmt)
     return entry, root
 
 
@@ -78,7 +84,7 @@ def test_the_cache_controller_detail_shows_the_block_and_dates_each_path(tmp_pat
 
     assert "Embedded metadata — inside the cached file" in detail
     assert "Cam 1" in detail and "<td>EXIF DateTimeOriginal</td>" in detail
-    assert "modified on the device: 2024-05-01 10:01:40 UTC" in detail
+    assert "<b>modified</b> <span class='ts'>2024-05-01 10:01:40 UTC</span>" in detail
     assert "read from: EXIF" in detail
 
 
@@ -95,10 +101,10 @@ def test_the_cache_controller_search_matches_the_camera_and_the_device_mtime(tmp
 
 def test_an_unrecorded_mtime_reads_not_recorded_not_a_blank(tmp_path):
     entry, root = _cc_entry(tmp_path)
-    entry["ondisk_mtimes"] = {p: "" for p in entry["on_disk"]["paths"]}
+    entry["ondisk_fs"] = {p: None for p in entry["on_disk"]["paths"]}
     detail = cc._detail_html(entry, "../", root, {})
 
-    assert "modified on the device: <span class='muted'>not recorded</span>" in detail
+    assert "device filesystem record: not recorded" in detail
 
 
 # --------------------------------------------------------------------------- Library/Caches

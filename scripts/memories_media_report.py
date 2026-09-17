@@ -58,6 +58,7 @@ from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
 from scripts.data import sniff
 from scripts.data import media_meta
+from scripts.data import device_fs
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
 from scripts import report_ui
 from scripts import app_version
@@ -1816,6 +1817,24 @@ def load_device_mtimes(*roots):
     return {}
 
 
+def load_fs_records(*roots):
+    """``{path on disk (from the container segment on): device filesystem record}`` — every timestamp
+    the device kept for the file, its owner, mode, inode and protection class, as `extract_zip`
+    recorded them from the archive (see `scripts/data/device_fs.py`). Empty for an extraction folder
+    made by a build older than this, in which case the reports fall back to `load_device_mtimes`."""
+    for root in roots:
+        if not root:
+            continue
+        mf = os.path.join(root, "extraction_manifest.json")
+        if os.path.isfile(mf):
+            try:
+                with open(mf, encoding="utf-8") as f:
+                    return json.load(f).get("fs", {}) or {}
+            except Exception as error:
+                logger.debug(f"Could not read extraction manifest {mf}: {error}")
+    return {}
+
+
 #: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to
 #: be built the same way from whatever absolute path the report holds.
 _CONTAINER_RE = re.compile(r"(?:^|/)(Application|AppGroup)/", re.I)
@@ -2122,18 +2141,18 @@ def _render_src_paths(f, src_root, manifest):
     (see :data:`DEVICE_MTIME_BASIS`), on the line of the path it dates: the two are one fact about
     one file, and listing the same paths again in a table of their own said nothing more.
     """
-    mtimes = dict(f.get("src_mtimes") or [])
+    fs_by_path = dict(f.get("src_fs") or [])
+    epochfmt = f.get("_epochfmt") or (lambda seconds: "")
     scope_by = f.get("scope_by_path") or {}
     cross = set(f.get("cross_scope") or [])
 
     def lines(paths):
         shown_paths = [device_path(s, src_root, manifest) for s in paths]
-        pairs = [(shown, mtimes.get(shown, "")) for shown in shown_paths]
-        return "<br>".join(
-            html.escape(line) + "<div class='mt'>modified on the device: "
-            + ("<span class='muted'>not recorded</span>" if stamp == "not recorded"
-               else html.escape(stamp)) + "</div>"
-            for line, stamp in _collapse_paths_with_mtimes(pairs))
+        out = []
+        for line, group in _collapse_paths(shown_paths):
+            out.append(html.escape(line) + report_ui.device_fs_html(
+                [fs_by_path.get(p) for p in group], epochfmt))
+        return "<br>".join(out)
 
     if not scope_by:                                       # caching-media / generated: no scope info
         return lines(f["src"])
@@ -2223,9 +2242,11 @@ TIME_SOURCES_HINT = (
     "«UTC assumed» beside it — encoders have been known to write local time there. Where nothing is "
     "known the value is shown exactly as written: a wall clock on the writing device's clock — "
     "compare with care.\n\n"
-    "• «extraction archive › <path>» — the cache file's modification time on the DEVICE's "
-    "filesystem, as the extraction archive recorded it (the ZIP entry's UT field). Not the time this "
-    "tool unzipped it. «not recorded» means the archive carried none.\n\n"
+    "• «extraction archive › <path>» — what the DEVICE's filesystem recorded about the cache file, as "
+    "the extraction archive carries it: created (birth), modified, accessed and inode-changed, from a "
+    "UFED archive's metadata.msgpack (nanoseconds) or the ZIP entry's UT field (seconds). Not the "
+    "time this tool unzipped it. «accessed» and «inode changed» can be set by the acquisition "
+    "itself. «not recorded» means the archive carried none.\n\n"
     "gallery.encrypteddb rows (keys, coordinates) carry no time of their own; they are dated only "
     "by the snap row they belong to.")
 
@@ -2244,17 +2265,10 @@ ENTRY_DB_TIME_BASIS = (
 
 FILE_TIME_BASIS = report_ui.FILE_TIME_BASIS
 
-DEVICE_MTIME_BASIS = (
-    "The cache file's modification time on the DEVICE's filesystem, read from the extraction "
-    "archive's own record of it (the ZIP entry's UT field, UTC seconds) and shown in this report's "
-    "timezone. It is NOT the timestamp of the copy on this machine: unzipping gives a file a new "
-    "mtime, so the extracted copy's is the moment this tool — or an earlier run — wrote it, and says "
-    "nothing about the evidence. For media rebuilt from several byte-range parts, every part has its "
-    "own. «not recorded» means the archive carried no timestamp for that entry, or the extraction "
-    "folder was produced by a build older than this and holds none.")
+DEVICE_MTIME_BASIS = device_fs.DEVICE_FS_BASIS
 
 
-def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None):
+def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None, fs=None):
     """Give every recovered media file the times it carries, formatted for this run.
 
     Two sources per file, kept apart from the database's and from each other (see
@@ -2269,12 +2283,29 @@ def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None):
     for m in memories.values():
         for f in m.get("media_files") or []:
             f["file_times"] = report_ui.file_time_rows(f.get("meta"), epochfmt)
-            stamps = []
+            stamps, records = [], []
             for path in f.get("src") or []:
-                stamp = mtimes.get(manifest_key(path)) if mtimes else None
-                stamps.append((device_path(path, src_root, manifest),
-                               epochfmt(stamp) if stamp is not None else ""))
+                key = manifest_key(path)
+                shown_path = device_path(path, src_root, manifest)
+                # the device's whole record where the archive has one (see device_fs); the plain
+                # mtime otherwise, for an extraction folder an older build produced
+                record = (fs or {}).get(key)
+                if record and record.get("mtime") is not None:
+                    stamp_text = device_fs.format_ns(record["mtime"], epochfmt,
+                                                     record.get("precision", "s"))
+                else:
+                    stamp = mtimes.get(key) if mtimes else None
+                    stamp_text = epochfmt(stamp) if stamp is not None else ""
+                    if stamp is not None and not record:
+                        record = {"source": "zip-ut", "precision": "s", "mtime": stamp * device_fs.NS}
+                stamps.append((shown_path, stamp_text))
+                records.append((shown_path, record))
             f["src_mtimes"] = stamps
+            f["src_fs"] = records
+            # the whole file's record summarised once (its parts bounded), for the timestamp list;
+            # and the run's formatter, for the per-path lines the Media files table draws
+            f["device_summary"] = device_fs.summarize([rec for _p, rec in records], epochfmt)
+            f["_epochfmt"] = epochfmt
 
 
 def _memory_times(m):
@@ -2311,21 +2342,55 @@ def _memory_times(m):
             if t.get("caveat"):
                 source += " — " + t["caveat"]
             out.append((t["label"], t["shown"], source))
+        out += _device_time_rows(f)
+    return out
+
+
+def _device_time_rows(f):
+    """The device filesystem's timestamps of one recovered file as ``(label, value, source)`` rows.
+
+    Every timestamp the record has — created, modified, accessed, inode changed — with identical
+    instants on one row; a file rebuilt from byte-range parts has one record per part, so each
+    timestamp is bounded (earliest … latest) rather than listed, since the parts are one media file
+    and the row has to stay a row. Values are the strings `annotate_file_times` already formatted, so
+    this needs no formatter and the time filter reads the same string the examiner sees.
+    """
+    records = [(path, rec) for path, rec in (f.get("src_fs") or []) if rec]
+    if not records:
+        # an extraction folder from before the record existed: the mtime alone, as before
         stamps = [(path, shown) for path, shown in (f.get("src_mtimes") or []) if shown]
         if len(stamps) == 1:
-            path, shown = stamps[0]
-            out.append(("Cache file modified on the device", shown, f"extraction archive › {path}"))
-        elif stamps:
-            # a file rebuilt from byte-range parts has one mtime per part: bound them rather than list
-            # them, since the parts are one media file and the row has to stay a row
+            return [("Cache file modified on the device", stamps[0][1],
+                     f"extraction archive › {stamps[0][0]}")]
+        if stamps:
             earliest = min(stamps, key=lambda ps: ps[1])
             latest = max(stamps, key=lambda ps: ps[1])
-            out.append((f"Cache parts modified on the device — earliest of {len(stamps)}",
-                        earliest[1], f"extraction archive › {earliest[0]}"))
+            rows = [(f"Cache parts modified on the device — earliest of {len(stamps)}",
+                     earliest[1], f"extraction archive › {earliest[0]}")]
             if latest[1] != earliest[1]:
-                out.append((f"Cache parts modified on the device — latest of {len(stamps)}",
-                            latest[1], f"extraction archive › {latest[0]}"))
-    return out
+                rows.append((f"Cache parts modified on the device — latest of {len(stamps)}",
+                             latest[1], f"extraction archive › {latest[0]}"))
+            return rows
+        return []
+    lines, _attrs = f.get("device_summary") or ([], [])
+    where = records[0][0] if len(records) == 1 else f"{len(records)} parts of {_part_stem(records[0][0])}"
+    source = device_fs.source_label(records[0][1])
+    rows = []
+    for labels, shown, _note, _kinds in lines:
+        # the path and the store are one statement for the whole record: said on its first line,
+        # not repeated under each of its timestamps
+        rows.append((f"Cache file {labels} on the device", shown,
+                     f"extraction archive › {where} · {source}" if not rows
+                     else "extraction archive › the same file's record"))
+    return rows
+
+
+def _part_stem(path):
+    """``…/<cache key>_*`` for a part path, so a bounded row names the file rather than one part."""
+    d, _, name = path.replace("\\", "/").rpartition("/")
+    mo = _SC_SPLIT_RE.match(name)
+    stem = f"{mo.group(1)}_*" if mo else name
+    return f"{d}/{stem}" if d else stem
 
 
 def _embedded_fields(f):
@@ -2960,6 +3025,25 @@ def _embedded_meta_html(files, media_prefix="../"):
     return "".join(blocks)
 
 
+def _collapse_paths(paths):
+    """``[(line, [paths in that line])]`` — `_collapse_part_paths` keeping the members of each line,
+    so the device records of a file's parts can be summarised under the one line that names them."""
+    order, groups = [], {}
+    for path in paths:
+        d, _, name = path.replace("\\", "/").rpartition("/")
+        mo = _SC_SPLIT_RE.match(name)
+        key = (d, mo.group(1), True) if mo else (d, name, False)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(path)
+    out = []
+    for d, name, split in order:
+        line = (f"{d}/{name}_*" if d else f"{name}_*") if split else (f"{d}/{name}" if d else name)
+        out.append((line, groups[(d, name, split)]))
+    return out
+
+
 def _collapse_paths_with_mtimes(pairs):
     """Like `_collapse_part_paths`, for ``[(display path, device mtime or "")]``: one line per whole
     file or per set of byte-range parts, each with its device mtime — a single value, or the
@@ -3201,7 +3285,7 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     role_header = "Role" + ("" if single else _info(SHARED_MEDIA_BASIS))
     files_table = (f"<table class='files'><tr><th>{role_header}</th><th>Source cache</th><th>Type</th>"
                    "<th>Dimensions</th><th>Size</th><th>File</th><th>Hashes (MD5 / SHA-256)</th>"
-                   "<th>Source path(s) in extraction · modified on the device"
+                   "<th>Source path(s) in extraction · the device's record of the file"
                    + _info(DEVICE_MTIME_BASIS) + "</th></tr>"
                    + "".join(frows) + "</table>") if frows else "<div class='muted'>no cached media recovered</div>"
 
@@ -3252,7 +3336,7 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
-           f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
+           f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
            f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
@@ -3990,7 +4074,8 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
     # What each file says about itself and what the device's filesystem said about its cache files,
     # in the run's timezone — the two timestamp sources this report shows beside the database's.
     annotate_file_times(all_memories, tz, load_device_mtimes(src_root, app_or_root, app),
-                        src_root=src_root, manifest=manifest)
+                        src_root=src_root, manifest=manifest,
+                        fs=load_fs_records(src_root, app_or_root, app))
 
     # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
     # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds

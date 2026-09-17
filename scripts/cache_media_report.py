@@ -53,8 +53,9 @@ from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
 from scripts.data import media_meta
+from scripts.data import device_fs
 from scripts.memories_media_report import (
-    manifest_key,
+    manifest_key, load_fs_records,
     find_app_container, index_sccontent, device_path, load_path_manifest, make_time_formatter,
     guess_media, url_token, _UUID_RE,
 )
@@ -1021,7 +1022,7 @@ def _stream_hashes(path):
 
 
 def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=None,
-                  device_mtimes=None):
+                  device_mtimes=None, fs_records=None):
     """One entry per file under Library/Caches, deduplicated by recovered content.
 
     Returns ``(entries, stats)``. Entries are keyed by the SHA-256 of the **recovered payload** (or
@@ -1077,6 +1078,10 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             "producer": producer_of(name),
             # The device's mtime, never the extracted copy's — see _DEVICE_MTIME_BASIS.
             "mtime": _device_mtime(full, device_mtimes, ms_fmt),
+            # and everything else the device's filesystem recorded about it, where the archive
+            # carries the record (see scripts/data/device_fs.py)
+            "fs": (fs_records or {}).get(_manifest_key(full)),
+            "_epochfmt": epochfmt,
             "src": device_path(full, src_root, manifest),
             # the exact name on the device, when extraction had to sanitise it
             "device_name": _device_name(full, rel, renamed),
@@ -1418,10 +1423,18 @@ def _detail_html(entry, rel_prefix, closure=None):
         if c.get("device_name"):
             shown += (f"<div class='devname'>on the device: {_esc(c['device_name'])}"
                       f"{_info(RENAMED_BASIS)}</div>")
+        record = c.get("fs")
+        if record is None and c.get("mtime"):
+            device_cell = _esc(c["mtime"])                 # an older extraction folder: mtime only
+        elif record:
+            device_cell = report_ui.device_fs_html([record], c.get("_epochfmt")
+                                                   or (lambda seconds: ""))
+        else:
+            device_cell = _NO_MTIME
         rows.append(f"<tr><td class='mono'>{shown}</td><td>{_fmt_bytes(c['bytes'])}</td>"
                     f"<td>{_esc(c['producer']) or '<span class=muted>none</span>'}</td>"
                     f"<td class='hex'>{_esc(c['raw_sha256'][:32])}…</td>"
-                    f"<td>{_esc(c['mtime']) or _NO_MTIME}</td></tr>")
+                    f"<td>{device_cell}</td></tr>")
     parts.append("<div class='sect'>Copies on disk" + _info(
         "Every file under Library/Caches whose recovered content is these exact bytes. The same "
         "media is often written more than once under different names — at the Caches root and in "
@@ -1429,8 +1442,8 @@ def _detail_html(entry, rel_prefix, closure=None):
         "this table is of the file AS STORED, which differs from the recovered content's hash "
         "whenever the file had to be decoded or decrypted.") + "</div>"
         "<table class='sub'><tr><th>path under Library/Caches</th><th>size</th><th>producer</th>"
-        "<th>SHA-256 as stored</th><th>modified on the device"
-        + _info(_DEVICE_MTIME_BASIS) + "</th></tr>" + "".join(rows) + "</table>")
+        "<th>SHA-256 as stored</th><th>the device's record of the file"
+        + _info(device_fs.DEVICE_FS_BASIS) + "</th></tr>" + "".join(rows) + "</table>")
     parts.append("<div class='sect'>Source path(s)</div><div class='paths'>"
                  + "<br>".join(_esc(c["src"]) for c in entry["copies"]) + "</div>")
 
@@ -1540,7 +1553,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
                 + (_info(CLIENT_KEY_BASIS) if key_info.get("key") else ""))
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat Library/Caches media</title><style>{report_ui.EMBEDDED_CSS}
+<title>Snapchat Library/Caches media</title><style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
@@ -1795,8 +1808,9 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
 
     renamed = load_renamed(src_root, app)
     device_mtimes = load_device_mtimes(src_root, app)
+    fs_records = load_fs_records(src_root, app)
     entries, stats = build_entries(app, key_info, ms_fmt, src_root, manifest, renamed,
-                                  device_mtimes)
+                                  device_mtimes, fs_records)
     logger.info(f"Cached media: {stats['files']} file(s) under Library/Caches "
                 f"({_fmt_bytes(stats['bytes'])}) → {len(entries)} distinct file(s), "
                 f"{stats['decoded']} decoded/decrypted")
