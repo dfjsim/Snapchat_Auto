@@ -137,9 +137,55 @@ Decoded by `parse_children`. Field `1` is one child or a list; each child is
 `{1: name, 2: {1: size, 2: {1: offset}}}`. Two shapes seen:
 
 * **sharded file** (`TYPE=2`): names are byte ranges — `94208-693856`, `PREFETCH`. On disk these
-  are stored as `<CACHE_KEY>_<start>-<end>` (the same split media `parseSnapvideos` reconstructs).
+  are stored as `<CACHE_KEY>_<start>-<end>` and `<CACHE_KEY>_PREFETCH` (the same split media
+  `parseSnapvideos` reconstructs). What the set of shards does and does not say about the user is
+  the next section.
 * **bundle** (`TYPE=3`): names are child cache keys (often with a leading marker byte, e.g.
   `z<hex>`) plus a filename such as `lar_lens_notifications_geofences_v6.json`.
+
+### What a shard set says — prefetched head vs. streamed body
+
+Both child names are written by **Snapchat's own file manager**, so each shard file is a record of
+*how the bytes arrived*: one persisted fetch per file, the child's `offset` saying where it belongs
+in the reconstructed stream. Which shards exist is therefore evidence about the transfer, and it is
+routinely over-read as evidence about the user.
+
+* **`PREFETCH`** is the child at **offset 0** — the head of the file, fetched speculatively because
+  the client held the item's metadata and anticipated it might be played. `_SC_SPLIT_RE` in the
+  Memories report parses it as start 0 and dedupes it against a `0-N` shard at the same offset.
+  Its presence does **not** mean the item was opened, played or viewed.
+* **`<start>-<end>`** is a range the downloader/player actually pulled — progressive playback, a
+  seek, or a resumed download. That these are demand-driven rather than a planned chunking is
+  visible in the data: `_part_coverage` exists because shards on a real device **start past 0 and
+  leave holes**, the device having kept only the ranges it streamed.
+
+What may be concluded from a shard set, strongest claim first:
+
+| On disk | What it supports |
+|---|---|
+| `PREFETCH` + contiguous ranges reaching `KNOWN_CONTENT_LENGTH_BYTES` | the whole content was transferred to the device |
+| ranges starting past 0, or with gaps | partial streaming — and the concatenation is byte-correct but offset-wrong, which is why a decoder reports impossible NAL/atom sizes rather than simply refusing the file |
+| `PREFETCH` alone, small | the head was fetched speculatively; the content was never fully transferred |
+
+**Does the user have to have been using the app?** Two separate questions. The Snapchat process must
+have been running — nothing in iOS writes these files, only the app's file manager does, over the
+network. But interaction with *that item* is not required, and "running" covers states that are not
+deliberate use: foreground on an unrelated screen, background refresh, a push-triggered fetch,
+resumption from the app switcher. Neither timestamp closes that gap on its own:
+`CACHE_FILE_CLAIM.CREATION_TIMESTAMP_MILLIS` is when the claim was registered and
+`CACHE_FILE_METADATA.LAST_READ_TIMESTAMP_MILLIS` when the entry was last read back. The device's own
+record of each shard file (*created* vs *modified*, from `extraction_manifest.json`) bounds the first
+and last chunk writes independently of anything the app recorded, which is why the report shows it
+per path and as earliest…latest across a split file.
+
+The trigger conditions above are read from the app's own naming and from the observed shard layout;
+the names, offsets and coverage behaviour are verified, the prefetch trigger set is not
+instrumented. Say which of the two a report is relying on.
+
+> **Trap:** the legacy `scripts/parseSnapvideos_PREFETCH.py` **renames `PREFETCH` → `_0-1` inside the
+> extraction tree**, so a `_0-1` shard at offset 0 in a tree an earlier Snapchat Auto run touched may
+> be ours and not the device's. Re-extracting reverts those names; a baseline must come from a
+> freshly extracted tree. See the removal note in `TODO.md`.
 
 ### `CACHE_FILE_METADATA.CONTENT_RETRIEVAL_METADATA` (protobuf)
 Decoded by `parse_retrieval`. Field `5.1`/`6.1` = the **CDN URL** the file was fetched from.
