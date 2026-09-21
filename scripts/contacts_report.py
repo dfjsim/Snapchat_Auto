@@ -266,9 +266,31 @@ IDENTIFIER_NOTE = (
 
 PRIMARY_SOURCE_NOTE = (
     "Read from primary.docobjects: table 'snapchatter' (userId, and the 'p' blob that also carries "
-    "the names) joined on rowid to 'index_snapchatterusername' (current username) and "
-    "'index_snapchatterlegacyUsername' (the username used before it was changed). The three tables "
-    "share one rowid per contact.")
+    "the names) joined on rowid to 'index_snapchatterusername' (current username), "
+    "'index_snapchattermutableUsername' and 'index_snapchatterlegacyUsername' (the username used "
+    "before it was changed). The four tables share one rowid per Snapchatter.")
+
+MUTABLE_NOTE = (
+    "As stored in primary.docobjects table 'index_snapchattermutableUsername'. What distinguishes "
+    "it from 'username' is not established: in every tested extraction the two were equal on every "
+    "row, while the LEGACY username is the one that records a rename. It is shown because the app "
+    "stores it, and flagged on the row when it differs from the username.")
+
+SNAPCHATTERS_NOTE = (
+    "primary.docobjects table 'snapchatter' holds every Snapchatter record the app has cached — not "
+    "only friends. On the tested extractions the friends list accounted for a handful of rows and "
+    "every other row was named in a 'snapchatters__displaysuggestion' page, i.e. a Quick Add / "
+    "'people you may know' suggestion the app had shown. Another tool that lists the 'snapchatter' "
+    "table as the friends list reports all of these as friends; they are NOT in the account's own "
+    "friends list, which is what the table above was read from. 'Why cached' names the docobjects "
+    "table whose document mentions the user id — 'Quick Add suggestion' is the one meaning that was "
+    "verified; any other table is named as stored, with no interpretation. Rows here are not "
+    "contacts: they carry no row selection, no anchors, and are left out of a partial report. "
+    "Method after iLEAPP (Alexis Brignoni), scripts/artifacts/snapchat.py, whose 'Snapchat - "
+    "Friends' artifact is this table.")
+
+WHY_QUICK_ADD = "Quick Add suggestion"
+WHY_UNNAMED = "cached by the app; no docobjects table names it"
 
 
 def _text_column(conn, table, prefer="username"):
@@ -312,8 +334,9 @@ def load_identifiers(primary):
         return out
     try:
         user_col = _text_column(conn, "index_snapchatterusername")
+        mutable_col = _text_column(conn, "index_snapchattermutableUsername", prefer="username")
         legacy_col = _text_column(conn, "index_snapchatterlegacyUsername", prefer="username")
-        if not (user_col or legacy_col):
+        if not (user_col or legacy_col or mutable_col):
             logger.info("Contacts: primary.docobjects has no username index tables — the username "
                         "history cannot be shown")
             return out
@@ -322,6 +345,9 @@ def load_identifiers(primary):
         if user_col:
             select.append(f"u.{user_col} as username")
             joins += " left join index_snapchatterusername u on u.rowid = s.rowid"
+        if mutable_col:
+            select.append(f"m.{mutable_col} as mutable_username")
+            joins += " left join index_snapchattermutableUsername m on m.rowid = s.rowid"
         if legacy_col:
             select.append(f"l.{legacy_col} as legacy_username")
             joins += " left join index_snapchatterlegacyUsername l on l.rowid = s.rowid"
@@ -333,9 +359,9 @@ def load_identifiers(primary):
             user_id = cell(record.get("user_id"))
             if not user_id:
                 continue
-            entry = out.setdefault(user_id.lower(), {"username": "", "legacy_username": "",
-                                                     "superseded": []})
-            for key in ("username", "legacy_username"):
+            entry = out.setdefault(user_id.lower(), {"username": "", "mutable_username": "",
+                                                     "legacy_username": "", "superseded": []})
+            for key in ("username", "mutable_username", "legacy_username"):
                 value = cell(record.get(key))
                 if value and not entry[key]:
                     entry[key] = value
@@ -356,19 +382,122 @@ def load_identifiers(primary):
 
 
 def apply_identifiers(contacts, identifiers):
-    """Add ``legacy_username`` to each contact and fill a missing username from the same source.
+    """Add ``legacy_username`` and ``mutable_username`` to each contact and fill a missing
+    username from the same source.
 
-    A legacy username equal to the current one is not a rename and is not shown as one.
+    A legacy username equal to the current one is not a rename and is not shown as one. The
+    mutable username is carried as stored (see :data:`MUTABLE_NOTE`); ``mutable_differs`` says
+    whether it disagrees with the username, which is what the row flags.
     """
     for contact in contacts:
         record = identifiers.get(contact["user_id"].lower()) if contact["user_id"] else None
         legacy = (record or {}).get("legacy_username", "")
         username = (record or {}).get("username", "")
+        mutable = (record or {}).get("mutable_username", "")
         if username and not contact["username"]:
             contact["username"] = username
         current = contact["username"] or username
         contact["legacy_username"] = legacy if legacy and legacy != current else ""
+        contact["mutable_username"] = mutable
+        contact["mutable_differs"] = bool(mutable and current and mutable != current)
     return contacts
+
+
+_UUID_TEXT_RE = re.compile(rb"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           rb"[0-9a-fA-F]{12}")
+# The snapchatter table itself is not "somewhere the user id is mentioned", and the index tables
+# carry no documents. Every other table in the store is searched — including
+# snapchatters__displaymetadata, whose membership (friends plus the official accounts the app
+# converses with, on the tested devices) is worth naming.
+_SNAPCHATTER_OWN_TABLES = ("snapchatter", "sqlite_sequence")
+
+
+def load_snapchatters(primary, contact_ids=(), owner_user_id=""):
+    """Every ``snapchatter`` row of ``primary.docobjects`` that is **not** a contact, with why the
+    app cached it — see :data:`SNAPCHATTERS_NOTE`.
+
+    Returns ``[{user_id, username, mutable_username, legacy_username, display_name, why, wal}]``
+    sorted by username. ``why`` is :data:`WHY_QUICK_ADD`, ``"named in <table>"`` for another
+    docobjects table whose document embeds the user id as text, or :data:`WHY_UNNAMED`. Both
+    readings of the store are used, and ``wal`` is the row's marker. Never raises.
+    """
+    out = []
+    if not (primary and os.path.isfile(str(primary))):
+        return out
+    excluded = {str(c).lower() for c in contact_ids if c}
+    if owner_user_id:
+        excluded.add(str(owner_user_id).lower())
+    try:
+        views = sqlite_open.open_views(primary)
+    except sqlite3.DatabaseError as error:
+        logger.debug(f"Could not open {primary}: {error}")
+        return out
+    total = 0
+    try:
+        from scripts.data import flatbuffers_doc
+        conn = views.merged
+        tables = {r[0] for r in conn.execute("select name from sqlite_master where type = 'table'")}
+        if "snapchatter" not in tables:
+            return out
+        # which other tables' documents mention each user id: the documents are FlatBuffers and
+        # embed the UUID as text, so a plain scan of every blob finds every mention
+        mentions = {}
+        for table in sorted(tables):
+            if table in _SNAPCHATTER_OWN_TABLES or table.startswith("index_"):
+                continue
+            blob_rows, _marks = sqlite_open.query_both(views, f'select p from "{table}"')
+            for (blob,) in blob_rows:
+                if isinstance(blob, (bytes, bytearray, memoryview)):
+                    for match in _UUID_TEXT_RE.findall(bytes(blob)):
+                        mentions.setdefault(match.decode("ascii").lower(), set()).add(table)
+        select = ["s.userId as user_id", "s.p as p"]
+        joins = ""
+        for table, alias, key in (("index_snapchatterusername", "u", "username"),
+                                  ("index_snapchattermutableUsername", "m", "mutable_username"),
+                                  ("index_snapchatterlegacyUsername", "l", "legacy_username")):
+            col = _text_column(conn, table, prefer="username")
+            if col:
+                select.append(f"{alias}.{col} as {key}")
+                joins += f" left join {table} {alias} on {alias}.rowid = s.rowid"
+        query = f"select {', '.join(select)} from snapchatter s{joins}"
+        names = [d[0] for d in conn.execute(f"{query} limit 0").description]
+        rows, marks = sqlite_open.query_both(views, query)
+        seen = set()
+        for row, mark in zip(rows, marks):
+            record = dict(zip(names, row))
+            user_id = cell(record.get("user_id"))
+            if not user_id or user_id.lower() in seen:
+                continue
+            seen.add(user_id.lower())
+            total += 1
+            if user_id.lower() in excluded:
+                continue
+            doc = flatbuffers_doc.snapchatter_names(record.get("p"), user_id)
+            named_in = sorted(mentions.get(user_id.lower(), ()))
+            if "snapchatters__displaysuggestion" in named_in:
+                why = WHY_QUICK_ADD
+            elif named_in:
+                why = "named in " + ", ".join(named_in)
+            else:
+                why = WHY_UNNAMED
+            out.append({"user_id": user_id,
+                        "username": cell(record.get("username")) or doc.get("username", ""),
+                        "mutable_username": cell(record.get("mutable_username")),
+                        "legacy_username": cell(record.get("legacy_username")),
+                        "display_name": doc.get("display_name", ""),
+                        "why": why, "wal": mark})
+    except sqlite3.DatabaseError as error:
+        logger.info(f"Contacts: could not read the snapchatter table from primary.docobjects "
+                    f"({error})")
+    finally:
+        views.close()
+    out.sort(key=lambda r: (r["username"].lower(), r["user_id"].lower()))
+    if total:
+        quick = sum(1 for r in out if r["why"] == WHY_QUICK_ADD)
+        logger.info(f"Contacts: {total} Snapchatter record(s) in primary.docobjects — "
+                    f"{total - len(out)} in the contacts list, {quick} Quick Add suggestion(s), "
+                    f"{len(out) - quick} other")
+    return out
 
 
 def normalize_groups(group_df):
@@ -482,8 +611,51 @@ _WHY_LABEL = {
 }
 
 
-def _contact_detail(contact, convs, rel_prefix, closure=None):
-    """The expanded contact row: every conversation they are in, with its conversation id."""
+ACCOUNT_NOTE = (
+    "Read by key from Documents/user.plist, a Snap TSAF container (not a plist): 'username', "
+    "'user_id' and 'laguna_id' under the User object, and 'identifier', 'encryption_key' and "
+    "'initialization_vector' under its client_encryption object. All are shown as stored. What the "
+    "laguna id names is not established.\n\n"
+    "The client-encryption values are a SECOND such record: the key that opens this device's "
+    "encrypted caches is the one in Documents/ClientEncryptionService.plist, which carries a "
+    "different identifier and a different key. Nothing in any tested extraction is encrypted with "
+    "the key shown here — every block-aligned file on four devices was tested against it, by "
+    "decrypting each file's last blocks and checking the padding, which identifies a CBC key "
+    "whatever the IV or framing. So treat these as an identifier and key material belonging to the "
+    "account record, not as a key to try against the caches. See "
+    "docs/snapchat_ios_cache_media.md.\n\n"
+    "A signed-out account leaves username / user_id / laguna_id empty in this file. Keyed read "
+    "after iLEAPP (Alexis Brignoni), scripts/artifacts/snapchat.py, 'Snapchat - Account'.")
+
+_ACCOUNT_LABELS = (("username", "Username (user.plist)"), ("user_id", "User ID (user.plist)"),
+                   ("laguna_id", "Laguna ID"), ("identifier", "Client-encryption identifier"),
+                   ("encryption_key", "Client-encryption key (base64, as stored)"),
+                   ("initialization_vector", "Client-encryption IV (base64, as stored)"))
+
+
+def _username_rows(contact):
+    """The three stored username fields as ``(label, html)`` grid rows, each naming its table."""
+    def src(table):
+        return f' <span class="muted">{table}</span>'
+    mutable = contact.get("mutable_username") or ""
+    legacy = contact.get("legacy_username") or ""
+    return [("Username", text_html(contact["username"]) + src("index_snapchatterusername")
+             if contact["username"] else ""),
+            ("Mutable username",
+             (text_html(mutable) + (' <span class="legacy">differs from the username</span>'
+                                    if contact.get("mutable_differs") else "")
+              if mutable else '<span class="muted">not stored</span>')
+             + src("index_snapchattermutableUsername") + report_ui.info_icon(MUTABLE_NOTE)),
+            ("Legacy username",
+             (text_html(legacy) if legacy else '<span class="muted">not stored</span>')
+             + src("index_snapchatterlegacyUsername"))]
+
+
+def _contact_detail(contact, convs, rel_prefix, closure=None, account=None):
+    """The expanded contact row: every conversation they are in, with its conversation id.
+
+    ``account`` (the device owner's ``user.plist`` values) is rendered on the owner's row only.
+    """
     if convs:
         rows = "".join(
             "<tr>"
@@ -514,20 +686,63 @@ def _contact_detail(contact, convs, rel_prefix, closure=None):
     else:
         table = ('<span class="muted">No conversation in this extraction names this contact.'
                  '</span>')
-    ids = [("Display name", text_html(contact["display"])),
-           ("Username", text_html(contact["username"])),
-           ("Legacy username", text_html(contact.get("legacy_username") or "")),
+    ids = [("Display name", text_html(contact["display"]))] + _username_rows(contact) + [
            ("User ID", f'<span class="mono">{_esc(contact["user_id"])}</span>')]
     grid = "".join(f'<div class="k">{k}</div><div class="v">{v}</div>' for k, v in ids if v)
+    account_html = ""
+    if contact["is_owner"] and account:
+        pairs = [(label, account[key]) for key, label in _ACCOUNT_LABELS if account.get(key)]
+        account_grid = "".join(f'<div class="k">{_esc(k)}</div><div class="v mono">{_esc(v)}</div>'
+                               for k, v in pairs)
+        account_html = ('<div class="sect">Account — Documents/user.plist'
+                        + report_ui.info_icon(ACCOUNT_NOTE) + "</div>"
+                        + f'<div class="grid">{account_grid}</div>')
     return (f'<div class="sect">Conversations ({len(convs)})'
             + report_ui.info_icon(MULTI_CONV_NOTE) + "</div>" + table
             + '<div class="sect">Identifiers' + report_ui.info_icon(IDENTIFIER_NOTE) + "</div>"
-            + f'<div class="grid">{grid}</div>')
+            + f'<div class="grid">{grid}</div>' + account_html)
+
+
+def _snapchatters_section(snapchatters, closure=None):
+    """The Snapchatters the app cached that are not contacts — a plain table, collapsed, with no
+    selection and no anchors, so nothing can mistake a row here for a contact."""
+    if not snapchatters:
+        return ""
+    if closure is not None:
+        return ('<div class="foot">Snapchatters the app cached that are not contacts: not part of '
+                'this extract (they carry no row selection).</div>')
+    quick = sum(1 for r in snapchatters if r["why"] == WHY_QUICK_ADD)
+    rows = []
+    for r in snapchatters:
+        why = _esc(r["why"])
+        if r["why"] == WHY_QUICK_ADD:
+            why = f'<span class="why">{why}</span>'
+        wal = ""
+        if r.get("wal") == sqlite_open.MAIN_ONLY:
+            wal = (' <span class="legacy" title="only in primary.docobjects WITHOUT its -wal: '
+                   'replaced or deleted since the last checkpoint">superseded</span>')
+        rows.append("<tr>"
+                    f'<td>{text_html(r["display_name"]) or "<span class=muted>&mdash;</span>"}</td>'
+                    f'<td>{text_html(r["username"]) or "<span class=muted>&mdash;</span>"}{wal}</td>'
+                    f'<td>{text_html(r["mutable_username"]) or "<span class=muted>&mdash;</span>"}</td>'
+                    f'<td>{text_html(r["legacy_username"]) or "<span class=muted>&mdash;</span>"}</td>'
+                    f'<td class="mono">{_esc(r["user_id"])}</td>'
+                    f'<td>{why}</td></tr>')
+    return (f'<details class="others"><summary><b>{len(snapchatters)}</b> Snapchatter(s) the app '
+            f'cached that are <b>not</b> contacts &middot; <b>{quick}</b> Quick Add suggestion(s)'
+            f'{report_ui.info_icon(SNAPCHATTERS_NOTE)}</summary>'
+            '<div class="note">These rows are NOT the account\'s friends. They are every other record '
+            'in primary.docobjects\' <code>snapchatter</code> table — people the app has shown, '
+            'mostly as Quick Add suggestions. Another tool reading that table as a friends list '
+            'reports them as friends.</div>'
+            '<table class="sub others"><tr><th>Display name</th><th>Username</th>'
+            f'<th>Mutable username{report_ui.info_icon(MUTABLE_NOTE)}</th><th>Legacy username</th>'
+            '<th>User ID</th><th>Why cached</th></tr>' + "".join(rows) + '</table></details>')
 
 
 def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_label="",
                     run_id="default", rel_prefix="../", identifiers_read=False,
-                    closure=None, prov=None):
+                    closure=None, prov=None, account=None, snapchatters=None):
     """Write ``Contacts_report.html`` (+ ``data/index.js``) and return its path.
 
     ``conv_index`` maps a conversation id to what the Conversations report knows about it
@@ -544,7 +759,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
     data_dir = os.path.join(outdir, "data")
     all_convs = {contact_anchor(c): contact_conversations(c, conv_index) for c in contacts}
     details = [(contact_anchor(c),
-                _contact_detail(c, all_convs[contact_anchor(c)], rel_prefix, closure))
+                _contact_detail(c, all_convs[contact_anchor(c)], rel_prefix, closure, account))
                for c in contacts]
     chunk_of = report_ui.write_details(data_dir, details)
 
@@ -578,6 +793,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
             multi_conv += 1
         owner = (' <span class="ownerbadge" title="the account this extraction came from">'
                  'device owner</span>') if contact["is_owner"] else ""
+        if contact.get("mutable_differs"):
+            owner += (' <span class="legacy" title="the stored mutable username differs from the '
+                      'username — expand the row">mutable &ne;</span>')
         if convs:
             lead = convs[0]
             more = (f' <span class="more" title="in {len(convs) - 1} more conversation(s) — expand '
@@ -620,7 +838,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
             report_ui.activity_cell(first_txt, first_src),
             report_ui.activity_cell(last_txt, last_src),
         ]
-        searchable = [contact["display"], contact["username"], legacy, contact["user_id"], conv_id]
+        searchable = [contact["display"], contact["username"], legacy, contact["user_id"], conv_id,
+                      contact.get("mutable_username") or ""]
         # every conversation id and title the contact is in, so searching an id finds the people in
         # it — and so a group chat's members are findable from the group's own id
         searchable += [c["id"] for c in convs] + [c.get("title") or "" for c in convs]
@@ -664,6 +883,11 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
    font-size:9px;font-weight:700;padding:0 4px;margin-left:5px;text-transform:uppercase;
    font-family:-apple-system,Segoe UI,Roboto,sans-serif}
  .foot{padding:14px 24px;color:#777;font-size:11.5px}
+ details.others{margin:10px 24px 18px;border:1px solid #d9d9e6;border-radius:6px;background:#fafaff}
+ details.others>summary{cursor:pointer;padding:8px 12px;font-size:12.5px;color:#2d2d71}
+ details.others .note{margin:0 12px}
+ table.sub.others{margin:8px 12px 12px;font-size:11.5px}
+ .why{background:#f3e8f2;color:#8a1f5a;border:1px solid #e0c2d8;border-radius:8px;padding:0 6px}
 """
 
     partial_css, banner, figures = partial_report.page_chrome(closure, "ct", prov)
@@ -690,6 +914,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'{report_ui.info_icon(MULTI_CONV_NOTE)} &middot; '
            f'<b>{with_msgs}</b> with messages &middot; '
            f'<b>{with_legacy}</b> whose username changed'
+           + (f' &middot; <b>{len(snapchatters)}</b> cached Snapchatter(s) that are not contacts'
+              f'{report_ui.info_icon(SNAPCHATTERS_NOTE)}' if snapchatters and closure is None
+              else '')
            + (f' &middot; times in <b>{_esc(tz_label)}</b>' if tz_label else '') +
            f'</div>'
            f'<div class="sum">Up to four identifiers per contact'
@@ -752,6 +979,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'<div class="vempty" id="vempty" style="display:none">'
            f'No contact matches the current filters.</div>'
            f'<div class="foot">Message counts{report_ui.info_icon(counts_hint)}</div>'
+           f'{_snapchatters_section(snapchatters or [], closure)}'
            f'<script src="data/index.js"></script>'
            f'<script>{report_ui.HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
            'var flt_t=0;'
@@ -791,7 +1019,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
 
 
 def index(friends_df, outdir, owner_user_id="", owner_username="", friends_source="", tz="local",
-          report_dir=None, primary=None, identifiers=None):
+          report_dir=None, primary=None, identifiers=None, account=None, snapchatters=None):
     """Work out which contacts exist, without writing anything. See :func:`main` for the arguments.
 
     This is the half a partial run needs before it can decide what to render: reading the friends
@@ -810,6 +1038,10 @@ def index(friends_df, outdir, owner_user_id="", owner_username="", friends_sourc
     identifiers = load_identifiers(primary) if identifiers is None else identifiers
     contacts = apply_identifiers(
         normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)
+    if snapchatters is None:
+        # everyone else the store knows: the contacts (whichever artifact they came from) and the
+        # owner are what make the rest "not contacts", so they are decided here, after the contacts
+        snapchatters = load_snapchatters(primary, [c["user_id"] for c in contacts], owner_user_id)
 
     sel = partial_report.Index("ct")
     for contact in contacts:
@@ -821,7 +1053,8 @@ def index(friends_df, outdir, owner_user_id="", owner_username="", friends_sourc
 
     return partial_report.Stage("ct", contacts, sel, tz_label=tz_label, run_id=run_id,
                                 friends_source=friends_source,
-                                identifiers_read=bool(identifiers))
+                                identifiers_read=bool(identifiers), account=account or {},
+                                snapchatters=snapchatters)
 
 
 def render(stage, outdir, conv_index=None, closure=None, prov=None):
@@ -830,7 +1063,8 @@ def render(stage, outdir, conv_index=None, closure=None, prov=None):
     report = generate_report(contacts, outdir, conv_index=conv_index,
                              friends_source=stage["friends_source"], tz_label=stage["tz_label"],
                              run_id=stage["run_id"], identifiers_read=stage["identifiers_read"],
-                             closure=closure, prov=prov)
+                             closure=closure, prov=prov, account=stage["account"],
+                             snapchatters=stage["snapchatters"])
     logger.info(f"Contacts report: {os.path.abspath(report)}")
     if closure is None:
         logger.info(f"  {len(contacts)} contact(s) from "
@@ -841,7 +1075,8 @@ def render(stage, outdir, conv_index=None, closure=None, prov=None):
 
 
 def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="",
-         friends_source="", tz="local", report_dir=None, primary=None, identifiers=None):
+         friends_source="", tz="local", report_dir=None, primary=None, identifiers=None,
+         account=None, snapchatters=None):
     """Build the contacts report from the friends DataFrame ``ParseSnapchat_iOS`` recovered.
 
     friends_df   : whichever getFriends* source answered (columns vary — see the normalizers).
@@ -854,11 +1089,14 @@ def main(friends_df, outdir, conv_index=None, owner_user_id="", owner_username="
     identifiers  : an already-loaded ``load_identifiers(primary)``. The caller reads that file once
                    and gives the same result to both chat reports; passing None re-reads it from
                    ``primary``, which keeps this report usable on its own.
+    account      : the owner's ``Documents/user.plist`` values (``ParseSnapchat_iOS.getAccount``),
+                   shown on the owner's row.
+    snapchatters : an already-loaded ``load_snapchatters(...)``; None reads it from ``primary``.
 
     A full run in one call: :func:`index` then :func:`render`. A partial run calls the two halves
     separately, because the closure has to be decided from every report's index at once.
     """
     stage = index(friends_df, outdir, owner_user_id=owner_user_id, owner_username=owner_username,
                   friends_source=friends_source, tz=tz, report_dir=report_dir, primary=primary,
-                  identifiers=identifiers)
+                  identifiers=identifiers, account=account, snapchatters=snapchatters)
     return render(stage, outdir, conv_index=conv_index)

@@ -358,6 +358,24 @@ new-schema MEO memory in the corpus references no such surviving row and stays l
 Implemented by `adopt_media_object_keys` in `scripts/memories_media_report.py`, which labels every
 key it recovers this way in the report rather than presenting it as the snap's own.
 
+### Key rows nothing accounts for
+
+The same population — `snap_key_iv` rows whose snap id has no `ZGALLERYSNAP` row — also contains
+Memories nobody references: deleted, or moved and then deleted, with the key row, the
+`snap_location_table` row and the `snap_address_title` row left behind in `gallery.encrypteddb`.
+Those are reported as **RECOVERED** rows with whatever the gallery database still holds for them
+(`orphan_key_memories`), skipping any whose key pair a listed Memory already holds — the same media
+object under another id. Seen on the old-schema device: a wrapped (MEO) key with coordinates and an
+address, no media, referenced through `ZDUPLICATEDFROMSNAPID` by a duplicate that stayed in the
+gallery. After iLEAPP's "Key row with no Memory row"; see [related_ileapp.md](related_ileapp.md).
+
+### The search index gives a place without any of this
+
+`Documents/gallery_search/<n>/<userHash>/search.sqlite3` — plain SQLite, no key — carries the app's
+reverse geocoding of each indexed Memory (street, postal code, city) and a local date. It is not the
+coordinates, and it covers only the snaps the app indexed, but it needs none of the keychain matrix
+above: read it first on any device whose keychain is backup-class. `scripts/gallery_search.py`.
+
 ---
 
 ## Diagnosing a keychain

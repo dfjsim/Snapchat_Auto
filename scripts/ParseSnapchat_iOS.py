@@ -12,6 +12,8 @@ import ntpath
 import filetype
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
+from scripts.data import flatbuffers_doc
+from scripts.data import tsaf
 from pathlib import Path
 from platform import system
 import blackboxprotobuf
@@ -343,17 +345,37 @@ def sccontent_folders(app, user_id=""):
     return found
 
 
+def getAccount(userPlist):
+    """What ``Documents/user.plist`` says about the signed-in account, by key (see
+    ``scripts/data/tsaf``): ``username``, ``user_id``, ``laguna_id`` and the client-encryption
+    ``identifier`` / ``encryption_key`` / ``initialization_vector``. ``{}`` when absent or not TSAF."""
+    try:
+        return tsaf.account(tsaf.read(userPlist)) if userPlist and os.path.exists(userPlist) else {}
+    except Exception as Error:
+        logger.error(Error)
+        return {}
+
+
 def getUserID(userPlist):
     try:
         if os.path.exists(userPlist):
             logger.info("Getting User ID from " + ntpath.basename(userPlist))
+            account = getAccount(userPlist)
+            if account.get("user_id"):
+                return account["user_id"]
             with open(userPlist, "rb") as f:
                 data = f.read()
+            if not tsaf.is_tsaf(data):
+                # not the TSAF container every tested app version writes: fall back to the first
+                # UUID in the file, which is what this function always did
                 uuid = re.search('[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', str(data))
-                if uuid == None:
-                    logger.info("No user found in User.plist! User might be logged out from Snapchat. Data will likely be incomplete.")
-                    return ""
-            return (uuid.group(0))
+                if uuid is not None:
+                    return uuid.group(0)
+            present = [k for k in ("username", "laguna_id", "identifier") if account.get(k)]
+            logger.info("No user_id in user.plist"
+                        + (f" (it still holds {', '.join(present)})" if present else "")
+                        + " — the account is probably signed out. Data will likely be incomplete.")
+            return ""
         else:
             logger.info("User.plist not found! User might be logged out from Snapchat. Data will likely be incomplete.")
             return ""
@@ -686,6 +708,24 @@ def getFriendsPlist(group_plist):
     return df_friends, df_group
 
 
+def displaymetadata_name(blob, user_id):
+    """The display name in a ``snapchatters__displaymetadata`` document, in the parser's cp1252
+    character-reference form (see ``contacts_report.text_html``).
+
+    Read as a FlatBuffers root-table field, self-checked against the row's user id
+    (``scripts/data/flatbuffers_doc``). The fixed byte offset the parser used before is kept only
+    as the fallback for a document the self-check rejects, and is logged when it is what answered.
+    """
+    data = bytes(blob)
+    name = flatbuffers_doc.displaymetadata_name(data, user_id)
+    if not name:
+        end = data.find(bytes(1), 56)
+        name = data[56:end if end >= 0 else None].decode()
+        logger.debug(f"displaymetadata document for {user_id} failed the FlatBuffers self-check; "
+                     "display name read at the fixed byte offset instead")
+    return name.encode("cp1252", "xmlcharrefreplace").decode("cp1252")   # Display Emojis
+
+
 def getFriendsPrimary_DisplayMetadata(primary, arroyo):
     logger.info("")
     logger.info(f"Could not get friends from default location, trying from third location {ntpath.basename(primary)}(DisplayMetadata) and {ntpath.basename(arroyo)} (EXPERIMENTAL)")
@@ -701,19 +741,8 @@ def getFriendsPrimary_DisplayMetadata(primary, arroyo):
 
         for index, row in df_friends.iterrows():
             try:
-                data = row["Display Name"]
-                counter = 0
-                for i in data[56:]:
-                    if i == 0:
-                        break
-                    else:
-                        counter += 1
-                slut = 56 + counter
-                namn = data[56:slut]
-                namn = namn.decode()
-                namn = namn.encode('cp1252', 'xmlcharrefreplace')  # Display Emojis
-                namn = namn.decode('cp1252')
-                df_friends.loc[index, "Display Name"] = namn
+                df_friends.loc[index, "Display Name"] = displaymetadata_name(row["Display Name"],
+                                                                             row["User ID"])
             except Exception as Error:
                 df_friends.loc[index, "Display Name"] = ""
                 logger.error(f"Could not find Display name for user {row['User ID']}, {Error}")
@@ -1847,18 +1876,7 @@ def getLocalUserDisplayname(friends_df, primaryDoc):
     df, _wal_info = sqlite_open.read_sql(primaryDoc, messagesQuery)
     for index, row in df.iterrows():
         try:
-            data = row["Display Name"]
-            counter = 0
-            for i in data[56:]:
-                if i == 0:
-                    break
-                else:
-                    counter += 1
-            slut = 56 + counter
-            namn = data[56:slut]
-            namn = namn.decode()
-            namn = namn.encode('cp1252', 'xmlcharrefreplace')  # Display Emojis
-            namn = namn.decode('cp1252')
+            namn = displaymetadata_name(row["Display Name"], row["User ID"])
             df.loc[index, "Display Name"] = namn
             friends_df.loc[friends_df["User ID"] == row['User ID'], "Display name"] = namn
         except Exception as Error:
@@ -2062,10 +2080,13 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         # rather than globbing for them itself: one place decides where an artifact lives, and it is
         # this function that has to find it anyway.
         client_enc = glob.glob(snapchatFolder + "/Documents/ClientEncryptionService.plist")
+        gallery_search_db = (glob.glob(snapchatFolder + f"/Documents/gallery_search/*/{uuid_sha256}/search.sqlite3")
+                             or glob.glob(snapchatFolder + f"/Documents/gallery_search/*/{user_scoped_id}/search.sqlite3"))
         source_artifacts = {
             "arroyo": arroyo[0] if arroyo else "",
             "scdb": scdb,
             "gallery_encrypteddb": galleryEncrypteddb,
+            "gallery_search": gallery_search_db[0] if gallery_search_db else "",
             "cache_controller": cacheController[0] if cacheController else "",
             "contentmanager": contentmanager,
             "primary_docobjects": primaryDoc[0] if primaryDoc else "",
@@ -2321,7 +2342,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                      report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
         "ct": dict(friends_df=friends_df, outdir=report_dir + "/Contacts", owner_user_id=uuid,
                    owner_username=current_username, friends_source=friends_source, tz=tz,
-                   report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
+                   report_dir=report_dir, primary=primary_doc, identifiers=identifiers,
+                   account=getAccount(userPlist)),
         "mem": dict(app_or_root=snapchatFolder, keychain=keychain_file,
                     outdir=report_dir + "/Memories", padding=padding, tz=tz, src_root=src_root,
                     tile_server=tile_server),

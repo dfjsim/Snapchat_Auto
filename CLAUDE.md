@@ -15,6 +15,9 @@ Memories / My Eyes Only.
   page each) and `scripts/contacts_report.py` (one table of contacts; also owns the contact/group
   normalizers and `text_html`, which the conversations report imports).
 - iOS Memories / MEO decryption: `scripts/DecryptLocalMemories_iOS.py`.
+- iOS Memories search index: `scripts/gallery_search.py` — the app's own `gallery_search/…/
+  search.sqlite3` (plain SQLite, no keychain: place names, a local date, the app's tags per snap),
+  joined onto the Memories report by snap id. Everything in it is app-generated and shown as stored.
 - iOS `cache_controller.db` report: `scripts/cache_controller_report.py` (one row per cached file,
   linked to on-disk cache files and two-way to the Memories / Conversations reports). Covers the
   `com.snap.file_manager_*_SCContent_*` folders — i.e. exactly what that database indexes.
@@ -52,7 +55,11 @@ Memories / My Eyes Only.
   handed back as the string it is; and `device_fs.py`, the device filesystem's own record of each
   extracted file — all four timestamps, owner, mode, inode, protection class — read from a UFED
   archive's `metadata.msgpack` (nanoseconds; `msgpack` is a dependency for it) or the ZIP entry's
-  `UT` field, into one shape every report renders the same way).
+  `UT` field, into one shape every report renders the same way; `tsaf.py`, the keyed reader for
+  Snap's TSAF containers — `user.plist` and `ClientEncryptionService.plist` are not plists — whose
+  one rule is that a value must *immediately* follow its key; and `flatbuffers_doc.py`, a root-table
+  reader for the `*.docobjects` FlatBuffers documents that hands back a name only when the document's
+  slot 0 is the user id the caller already knows).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app
@@ -130,6 +137,11 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   selection against, plus the `snapchat_auto_selection` API and the
   `--describe-selection-api` handshake to run before writing one. Written for "an external tool"
   generally; no specific product is named.
+- [Related work: iLEAPP's Snapchat module](docs/related_ileapp.md) — what this tool adopted from
+  iLEAPP (the search index, orphan key rows, the FlatBuffers slot layout, the TSAF keyed read), the
+  `snapchatter` ≠ friends trap and how to recognise it, and where the two tools part ways on purpose.
+  **Credit iLEAPP** (Alexis Brignoni, MIT) in the module docstring and the report popover for anything
+  else taken from it.
 - [Partial reports](docs/report_partial.md) — the selection file the examiner saves (schema, the
   `.json`/`.js` forms and why renaming one to the other fails silently, `--install-selection`), the
   source fingerprints + tool-version gate in `scripts/source_fingerprint.py` that decide whether a

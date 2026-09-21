@@ -153,6 +153,10 @@ def extract(file_name, mode, dest="."):
         "gallery_data_object",
         "scdb-27.sqlite",
         "gallery_encrypted_db",
+        # The app's own search index over Memories (Documents/gallery_search/<n>/<userHash>/
+        # search.sqlite3): place names, a local date and the app's visual tags per snap, in
+        # plain SQLite - no keychain needed. See docs/related_ileapp.md.
+        "Documents/gallery_search",
         "app_group_plist_storage",
     ]
 

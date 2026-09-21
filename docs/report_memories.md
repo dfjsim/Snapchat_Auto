@@ -126,7 +126,7 @@ its count and disabled when it is empty (`_media_filter_options`):
 | completeness not verified | plaintext storage — no padding to check, no shard layout to measure |
 | no media recovered | nothing was decrypted or found; the metadata row is still evidence the Memory existed |
 
-### Geolocation is three states, not with/without
+### Geolocation is four states, not with/without
 
 **Geolocation** filters the index on `_geo_state`, which the index cell (`_geo_compact`) reads too —
 one function, so the filter and the cell cannot disagree about what a Memory has:
@@ -134,18 +134,58 @@ one function, so the filter and the cell cannot disagree about what a Memory has
 | option | means |
 |---|---|
 | coordinates recovered | a latitude/longitude came out of `snap_location_table` in the gallery database |
+| place name only (search index) | no coordinates, but the app's own search index names a place for this Memory — its reverse geocoding, as stored |
 | on the device, none recovered | `ZGALLERYSNAP.ZHASLOCATION` says the app recorded a location, but no coordinates were read for it |
 | no location | the app recorded none |
 
-The middle state is the reason this is not a two-way filter. Geolocation lives in the **encrypted**
-gallery database, so a run without the FFS keychain recovers none of it — and folding those Memories
-into "no location" would report *this tool's* gap as a fact about the device. Told apart, the same
-rows say something useful: there is a location here, and it is still to be had from the extraction.
-The options carry their counts and grey out when empty (`report_ui.counted_options`), so
-"coordinates recovered — 0" answers "why did that return nothing?" on the face of the control.
+The two middle states are the reason this is not a two-way filter. Geolocation lives in the
+**encrypted** gallery database, so a run without the FFS keychain recovers none of it — and folding
+those Memories into "no location" would report *this tool's* gap as a fact about the device. Told
+apart, the same rows say something useful: there is a location here, and it is still to be had from
+the extraction. The options carry their counts and grey out when empty (`report_ui.counted_options`),
+so "coordinates recovered — 0" answers "why did that return nothing?" on the face of the control.
 
-A **carved** Memory has no `ZGALLERYSNAP` row at all, so it can only read "no location": what that
-row would have said went with the row, rather than never having been on the device.
+A **carved** Memory has no `ZGALLERYSNAP` row at all, so it can only read "no location" or the search
+index's place: what that row would have said went with the row, rather than never having been on the
+device.
+
+### The app's search index — place names and a local date without the keychain
+
+`Documents/gallery_search/<n>/<userHash>/search.sqlite3` is the app's own FTS index over Memories,
+plain SQLite, **no keychain involved**. Per snap id it holds a local calendar date, time words
+(`afternoon`, `winter`), the app's reverse geocoding **down to street and postal code**, a place
+cluster, `Image` / `Video`, the caption and visual concept labels with their confidence.
+`scripts/gallery_search.py` reads it (both WAL views — on the newer devices a third of the rows are
+WAL-only) and `index()` joins the record onto each Memory by snap id as `m["search"]`. It is shown:
+
+* on the detail page, in its own section, every value as stored;
+* in the index row's collapsed block and in the search tokens, so "Rue …" or a caption finds the row;
+* in the timestamps list as *Search index date* — a string, never an instant, because the date
+  states no zone;
+* as the fourth Geolocation state above, and in the geolocation cell when there are no coordinates.
+
+Everything in it is app-generated and the popover (`gallery_search.SEARCH_INDEX_BASIS`) says so: it
+is what the app decided about the Memory, not an observation about the media. On the AFU test device
+(backup-class keychain, no `egocipher`) it is the only location the report can give. A snap the
+index knows but no reading of `scdb-27` lists becomes a RECOVERED row (*search index row with no
+Memory row*) — no corpus device has one, so that path is covered by tests only. Adopted from iLEAPP;
+see [related_ileapp.md](related_ileapp.md).
+
+### Recovered rows: key rows with no Memory row
+
+`gallery.encrypteddb` can hold a `snap_key_iv` row — and a `snap_location_table` /
+`snap_address_title` row — for a snap id that has no `ZGALLERYSNAP` row in either reading of
+`scdb-27`: a Memory the app no longer lists. `orphan_key_memories` turns each such row into a
+**RECOVERED** Memory (badge, `-wal` filter option *no Memory row (key row survives)*, header count),
+with its key (unwrapped when this account's persistedkey is at hand, else locked), coordinates and
+address, and empty value panels — the detail page says why they are empty (`ORPHAN_KEY_BASIS`).
+Skipped: a key row whose pair a listed Memory already holds (the same media object under another id;
+this covers the keys `adopt_media_object_keys` gives a MEO Memory). Listed, and naming the referrer:
+a row a listed Memory references through `ZMEDIAID` / `ZDUPLICATEDFROMSNAPID` under a *different*
+key — on the old-schema device, the My Eyes Only original of a duplicate that stayed in the gallery.
+`ZDUPLICATEDFROMSNAPID` is in the index's search tokens, so either id finds the other. Adopted from
+iLEAPP's "Key row with no Memory row"; the difference in rules is in
+[related_ileapp.md](related_ileapp.md).
 
 Poster frames are still extracted from partial video: what the cache holds starts at the beginning
 of the file, so the opening frames decode. For those files `generate_poster` skips the seek (a seek

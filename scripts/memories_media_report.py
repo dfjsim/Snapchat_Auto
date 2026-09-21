@@ -64,6 +64,7 @@ from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
 from scripts import offline_maps
+from scripts import gallery_search
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,8 @@ def find_profiles(app):
         uh = os.path.basename(os.path.dirname(scdb))
         gallery = glob.glob(os.path.join(base, "gallery_encrypted_db", "*", uh, "gallery.encrypteddb"))
         profiles.append({"userHash": uh, "scdb": scdb,
-                         "gallery": gallery[0] if gallery else None})
+                         "gallery": gallery[0] if gallery else None,
+                         "search": gallery_search.find(app, uh) or None})
     return profiles
 
 
@@ -603,6 +605,106 @@ def adopt_media_object_keys(memories, orphan_keys, persisted):
     return adopted
 
 
+ORPHAN_KEY_BASIS = (
+    "This snap id has a key row (snap_key_iv) in gallery.encrypteddb but NO ZGALLERYSNAP row in "
+    "scdb-27.sqlite3 — neither with the write-ahead log applied nor without it — so the app no "
+    "longer lists it as a Memory. Its key, and where the gallery database has them its coordinates "
+    "(snap_location_table) and address title (snap_address_title), survive and are shown. Nothing "
+    "else does: capture time, dimensions and album went with the row. Why the row is gone is not "
+    "established here — deletion, a move into My Eyes Only and a server re-sync leave the same "
+    "trace. A key row whose key a listed Memory references (ZMEDIAID / ZDUPLICATEDFROMSNAPID) or "
+    "shares is not listed again: that is the same media object under another id, and it is shown "
+    "on that Memory. Method after iLEAPP (Alexis Brignoni), scripts/artifacts/snapchat.py "
+    "('Key row with no Memory row').")
+
+METHOD_KEY_ROW = "gallery.encrypteddb key row with no Memory row"
+METHOD_SEARCH_INDEX = "search index row with no Memory row"
+
+
+def _bare_memory(snap_id, profile):
+    """The empty Memory dict — same shape as load_memories builds — for a snap with no scdb row.
+
+    Only the fields a caller then fills are ever set. Everything the missing row used to carry
+    (capture time, dimensions, album) stays empty rather than being invented.
+    """
+    return {
+        "snap_id": snap_id,
+        "user_hash": profile["userHash"],
+        "media_type": None, "format": "", "media_format": None,
+        "media_url": None, "overlay_url": None, "thumb_url": None,
+        "create_utc": "", "created_sort": 0,
+        "duration": None, "width": None, "height": None, "camera": "",
+        "has_location": False,
+        "times": {}, "entry_times": {}, "snap_other": {}, "entry_other": {},
+        "urls": {}, "ids": {},
+        "key": None, "iv": None, "is_meo": False, "key_wrapped": False, "key_source": None,
+        "media_refs": [],                                  # no row survives to reference one
+        "latitude": None, "longitude": None, "address": None,
+        "media_files": [],
+        "wal": sqlite_open.BOTH,
+        "prior_rows": [],
+    }
+
+
+def orphan_key_memories(profile, memories, orphan_keys, locations, addresses, persisted):
+    """Recovered Memory dicts for ``snap_key_iv`` rows that no Memory row or Memory key accounts
+    for — see :data:`ORPHAN_KEY_BASIS`. Returns ``{snap_id: memory}``.
+
+    ``orphan_keys`` is ``{snap_id: (key, iv, encrypted, wal mark)}`` for snaps with no
+    ``ZGALLERYSNAP`` row; ``locations`` / ``addresses`` are the gallery's rows for any snap id. A
+    key row is skipped when a listed Memory holds the same key pair — one media object, one row;
+    that covers a key a Memory adopted (``adopt_media_object_keys``), since it then IS that
+    Memory's key. A row a Memory merely references (``ZMEDIAID`` / ``ZDUPLICATEDFROMSNAPID``) under
+    a *different* key is listed, naming the Memory that references it: a differently keyed object
+    is a different record, and on the tested device it was the My Eyes Only original of a
+    duplicate that stayed in the gallery. A wrapped key is unwrapped when this account's
+    persistedkey is at hand and otherwise left locked, exactly as for a listed Memory.
+    """
+    referenced_by = {}
+    pairs = set()
+    for m in memories.values():
+        for ref in m.get("media_refs") or []:
+            referenced_by.setdefault(str(ref).upper(), []).append(m["snap_id"])
+        if m.get("key") and m.get("iv"):
+            pairs.add((bytes(m["key"]), bytes(m["iv"])))
+    listed = {str(k).upper() for k in memories}
+    out = {}
+    for sid, (key, iv, enc, mark) in orphan_keys.items():
+        sid_up = str(sid).upper()
+        if sid_up in listed:
+            continue
+        if key and iv and (bytes(key), bytes(iv)) in pairs:
+            continue
+        m = _bare_memory(sid_up, profile)
+        m["is_meo"] = enc == 1
+        use_key, use_iv = key, iv
+        if enc == 1:
+            use_key = use_iv = None
+            if persisted:
+                try:
+                    use_key, use_iv = unwrap_meo_key(persisted, key, iv)
+                except Exception as error:
+                    logger.debug(f"MEO unwrap of orphan key {sid} failed: {error}")
+        if use_key and use_iv and len(use_key) == 32 and len(use_iv) == 16:
+            m["key"], m["iv"], m["key_wal"] = use_key, use_iv, mark
+            if (bytes(use_key), bytes(use_iv)) in pairs:
+                continue                                   # the same media object, unwrapped
+        m["key_wrapped"] = bool(m["is_meo"] and not m["key"])
+        loc = locations.get(sid) or locations.get(sid_up)
+        if loc:
+            (lat, lon), loc_mark = loc
+            m["latitude"], m["longitude"], m["location_wal"] = lat, lon, loc_mark
+            m["has_location"] = True
+        addr = addresses.get(sid) or addresses.get(sid_up)
+        if addr:
+            m["address"] = addr
+        m["wal"] = mark
+        m["recovery"] = {"method": METHOD_KEY_ROW, "source": "gallery.encrypteddb snap_key_iv",
+                         "referenced_by": sorted(set(referenced_by.get(sid_up, [])))}
+        out[sid_up] = m
+    return out
+
+
 def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     """
     Return (memories, stats) for one profile.
@@ -760,6 +862,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
 
     # gallery.encrypteddb: keys (old schema) + geolocation + address (both schemas)
     orphan_keys = {}      # snap_id -> (key, iv, encrypted, wal mark) for snaps with no scdb row
+    orphan_locations = {}  # snap_id -> ((lat, lon), wal mark), same population
+    orphan_addresses = {}  # snap_id -> address title, same population
     gdir = os.path.join(workdir, profile["userHash"])
     gconn = decrypt_gallery_db(profile["gallery"], egocipher, gdir)
     # the same database without its -wal: keys and locations the log has since deleted
@@ -800,16 +904,28 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                     memories[sid]["longitude"] = lon
                     memories[sid]["location_wal"] = mark
                     stats["locations"] += 1
+                elif sid not in memories:
+                    # a location for a snap with no Memory row: kept for orphan_key_memories
+                    orphan_locations.setdefault(sid, ((lat, lon), mark))
         if "snap_address_title" in tables:
             for (sid, title), _mark in gallery_rows(gconn, gconn_nowal, "snap_address_title",
                                                     "snap_id,address_title"):
                 if sid in memories and not memories[sid].get("address"):
                     memories[sid]["address"] = _clean_text(title)
+                elif sid not in memories:
+                    orphan_addresses.setdefault(sid, _clean_text(title))
         gconn.close()
     if gconn_nowal is not None:
         gconn_nowal.close()
 
     stats["adopted_keys"] = adopt_media_object_keys(memories, orphan_keys, persisted)
+    # Key rows nothing accounts for: Memories the app no longer lists, whose key and location
+    # survive in the gallery database. Listed as recovered rows, never as live ones.
+    recovered = orphan_key_memories(profile, memories, orphan_keys, orphan_locations,
+                                    orphan_addresses, persisted)
+    stats["orphan_key_rows"] = len(recovered)
+    stats["locations"] += sum(1 for m in recovered.values() if m["latitude"] is not None)
+    memories.update(recovered)
 
     # Counted from the final state, not from how many unwrap calls ran: on the new schema a MEO
     # memory's wrapped key appears in BOTH ZGALLERYSNAP.ZENCRYPTION and gallery.encrypteddb's
@@ -984,24 +1100,10 @@ def _carved_memory(snap_id, profile, hit, timefmt):
     carry (capture time, dimensions, album, geolocation) stays empty rather than being invented.
     """
     key, iv, is_meo, provenance, _ext = hit
-    return {
-        "snap_id": snap_id,
-        "user_hash": profile["userHash"],
-        "media_type": None, "format": "", "media_format": None,
-        "media_url": None, "overlay_url": None, "thumb_url": None,
-        "create_utc": "", "created_sort": 0,
-        "duration": None, "width": None, "height": None, "camera": "",
-        "has_location": False,
-        "times": {}, "entry_times": {}, "snap_other": {}, "entry_other": {},
-        "urls": {}, "ids": {},
-        "key": key, "iv": iv, "is_meo": is_meo, "key_wrapped": False, "key_source": None,
-        "media_refs": [],                                  # no row survives to reference one
-        "latitude": None, "longitude": None, "address": None,
-        "media_files": [],
-        "wal": sqlite_open.CARVED,
-        "carved_from": provenance,
-        "prior_rows": [],
-    }
+    m = _bare_memory(snap_id, profile)
+    m.update({"key": key, "iv": iv, "is_meo": is_meo,
+              "wal": sqlite_open.CARVED, "carved_from": provenance})
+    return m
 
 
 # split SCContent media: "<cache_key>_<start>-<end>" byte-range parts, plus the initial
@@ -2037,9 +2139,14 @@ _GEO_FILTER_HINT = (
     "for this Memory, but no coordinates were read for it. That is usually a missing keychain, since "
     "the geolocation lives in the encrypted gallery database — so it is worth knowing the location is "
     "on the device and still to be had.\n\n"
+    "• «place name only (search index)» — no coordinates, but the app's own search index "
+    "(gallery_search/search.sqlite3, plain SQLite, no keychain) names a place for this Memory: its "
+    "reverse geocoding, down to street level, as stored. On a device whose keychain is backup-class "
+    "this is the only location the report can give.\n\n"
     "• «no location» — the app recorded none. Nothing is missing here.\n\n"
-    "A carved Memory has no ZGALLERYSNAP row at all, so it can only read «no location»: what that row "
-    "would have said went with the row, rather than never having been on the device.")
+    "A carved Memory has no ZGALLERYSNAP row at all, so it can only read «no location» or the "
+    "search index's place: what that row would have said went with the row, rather than never "
+    "having been on the device.")
 
 
 _MEDIA_STATE_HINT = (
@@ -2173,6 +2280,46 @@ def _grid(pairs):
                    for k, v in pairs if v not in (None, ""))
 
 
+def _search_place(m):
+    """The place the app's search index gives this Memory — the cluster name, else the first
+    location tag — or ``""``."""
+    rec = m.get("search") or {}
+    return rec.get("place_cluster") or (rec["places"][0] if rec.get("places") else "")
+
+
+def _search_place_html(m):
+    """The search-index place, labelled as such, for wherever no coordinates can be shown."""
+    place = _search_place(m)
+    if not place:
+        return ""
+    return (f' <span class="idxplace" title="a place name from the app\'s own search index '
+            f'(gallery_search/search.sqlite3): the app\'s reverse geocoding, not coordinates">'
+            f'{html.escape(place)} <span class="muted">(search index)</span></span>')
+
+
+def _search_grid(m):
+    """The Memory's search-index record as a key/value grid, every value as stored."""
+    rec = m.get("search")
+    if not rec:
+        return "<div class='v muted'>not in the app's search index</div>"
+    pairs = [("Date (local, no zone)", rec.get("date")),
+             ("Time words", ", ".join(rec.get("time_words") or [])),
+             ("Places", ", ".join(rec.get("places") or [])),
+             ("Place cluster", rec.get("place_cluster")),
+             ("Kind", rec.get("kind")),
+             ("Caption", rec.get("caption")),
+             ("Visual tags", ", ".join(rec.get("visual_tags") or [])),
+             ("Visual concepts (confidence)",
+              ", ".join(f"{label} ({conf:.3f})" if conf is not None else label
+                        for label, conf in rec.get("concepts") or [])),
+             ("Visual cluster", rec.get("visual_cluster")),
+             ("Language", rec.get("language")),
+             ("Tag version", rec.get("tag_version"))]
+    if rec.get("wal") and rec["wal"] != sqlite_open.BOTH:
+        pairs.append(("Reading", f"{rec['wal']} — " + sqlite_open.MARKER_HELP.get(rec["wal"], "")))
+    return _grid(pairs)
+
+
 def _geo_html(m, keychain_available):
     """Location line with OpenStreetMap + Google Maps links on the same line."""
     if m["latitude"] is not None:
@@ -2184,7 +2331,10 @@ def _geo_html(m, keychain_available):
                 f'target="_blank">Google Maps</a>{addr}')
     if m["has_location"]:
         return ('<span class="muted">recorded on device — full-filesystem keychain required</span>'
-                if not keychain_available else '<span class="muted">flagged but not found</span>')
+                if not keychain_available else '<span class="muted">flagged but not found</span>'
+                ) + _search_place_html(m)
+    if _search_place(m):
+        return '<span class="muted">no coordinates</span>' + _search_place_html(m)
     return "&mdash;"
 
 
@@ -2329,6 +2479,13 @@ def _memory_times(m):
     for col, value in (m.get("entry_times") or {}).items():
         if value:
             out.append((ENTRY_TIME_LABELS.get(col, col), value, f"scdb-27 › ZGALLERYENTRY.{col}"))
+    if (m.get("search") or {}).get("date"):
+        # a calendar date the app wrote into its search index — local, and with no zone stated,
+        # so it is a string here, never an instant
+        rec = m["search"]
+        shown = rec["date"] + (f" ({', '.join(rec['time_words'])})" if rec.get("time_words") else "")
+        out.append(("Search index date", shown,
+                    "gallery_search › snap_time_tag_table — a local date, no zone"))
     seen = set()
     for f in m.get("media_files") or []:
         if f.get("generated"):                             # a poster frame is ours, not evidence
@@ -2454,7 +2611,8 @@ TIME_FILTER_HINT = (
 MORE_IDS_HINT = (
     "Everything the search box matches for this Memory that the row has no column for: its CDN URLs "
     "(each named by the scdb-27 column it came from), the AES-256 key and IV its media is encrypted "
-    "with — in hex, exactly as another tool would print them — and the fields found inside the media "
+    "with — in hex, exactly as another tool would print them — the app's search-index tags for it "
+    "(place names, caption, visual concepts) — and the fields found inside the media "
     "files (camera make and model, software, GPS). Typing any part of one of these into Search finds "
     "this row; this block is where to confirm what matched.")
 
@@ -2476,6 +2634,18 @@ def _index_more(m):
     elif m.get("key_wrapped"):
         pairs.append(("AES-256 key", "wrapped — My Eyes Only, no persistedkey for this account",
                       ""))
+    rec = m.get("search") or {}
+    if rec.get("places"):
+        pairs.append(("Places (search index)", ", ".join(rec["places"]),
+                      "gallery_search › snap_tag_table location_tag"))
+    if rec.get("caption"):
+        pairs.append(("Caption (search index)", rec["caption"],
+                      "gallery_search › snap_description_table"))
+    if rec.get("concepts"):
+        pairs.append(("Visual concepts (search index)",
+                      ", ".join(f"{label} ({conf:.3f})" if conf is not None else label
+                                for label, conf in rec["concepts"]),
+                      "gallery_search › snap_visual_tag_conf_table"))
     for f in m.get("media_files") or []:
         if f.get("generated"):
             continue
@@ -2490,7 +2660,7 @@ def _index_more(m):
         return ""
     grid = "".join(f"<div class='k'>{html.escape(k)}</div><div class='v'>{html.escape(str(v))}</div>"
                    f"<div class='s'>{html.escape(src)}</div>" for k, v, src in pairs)
-    return (f"<details class='moreids'><summary>CDN URLs, AES key / IV, "
+    return (f"<details class='moreids'><summary>CDN URLs, AES key / IV, search-index tags, "
             f"embedded metadata — also matched by Search{report_ui.info_icon(MORE_IDS_HINT)}"
             f"</summary><div class='grid tsgrid'>{grid}</div></details>")
 
@@ -3183,6 +3353,22 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                 f"cache_controller claim), the AES key (carved from "
                 f"{html.escape(str(m.get('carved_from') or 'a superseded -wal frame'))}) and the "
                 f"media it decrypts.{_info(CARVED_KEY_BASIS)}</div>")
+        elif m.get("recovery"):
+            method = m["recovery"]["method"]
+            basis = (ORPHAN_KEY_BASIS if method == METHOD_KEY_ROW
+                     else gallery_search.SEARCH_INDEX_BASIS)
+            parts.append(
+                f"<div class='warn'>Recovered Memory — {html.escape(method)}. <b>No ZGALLERYSNAP "
+                f"row for this snap survives in scdb-27</b>, with or without its write-ahead log, "
+                f"so the value panels below are empty: capture time, dimensions and album are gone "
+                f"with the row. What is recovered is what "
+                f"{html.escape(m['recovery']['source'])} still holds for this snap id."
+                + (" Referenced (ZMEDIAID / ZDUPLICATEDFROMSNAPID) by the listed Memory/Memories "
+                   + ", ".join(f"<span class='snapid'>{html.escape(r)}</span>"
+                               for r in m["recovery"]["referenced_by"])
+                   + " under a different key."
+                   if m["recovery"].get("referenced_by") else "")
+                + f"{_info(basis)}</div>")
         parts.append(f"<div class='cols2'>"
                      f"<div class='c'><div class='sect'>ZGALLERYSNAP values</div>"
                      f"<div class='grid'>{_snap_values_grid(m)}</div></div>"
@@ -3190,6 +3376,9 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                      f"<div class='grid'>{_entry_values_grid(m)}</div></div></div>")
         parts.append(f"<div class='sect'>CDN URLs (scdb-27)</div>"
                      f"<div class='grid'>{_url_grid(m)}</div>")
+        parts.append(f"<div class='sect'>Search index — the app's own tags "
+                     f"(gallery_search/search.sqlite3){_info(gallery_search.SEARCH_INDEX_BASIS)}"
+                     f"</div><div class='grid'>{_search_grid(m)}</div>")
         if not meta_shared:
             parts.append(f"<div class='sect'>Metadata</div><div class='grid'>{meta[idx]}</div>")
         if not loc_shared:
@@ -3364,6 +3553,8 @@ def _geo_state(m):
     """
     if m.get("latitude") is not None:
         return "yes"
+    if _search_place(m):
+        return "indexed"
     return "ondevice" if m.get("has_location") else "no"
 
 
@@ -3379,8 +3570,13 @@ def _geo_compact(m):
                 f'<a href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}" '
                 f'target="_blank">OSM</a> &middot; '
                 f'<a href="https://www.google.com/maps?q={lat},{lon}" target="_blank">Google</a>')
+    if state == "indexed":
+        return (f'<span class="idxplace" title="place name from the app\'s search index, no '
+                f'coordinates">{html.escape(_search_place(m))}</span>'
+                '<br><span class="muted">search index</span>')
     if state == "ondevice":
-        return '<span class="muted">on-device</span>'
+        return '<span class="muted">on-device</span>' + (
+            '<br>' + _search_place_html(m) if _search_place(m) else '')
     return '<span class="muted">—</span>'
 
 
@@ -3510,9 +3706,19 @@ def _wal_summary_html(memories):
     gone = sum(1 for m in memories.values() if m.get("wal") == sqlite_open.MAIN_ONLY)
     carved = sum(1 for m in memories.values() if m.get("wal") == sqlite_open.CARVED)
     changed = sum(1 for m in memories.values() if m.get("prior_rows"))
-    if not gone and not changed and not carved:
+    keyrows = sum(1 for m in memories.values()
+                  if (m.get("recovery") or {}).get("method") == METHOD_KEY_ROW)
+    indexed = sum(1 for m in memories.values()
+                  if (m.get("recovery") or {}).get("method") == METHOD_SEARCH_INDEX)
+    if not gone and not changed and not carved and not keyrows and not indexed:
         return ""
     bits = []
+    if keyrows:
+        bits.append(f"<b>{keyrows}</b> with no Memory row, recovered from a key row in "
+                    f"gallery.encrypteddb{_info(ORPHAN_KEY_BASIS)}")
+    if indexed:
+        bits.append(f"<b>{indexed}</b> with no Memory row, recovered from the app's search index "
+                    f"alone{_info(gallery_search.SEARCH_INDEX_BASIS)}")
     if gone:
         bits.append(f"<b>{gone}</b> deleted since scdb-27's last checkpoint (recovered)")
     if changed:
@@ -3540,6 +3746,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     total = len(memories)
     linked = sum(1 for m in memories.values() if m["media_files"])
     located = sum(1 for m in memories.values() if m["latitude"] is not None)
+    placed = sum(1 for m in memories.values() if _geo_state(m) == "indexed")
     n_partial = sum(1 for m in memories.values()
                     if any(f.get("complete") is False for f in m["media_files"]))
 
@@ -3637,10 +3844,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             gone = m.get("wal") == sqlite_open.MAIN_ONLY
             carved = m.get("wal") == sqlite_open.CARVED
             changed = bool(m.get("prior_rows"))
+            recovery = m.get("recovery") or {}
             if carved:
                 kind += ("<div class='walcarve' title='no scdb row survives — key carved from a "
                          "superseded -wal frame and proved by decrypting the cached media'>"
                          "CARVED</div>")
+            elif recovery:
+                kind += (f"<div class='walrec' title='no scdb row survives — recovered from "
+                         f"{html.escape(recovery['source'])}: {html.escape(recovery['method'])}'>"
+                         "RECOVERED</div>")
             elif gone:
                 kind += "<div class='walgone' title='deleted since the last checkpoint'>DELETED</div>"
             elif changed:
@@ -3671,7 +3883,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # `urls` holds every CDN URL of the memory (media / overlay / thumbnail, download and
             # redirect), so the index is searchable by a full or partial URL — the cache tokens
             # alone only match the last path segment.
+            # media_refs adds ZDUPLICATEDFROMSNAPID, so the original a duplicate points at — which
+            # may survive only as a recovered key row — is findable from either end
             searchable = ([zsnap, str(zentry), str(zmedia), str(uid), md5, sha, m["create_utc"]]
+                          + [str(r) for r in m.get("media_refs") or []]
                           + list(tokens) + list(dict.fromkeys(m["urls"].values())))
             # The AES key and IV in hex, as another tool prints them, so a key seen elsewhere finds
             # its Memory here; and what the media files say about themselves (camera, software, GPS,
@@ -3690,6 +3905,17 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             if carved:
                 searchable.append("carved deleted recovered wal free space no scdb row "
                                   + str(m.get("carved_from") or ""))
+            if recovery:
+                searchable.append("recovered deleted no scdb row " + recovery["method"])
+                searchable += list(recovery.get("referenced_by") or [])
+            if m.get("search"):
+                rec = m["search"]
+                searchable += ([rec.get("date") or "", rec.get("caption") or "",
+                                rec.get("place_cluster") or "", rec.get("kind") or ""]
+                               + list(rec.get("places") or []) + list(rec.get("time_words") or [])
+                               + [label for label, _conf in rec.get("concepts") or []])
+                if _search_place(m):
+                    searchable.append("search index place")
             if changed:
                 searchable.append("edited changed rewritten since checkpoint wal")
             if m["latitude"] is not None:
@@ -3708,6 +3934,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "geo": _geo_state(m),
                  "meta": "y" if has_meta else "n",
                  "wal": ("carved" if carved else
+                         "keyrow" if recovery.get("method") == METHOD_KEY_ROW else
+                         "index" if recovery else
                          "gone" if gone else ("changed" if changed else "")),
                  # Every timestamp this Memory has, as the wall clock the report displays (see
                  # report_ui.ts_key) — including the columns only the detail shows, which is the
@@ -3736,6 +3964,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     meo_opts = report_ui.counted_options((("y", "only My Eyes Only"), ("n", "exclude My Eyes Only")),
                                          counts.get("meo", {}))
     geo_opts = report_ui.counted_options((("yes", "coordinates recovered"),
+                                          ("indexed", "place name only (search index)"),
                                           ("ondevice", "on the device, none recovered"),
                                           ("no", "no location")),
                                          counts.get("geo", {}))
@@ -3785,6 +4014,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2 .walrec{background:#5e2d1d;color:#fff;border:1px solid #44120a;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .idxplace{color:#1f5e2e}
  .vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5,.vcells>.vc.c6{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
  .vcells>.vc.c4{color:#33367a} .vcells>.vc.c4 div{margin:1px 0}
@@ -3833,7 +4065,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<script>{report_ui.VTABLE_JS}</script></head><body>'
            f'<header><h1>Snapchat Memories — index</h1>'
            f'<div class="sum">{n_users} user profile(s) &middot; {total} memories &middot; {linked} with '
-           f'recovered media &middot; {located} geolocated &middot; {len(groups)} group(s) &middot; '
+           f'recovered media &middot; {located} geolocated'
+           + (f' &middot; {placed} with a place name only{_info(gallery_search.SEARCH_INDEX_BASIS)}'
+              if placed else '')
+           + f' &middot; {len(groups)} group(s) &middot; '
            + (f'<b>{n_partial}</b> with incomplete media &middot; ' if n_partial else '')
            + f'times in <b>{html.escape(tz_label)}</b></div>'
            + figures
@@ -3865,7 +4100,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'-wal <select id="wal" onchange="flt()"><option value="">any</option>'
            f'<option value="gone">deleted since the checkpoint</option>'
            f'<option value="changed">rewritten since the checkpoint</option>'
-           f'<option value="carved">deleted outright (key carved)</option></select></label>'
+           f'<option value="carved">deleted outright (key carved)</option>'
+           f'<option value="keyrow">no Memory row (key row survives)</option>'
+           f'<option value="index">no Memory row (search index only)</option></select></label>'
            + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
            + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
            f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
@@ -4043,6 +4280,39 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
             logger.info(f"    scdb-27 -wal: {stats['wal_deleted']} memory row(s) exist only "
                         f"without the -wal (deleted since the last checkpoint), "
                         f"{stats['wal_changed']} rewritten (both versions kept)")
+        if stats.get("orphan_key_rows"):
+            logger.warning(f"    RECOVERED {stats['orphan_key_rows']} Memory/Memories for profile "
+                           f"{who} from gallery.encrypteddb key rows with no Memory row: the app no "
+                           f"longer lists them; their key and, where recorded, coordinates and "
+                           f"address survive")
+        # The app's own search index over Memories, joined by snap id: place names, a local date and
+        # the app's tags per Memory, from a plain SQLite file that needs no keychain.
+        search = gallery_search.load(p.get("search"), workdir) if p.get("search") else {}
+        if p.get("search"):
+            tagged = placed = 0
+            for sid, m in mems.items():
+                rec = search.get(str(sid).upper())
+                if rec:
+                    m["search"] = rec
+                    tagged += 1
+                    placed += bool(rec.get("places") or rec.get("place_cluster"))
+            unlisted = {sid: rec for sid, rec in search.items()
+                        if sid not in {str(k).upper() for k in mems}}
+            logger.info(f"    search index: {tagged} of {len(mems)} Memories carry the app's tags "
+                        f"({placed} with a place name); {len(search)} snap(s) indexed"
+                        + (f", {len(unlisted)} with no Memory row" if unlisted else ""))
+            for sid, rec in unlisted.items():
+                # a snap the app indexed but no longer lists: recovered from the index alone
+                m = _bare_memory(sid, p)
+                m["search"] = rec
+                m["wal"] = rec.get("wal") or sqlite_open.BOTH
+                m["recovery"] = {"method": METHOD_SEARCH_INDEX,
+                                 "source": "gallery_search/search.sqlite3"}
+                mems[sid] = m
+            if unlisted:
+                logger.warning(f"    RECOVERED {len(unlisted)} Memory/Memories for profile {who} "
+                               f"from the search index alone: the app indexed them but no Memory "
+                               f"row survives in either reading of scdb-27")
         all_memories.update(mems)
         # Memories the app has deleted outright: no row in either reading, but the cached media and
         # the key can both still be on the device. Proven by decryption, never by proximity.

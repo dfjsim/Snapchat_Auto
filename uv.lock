@@ -174,9 +174,9 @@ wheels = [
 
 [[package]]
 name = "nuitka"
-version = "4.2.1"
+version = "4.2.2"
 source = { url = "https://github.com/Nuitka/Nuitka/archive/main.zip" }
-sdist = { hash = "sha256:0861fcded3699b4e16e2ab67341b304a9aeec014ebdc11775b89b3ef66aada4b" }
+sdist = { hash = "sha256:a65a9f59ca69f7c5df0f0af1adf5e793c79dadb2a6338330b82bef63d770bd0c" }
 
 [package.metadata]
 requires-dist = [
@@ -449,7 +449,7 @@ wheels = [
 
 [[package]]
 name = "snapchat-auto"
-version = "1.6.2b1+build.20260916"
+version = "1.7.0b1+build.20260920"
 source = { editable = "." }
 dependencies = [
     { name = "blackboxprotobuf" },

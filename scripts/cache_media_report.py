@@ -54,6 +54,7 @@ from scripts.data import sqlite_open
 from scripts.data import sniff
 from scripts.data import media_meta
 from scripts.data import device_fs
+from scripts.data import tsaf
 from scripts.memories_media_report import (
     manifest_key, load_fs_records,
     find_app_container, index_sccontent, device_path, load_path_manifest, make_time_formatter,
@@ -113,10 +114,8 @@ _IMAGE_EXTS = ("jpg", "png", "webp", "gif")
 # --------------------------------------------------------------------------- key material
 
 # Documents/ClientEncryptionService.plist is a Snap **TSAF container**, not a plist despite the
-# name — plistlib.loads() raises "Invalid file" on it (header "TSAF\x03\x00\x04\x00"). The layout
-# is a field-name string followed by its value string, so the key is read by locating the markers
-# and taking the next printable run after each.
-_ASCII_RUN_RE = re.compile(rb"[ -~]{4,}")
+# name — plistlib.loads() raises "Invalid file" on it. scripts/data/tsaf.py reads its keyed
+# fields; the same reader serves Documents/user.plist.
 
 CLIENT_KEY_BASIS = (
     "The key and IV for sccache.gallery-stories-snap.data come from "
@@ -150,19 +149,10 @@ def read_client_encryption(app):
         out["note"] = f"could not be read: {error}"
         return out
 
-    runs = [m.group(0) for m in _ASCII_RUN_RE.finditer(raw)]
-    def after(marker, length):
-        """The first printable run following ``marker`` whose length matches."""
-        for i, run in enumerate(runs):
-            if run == marker:
-                for candidate in runs[i + 1:i + 4]:
-                    if len(candidate) == length:
-                        return candidate
-        return None
-
-    key_b64 = after(b"encryption_key", 44)                     # 32 bytes base64-encoded
-    iv_b64 = after(b"initialization_vector", 24)               # 16 bytes base64-encoded
-    ident = after(b"identifier", 36)
+    values = tsaf.account(raw)
+    key_b64 = values.get("encryption_key")                     # 32 bytes base64-encoded
+    iv_b64 = values.get("initialization_vector")               # 16 bytes base64-encoded
+    ident = values.get("identifier", "")
     try:
         key = base64.b64decode(key_b64) if key_b64 else None
         iv = base64.b64decode(iv_b64) if iv_b64 else None
@@ -174,7 +164,7 @@ def read_client_encryption(app):
                        "did not decode to 32 and 16 bytes, so it cannot be used")
         return out
     out["key"], out["iv"] = key, iv
-    out["identifier"] = (ident or b"").decode("ascii", "replace")
+    out["identifier"] = ident
     out["note"] = ("a 32-byte AES key and 16-byte fixed IV were recovered (values withheld); "
                    "no keychain was required")
     return out
@@ -613,6 +603,12 @@ def parse_crashstate(path):
         "sessionIdLastLaunch": "session id of the previous launch",
     }
     return [(f"{k} ({labels[k]})" if k in labels else k, v) for k, v in (data or {}).items()]
+
+
+# The printable runs of a TSAF cache entry, in order. This stays a strings view rather than the
+# keyed read (scripts/data/tsaf.py) because a cache entry's value is usually a protobuf blob, and
+# the names and URLs inside that blob are what an examiner wants to see of it.
+_ASCII_RUN_RE = re.compile(rb"[ -~]{4,}")
 
 
 def tsaf_fields(raw):

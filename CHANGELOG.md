@@ -6,6 +6,61 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.7.0-beta.1] — 2026-09-20
+
+Four methods adopted from iLEAPP's iOS Snapchat module (Alexis Brignoni, MIT), credited where
+implemented and in the report popovers; the comparison, and where the two tools part ways on
+purpose, is in [docs/related_ileapp.md](docs/related_ileapp.md).
+
+### Added
+- **The app's Memories search index** (`scripts/gallery_search.py`; `Documents/gallery_search`
+  is now extracted and fingerprinted). Plain SQLite, no keychain: per snap, a local calendar
+  date, time words, the app's reverse geocoding **down to street and postal code**, a place
+  cluster, `Image` / `Video`, the caption and the app's visual labels with their confidence. Joined
+  onto the Memories report by snap id and shown as stored — its own section on the detail page,
+  the index row's collapsed block and search tokens, a *Search index date* row (a string, never an
+  instant), and a fourth Geolocation state, **place name only (search index)**, for a Memory with
+  no coordinates. On a device whose keychain is backup-class it is the only location the report
+  can give. Read with and without its `-wal`; a snap indexed since the checkpoint is marked.
+- **Key rows with no Memory row** (`orphan_key_memories`). A `gallery.encrypteddb` `snap_key_iv`
+  row whose snap id no reading of `scdb-27` lists is a Memory the app no longer shows; it is now a
+  **RECOVERED** row with its key (unwrapped when the persistedkey is at hand), coordinates and
+  address title, its own `-wal` filter option and a detail page that says why its panels are empty.
+  A row whose key a listed Memory already holds is the same media object and is not listed twice;
+  one a Memory references under a *different* key is, and names the referrer.
+  `ZDUPLICATEDFROMSNAPID` joins the index's search tokens so either id finds the other.
+- **The Snapchatters that are not contacts** (`load_snapchatters`, `_snapchatters_section`). The
+  `snapchatter` table of `primary.docobjects` is the app's cache of every Snapchatter it has
+  rendered; on the old-schema test device all but a handful of its rows were Quick Add suggestions.
+  The Contacts report lists them apart in a collapsed table — display name from the FlatBuffers
+  document, the three username fields, user id and *why cached* (Quick Add suggestion when a
+  `snapchatters__displaysuggestion` page names the id; otherwise the docobjects table that does, as
+  stored) — with no anchors, no selection and no place in a partial report. The run log states the
+  split.
+- **All three username fields** on every contact — username, mutable username, legacy username,
+  each with its source table — and a badge when the mutable username differs from the username
+  (`MUTABLE_NOTE`: what it adds is not established; the two were equal on every tested row).
+- **The owner's `user.plist` values** on the device owner's row: username, user id, laguna id and
+  the client-encryption identifier / key / IV, as stored. A device carries **two** client-encryption
+  records, and only the `ClientEncryptionService.plist` one opens anything: every block-aligned file
+  of all four test extractions was tested against the `user.plist` key by the padding of its last
+  block — which identifies a CBC key whatever the IV or framing — and no store matched, while the
+  same test picks out exactly the `sccache.gallery-stories-snap.data` entries under the
+  `ClientEncryptionService` key. `ACCOUNT_NOTE` carries that caveat so the row is not read as a key
+  to try; the method is in `docs/snapchat_ios_cache_media.md`.
+- `scripts/data/tsaf.py` — one keyed reader for Snap's TSAF containers (`user.plist`,
+  `ClientEncryptionService.plist`), whose one rule is that a value must *immediately* follow its
+  key: a signed-out account's `user.plist` keeps its identity keys with an empty value, and "the next
+  string" there is the following key's name. `getUserID` reads the keyed `user_id` first and, when
+  it is absent, logs what the file does hold instead of "No user found".
+- `scripts/data/flatbuffers_doc.py` — a root-table reader for the `*.docobjects` FlatBuffers
+  documents, handing back a name only when the document's slot 0 is the user id already known.
+
+### Changed
+- The display names the two `primary.docobjects` contact fallbacks read are FlatBuffers fields
+  behind that self-check; the fixed byte-offset carve is kept only as the fallback for a document
+  that fails it, and logged when it answers.
+
 ## [1.6.2-beta.1] — 2026-09-16
 
 ### Added

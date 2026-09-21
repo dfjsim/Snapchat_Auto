@@ -312,17 +312,49 @@ from the container on the extraction at hand.
 **No keychain required** — the key lives in the app container, so this works on any
 extraction that captured `Documents/`, including ones without a full-filesystem keychain.
 
-#### How the key was located
+#### How the key was located, and how to re-derive it
 
-The check is reproducible from the artifact alone. Every file in the store is a multiple of the AES
-block size and the siblings share a constant prefix — the signature of one key used with one
-**fixed** IV. `Documents/ClientEncryptionService.plist` holds a record of exactly that shape: its
-`encryption_key` and `initialization_vector` fields base64-decode to 32 and 16 bytes, and applying
-them to the store yields `bplist00` archives carrying valid media. Read the two fields, decrypt,
-confirm the magic bytes.
+From the artifact alone, and reproducibly: every file in the store is a multiple of the AES block
+size and they share a constant prefix, which is the signature of one key and one **fixed** IV (see
+[Measured properties of the ciphertext](#measured-properties-of-the-ciphertext) below). The
+container holds two records of that shape, and one of them works: the `encryption_key` and
+`initialization_vector` fields of `Documents/ClientEncryptionService.plist` base64-decode to 32 and
+16 bytes and turn the store into `bplist00` archives carrying valid media. (The other record is in
+`user.plist` and opens nothing — the next section.) That is the whole check: read the two fields,
+decrypt, confirm the magic bytes. Nothing about a particular app build is recorded here, because
+nothing about one is needed, and a build-specific detail is useless — or misleading — against any
+other version.
 
-Nothing build-specific is recorded here: such a detail would be valid only for one app version and
-useless — or misleading — against any other.
+The keychain was ruled out first, and that negative is worth keeping — 56 candidates from the
+picaboo access group and the Memories keys, none of them a hit; the same section has the list.
+
+#### A device carries **two** client-encryption records — only one of them opens anything
+
+`Documents/user.plist` holds a second `client_encryption` object of exactly the same shape as
+`ClientEncryptionService.plist` — an `identifier`, a base64 `encryption_key` (32 bytes) and an
+`initialization_vector` (16 bytes) — with a **different identifier and different key** on every
+tested device. It is not a copy, and it is not the story-cache key.
+
+Nothing in any tested extraction is encrypted with it. The test does not depend on guessing how a
+payload is framed: in CBC the last plaintext block is a function of the key and the preceding
+ciphertext block alone, so decrypting a file's final two blocks and checking for valid PKCS#7
+padding tests a candidate key **whatever** the IV or the offset the payload starts at. Run over
+every block-aligned file of all four test extractions, for both keys:
+
+| key | result |
+|---|---|
+| `ClientEncryptionService.plist` | every `sccache.gallery-stories-snap.data` entry on the devices that have one — and those entries then decrypt in full to `bplist00`, as above |
+| `user.plist` | no store; only isolated single files, at the ~1-in-256 rate the padding check itself produces by chance |
+
+Direct decryption attempts agree: the `user.plist` key was tried in CBC (its own IV, a zero IV, the
+file's first block as IV, and payload offsets 0 / 8 / 16) and in ECB against every file the tool
+cannot identify, on all four devices, with no result that carries a recognisable header.
+
+So `user.plist`'s client-encryption values are **recorded as stored and nothing more**: they are an
+identifier and key material belonging to the account record, not a key to try against this device's
+caches. Trying them costs nothing but proves nothing; reporting them as "the client encryption key"
+would invite an examiner to conclude that a cache is encrypted with a key that in fact opens none of
+it. The Contacts report shows them on the device owner's row with that caveat.
 
 #### Scope of the key — the sibling caches are not encrypted at all
 

@@ -154,7 +154,8 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   [docs/report_conversations.md](docs/report_conversations.md)).
 - A **Contacts report** (`scripts/contacts_report.py`) — one table of every contact, naming the
   artifact the contact list came from (and warning when that source includes non-friends), linked
-  to each contact's conversation.
+  to each contact's conversation, with the Snapchatters the app merely cached (Quick Add
+  suggestions, mostly) listed apart and labelled as *not* contacts.
 - The original single-page chats/contacts/groups report is kept as
   `Communications_legacy/Communications_legacy_report.html` until the two reports above have been
   validated on more extractions.
@@ -171,6 +172,15 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
 
 - **Original authors:** [DFIR-HBG](https://github.com/DFIR-HBG) and
   [stark4n6](https://github.com/stark4n6) — <https://github.com/DFIR-HBG/Snapchat_Auto>.
+- **iLEAPP** — [Alexis Brignoni](https://github.com/abrignoni) and contributors, MIT,
+  <https://github.com/abrignoni/iLEAPP>. Four methods in this fork follow its iOS Snapchat module
+  ([`scripts/artifacts/snapchat.py`](https://github.com/abrignoni/iLEAPP/blob/587a3d9c74699d3c38293e0e17064ea3677990be/scripts/artifacts/snapchat.py)):
+  reading the Memories search index (`gallery_search/…/search.sqlite3`), listing the
+  `gallery.encrypteddb` key rows that no Memory row accounts for, the `snapchatter` FlatBuffers
+  document's slot layout, and the keyed read of `user.plist`. Each is credited where it is
+  implemented and in the report popover that explains it; the comparison and the design differences
+  are in [docs/related_ileapp.md](docs/related_ileapp.md). That module in turn cites this fork's
+  Memories decryption notes.
 - **Licence:** MIT, © 2022 DFIR-HBG. The original [LICENSE](LICENSE) is retained unmodified and
   covers this fork, including all modifications made here.
 - **Bundled dependencies keep their own licences.** The packaged EXE and MSI carry third-party

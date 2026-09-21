@@ -66,6 +66,7 @@ ROLES = (
     ("arroyo", "arroyo.db", "chat messages and conversations", True),
     ("scdb", "scdb-27.sqlite3", "Memories index", True),
     ("gallery_encrypteddb", "gallery.encrypteddb", "Memories keys / geolocation (old schema)", True),
+    ("gallery_search", "search.sqlite3", "the Memories search index (place names, tags)", True),
     ("cache_controller", "cache_controller.db", "the cached-file index", True),
     ("contentmanager", "contentManagerDb.db", "cached content metadata", True),
     ("primary_docobjects", "primary.docobjects", "contacts / friends", False),
