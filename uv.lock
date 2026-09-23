@@ -449,7 +449,7 @@ wheels = [
 
 [[package]]
 name = "snapchat-auto"
-version = "1.7.0b1+build.20260920"
+version = "1.8.0b1+build.20260922"
 source = { editable = "." }
 dependencies = [
     { name = "blackboxprotobuf" },

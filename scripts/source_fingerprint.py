@@ -73,6 +73,10 @@ ROLES = (
     ("user_plist", "user.plist", "the account's own identifiers", False),
     ("client_encryption", "ClientEncryptionService.plist", "the story-cache AES key", False),
     ("group_plist", "group.snapchat.picaboo.plist", "friends / groups", False),
+    # Android. arroyo and cache_controller above are the same databases on both platforms.
+    ("main_db", "main.db", "contacts (Friend) — Android", True),
+    ("memories_db", "memories.db", "Memories index, keys and locations — Android", True),
+    ("core_db", "core.db", "the older cache folders' index (DataConsumption) — Android", True),
     ("keychain", "keychain", "the keychain / keystore supplied for this run", False),
 )
 

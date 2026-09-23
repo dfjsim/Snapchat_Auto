@@ -372,6 +372,18 @@ See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory**
 and — so that every cache entry of a message links back, not only the file the chat report showed —
 by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
 
+## Android
+
+The Android app keeps the **same** database — same tables, same claims, same `CACHE_KEY`-named cache
+files — in its private-data folder: `databases/native_content_manager/cache_controller.db`, with the
+files under `files/native_content_manager/com.snap.file_manager_<n>_SCContent_<userId>/`. The report
+runs unchanged on it: `cache_controller_paths`, `index_sccontent` and `find_app_container` recognise an
+Android app folder (`android_layout.is_app_dir`: a `databases/` folder and no `Documents/`) and search
+it for both (`android_layout.scan`), `load_memory_index` reads the Memories from `memories.db`
+(`memories_android_report.memory_index`), and the few explanations that name a platform's columns take
+their words from `PLATFORM_WORDS` — `memories_snap._id` rather than `ZSNAPID`. Device paths are shown
+as `/data/data/com.snapchat.android/…`. See [snapchat_android.md](snapchat_android.md).
+
 ## Standalone use
 ```
 python -m scripts.cache_controller_report <extraction_root_or_app_container> [outdir] \

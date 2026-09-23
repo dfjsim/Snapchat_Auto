@@ -60,6 +60,7 @@ from scripts.data import sniff
 from scripts.data import media_meta
 from scripts.data import device_fs
 from scripts import DecryptLocalMemories_iOS as _memkeys  # reuse readKeychain
+from scripts import android_layout
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
@@ -387,6 +388,8 @@ def find_app_container(root):
     """Return the Snapchat app-container path under an extraction root (or root itself)."""
     if glob.glob(os.path.join(root, "Documents", "gallery_data_object")):
         return root
+    if android_layout.is_app_dir(root):
+        return root                    # an Android app folder: nothing iOS to look for under it
     hits = glob.glob(os.path.join(root, "**", "Documents", "gallery_data_object"), recursive=True)
     if hits:
         return os.path.dirname(os.path.dirname(hits[0]))
@@ -1111,6 +1114,21 @@ def _carved_memory(snap_id, profile, hit, timefmt):
 _SC_SPLIT_RE = re.compile(r"^(.+?)_(?:(\d+)-\d+|PREFETCH)$")
 
 
+def cache_controller_paths(app):
+    """Every ``cache_controller.db`` of an app folder.
+
+    iOS keeps it in ``Documents/global_scoped/cachecontroller/``. The Android app keeps the same
+    database in ``databases/native_content_manager/`` of its private-data folder, and the folder is
+    searched rather than assumed (see ``scripts/android_layout.scan``) — an iOS container has no
+    ``databases/`` folder, so that search never runs on one.
+    """
+    found = glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
+                                   "cache_controller.db"))
+    if android_layout.is_app_dir(app):
+        found += [p for p in android_layout.scan(app)[0] if p not in found]
+    return found
+
+
 def index_sccontent(app):
     """Index SCContent files by cache key across every per-user container.
 
@@ -1123,21 +1141,26 @@ def index_sccontent(app):
         those stay encrypted; here we rebuild and decrypt from the parts directly).
     """
     full, parts = {}, {}
+    folders = []
     for pat in ("Documents/com.snap.file_manager_*_SCContent_*",
                 "Library/Caches/com.snap.file_manager_*_SCContent_*"):
-        for d in glob.glob(os.path.join(app, pat)):
-            if not os.path.isdir(d):
+        folders += glob.glob(os.path.join(app, pat))
+    if android_layout.is_app_dir(app):
+        # the Android app keeps the same folders under files/native_content_manager/
+        folders += android_layout.scan(app)[1]
+    for d in folders:
+        if not os.path.isdir(d):
+            continue
+        for name in os.listdir(d):
+            fp = os.path.join(d, name)
+            if not os.path.isfile(fp):
                 continue
-            for name in os.listdir(d):
-                fp = os.path.join(d, name)
-                if not os.path.isfile(fp):
-                    continue
-                mo = _SC_SPLIT_RE.match(name)
-                if mo:
-                    start = int(mo.group(2)) if mo.group(2) is not None else 0
-                    parts.setdefault(mo.group(1).lower(), []).append((start, fp))
-                else:
-                    full.setdefault(name, []).append(fp)
+            mo = _SC_SPLIT_RE.match(name)
+            if mo:
+                start = int(mo.group(2)) if mo.group(2) is not None else 0
+                parts.setdefault(mo.group(1).lower(), []).append((start, fp))
+            else:
+                full.setdefault(name, []).append(fp)
     return full, parts
 
 
@@ -1283,8 +1306,7 @@ def index_cache_controller(app):
     the mirror-image fallback.
     """
     out = {}
-    for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
-                                     "cache_controller.db")):
+    for db in cache_controller_paths(app):
         # both readings: a claim the -wal has since dropped still names a file that may be on disk
         claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
         rows = [(c.get("EXTERNAL_KEY"), c.get("CACHE_KEY")) for c in claims]
@@ -1304,8 +1326,7 @@ def all_cache_keys(app):
     can offer a two-way link to the cache_controller report only when that entry actually exists.
     """
     keys = set()
-    for db in glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
-                                     "cache_controller.db")):
+    for db in cache_controller_paths(app):
         # Read both with and without the -wal: a key the write-ahead log has since dropped still
         # earns a link, because the cache_controller report lists that row too (as "no -wal only").
         views = sqlite_open.open_views(db)
@@ -1882,6 +1903,12 @@ def _best_still(files):
 # the extraction ZIP (e.g. "/Application/<UUID>/Documents/...") instead of the temp working dir.
 # Ordered most-specific first so a full-filesystem path keeps its "/private/var/mobile/…" form.
 _DEVICE_ANCHORS = ("/private/var/mobile/", "/private/var/", "/application/", "/applications/")
+#: …and an Android app's, which extract_zip writes under the device path itself. Consulted only after
+#: every iOS anchor has failed, and anchored on the package folder for the same reason as
+#: _ANDROID_CONTAINER_RE.
+_ANDROID_ANCHOR_RE = re.compile(
+    r"/data/(?:data/|user/\d+/|user_de/\d+/|media/\d+/Android/(?:data|media|obb)/)"
+    r"com\.snapchat\.android(?:/|$)")
 
 
 def load_path_manifest(*roots):
@@ -1940,6 +1967,13 @@ def load_fs_records(*roots):
 #: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to
 #: be built the same way from whatever absolute path the report holds.
 _CONTAINER_RE = re.compile(r"(?:^|/)(Application|AppGroup)/", re.I)
+#: The Android equivalent: `extract_zip` writes an Android app's files under their device path
+#: (data/data/com.snapchat.android/…, data/user_de/0/…, data/media/0/Android/data/…) and keys the
+#: manifest on that path. Tried only when the iOS pattern finds nothing, and anchored on the package
+#: folder itself, so a working folder that happens to be called "data" is never taken for the device's.
+_ANDROID_CONTAINER_RE = re.compile(
+    r"(?:^|/)(data/(?:data/|user/\d+/|user_de/\d+/|media/\d+/Android/(?:data|media|obb)/)"
+    r"com\.snapchat\.android(?:/|$))")
 
 
 def manifest_key(full):
@@ -1951,7 +1985,7 @@ def manifest_key(full):
     exactly what it once did (see the Library/Caches report's history).
     """
     text = (full or "").replace("\\", "/")
-    match = _CONTAINER_RE.search(text)
+    match = _CONTAINER_RE.search(text) or _ANDROID_CONTAINER_RE.search(text)
     return text[match.start(1):] if match else ""
 
 
@@ -1987,6 +2021,10 @@ def device_path(fp, src_root=None, manifest=None):
             if i != -1:
                 display = p[i:]
                 break
+    if display is None:
+        match = _ANDROID_ANCHOR_RE.search(p)
+        if match:
+            display = p[match.start():]
     if display is None:
         return p                                            # unrecognised (e.g. generated-note text)
     return _apply_manifest(display, manifest)

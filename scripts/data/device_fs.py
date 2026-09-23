@@ -40,6 +40,13 @@ logger = logging.getLogger("snapchat_auto")
 UT_ID = 0x5455
 #: Info-ZIP "new Unix" extra field: uid / gid.
 UX_ID = 0x7875
+#: GrayKey: the file's inode (8 bytes, little-endian) followed by its device number (4 bytes). Read as
+#: such because, in an Android archive, the entries a phone mounts at several paths (/data/data,
+#: /data/user/0, /data_mirror/data_ce/null/0) carry the same pair, and each partition (/data, /system,
+#: /vendor) carries one device number of its own.
+IN_ID = 0x4E49
+#: GrayKey: the SHA-256 of the entry's content as the acquisition tool computed it (32 bytes).
+S2_ID = 0x3253
 
 NS = 1_000_000_000
 
@@ -74,14 +81,20 @@ def _extra_fields(extra):
     return out
 
 
-def from_zip_entry(info):
+def from_zip_entry(info, extended=False):
     """The record an archive entry's own extra fields carry, or ``None`` when they carry no time.
 
     The ``UT`` field is read for every timestamp it flags, not only the first: a GrayKey archive writes
-    four (flags ``0b1111``), a UFED archive three, a plain zip tool one. The fourth is not in the
-    ``UT`` specification; it is recorded as the birth time with its basis stated, because across the
-    corpus it is at or before the modification time in practically every entry, which is what a birth
-    time does and an access or change time does not.
+    four (flags ``0b1111``) for an iOS device and three for an Android one, a UFED archive three, a
+    plain zip tool one. The fourth is not in the ``UT`` specification; it is recorded as the birth time
+    with its basis stated, because across the corpus it is at or before the modification time in
+    practically every entry, which is what a birth time does and an access or change time does not.
+    A time of 0 or less is a value the archive did not record — a UFED archive of an Android phone
+    writes 0 as every file's change time — and is left out rather than shown as 1970.
+
+    ``extended`` also reads what only the Android extraction uses so far: the permission bits of the
+    entry's Unix mode, GrayKey's inode / device number (:data:`IN_ID`) and its SHA-256 of the content
+    (:data:`S2_ID`, kept as ``archive_sha256`` so the extracted bytes can be checked against it).
     """
     record = None
     for header, body in _extra_fields(info.extra):
@@ -94,12 +107,21 @@ def from_zip_entry(info):
                 continue
             record = record or {"source": "zip-ut", "precision": "s"}
             for kind, value in zip(kinds, values):
-                record[kind] = value * NS
-            if flags & 8 and len(values) > len(kinds):
+                if value > 0:
+                    record[kind] = value * NS
+            if flags & 8 and len(values) > len(kinds) and values[len(kinds)] > 0:
                 record["btime"] = values[len(kinds)] * NS
                 record["btime_basis"] = ("the archive's fourth UT time — not part of the UT "
                                          "specification; read as the birth time because it is at or "
                                          "before the modification time in practically every entry")
+        elif extended and header == IN_ID and len(body) >= 8:
+            record = record or {"source": "zip-ut", "precision": "s"}
+            record["inode"] = int.from_bytes(body[:8], "little")
+            if len(body) >= 12:
+                record["dev"] = int.from_bytes(body[8:12], "little")
+        elif extended and header == S2_ID and len(body) == 32:
+            record = record or {"source": "zip-ut", "precision": "s"}
+            record["archive_sha256"] = body.hex()
         elif header == UX_ID and len(body) >= 3:
             try:
                 uid_size = body[1]                         # body[0] is the field's version (1)
@@ -110,6 +132,12 @@ def from_zip_entry(info):
                 continue
             record = record or {"source": "zip-ut", "precision": "s"}
             record["uid"], record["gid"] = uid, gid
+    if extended and record is not None:
+        mode = (info.external_attr >> 16) & 0xFFFF
+        # A mode with no permission bits at all is an archive that did not record them (a UFED
+        # archive of an Android phone writes 0o100000 for every file), not a file nobody may read.
+        if mode & 0o7777:
+            record["mode"] = mode
     return record
 
 

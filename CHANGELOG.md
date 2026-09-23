@@ -6,6 +6,49 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.8.0-beta.1] — 2026-09-22
+
+The Android side, rebuilt to produce the same reports as iOS — see
+[docs/snapchat_android.md](docs/snapchat_android.md).
+
+### Added
+- **Conversations, Contacts, Memories and cache_controller reports for Android**
+  (`scripts/ParseSnapchat_Android.py`). The chat database and the cached-file index are the same on
+  both platforms, so the chat parsing and the cache_controller report are the iOS ones; the Android
+  run adds the account (`arroyo.db` `required_values`, `shared_prefs`), the contacts (`main.db`
+  `Friend` + `CombinedUsername`, every row, each stating what the table records about the link and
+  quoting the column comments the table's own schema carries) and the Memories
+  (`scripts/memories_android_report.py`: `memories.db`, location without a keychain; media found in
+  the app's own cache folders by the MD5 of a request string built from the snap's ids, in the
+  native cache by claim or URL token, and decrypted with the snap's key, the My Eyes Only key
+  unwrapped with the master key `memories_meo_confidential` stores, or a key pair inside the
+  `snapdoc` — only bytes that are media are ever accepted; thumbnail packages split into their
+  images; `snap_ids` read as the FlatBuffers vector they are).
+- Chat media the cache holds only in pieces — a video stored as a bundle, a file stored as byte-range
+  shards — is rebuilt for the Conversations report (`materialize_chat_media`) instead of being
+  listed as having no cached file; the attachment says how it was put together.
+- `scripts/android_layout.py` — where each artifact is in an extracted Android tree, logged as an
+  inventory, and `android_survey.json` beside the run log: tables, columns, row counts, preference key
+  names and folder sizes, with no content and every UUID replaced.
+- The Android extraction checks every file against the SHA-256 a GrayKey archive records for it
+  (`S2`), and records the inode / device number (`IN`) and permissions.
+
+### Fixed
+- The Android run logged a traceback for every run (`logger.info("…", database)`, a print-style
+  call the logging module rejects) — the error in the report that prompted this rewrite.
+- **Android extraction** (`extract_zip.android_entry`): the package name was matched anywhere in the
+  path, so a GrayKey archive's three copies of each private file were written onto one another and the
+  app's shared-storage folder was merged into its private one. Each entry is now mapped to its
+  canonical device path and written once (the copy read through `/data/data` wins, and differing
+  copies are counted); the whole app folder is taken instead of three sub-folders; symbolic links are
+  not written; an extraction without the app raises a clear error instead of pausing and crashing.
+- A time of 0 in a ZIP entry's `UT` field is left out rather than shown as 1970 (a UFED archive of an
+  Android phone writes 0 as every file's change time), and an archive that records owner 0/0 for
+  every file of the app is not reported as root-owned.
+- The legacy Android report skipped every other file after one it rejected, and failed on a missing
+  cache folder; it now writes into `Reports/Communications_legacy/` and is produced only with the
+  legacy reports, like the iOS ones.
+
 ## [1.7.0-beta.1] — 2026-09-20
 
 Four methods adopted from iLEAPP's iOS Snapchat module (Alexis Brignoni, MIT), credited where

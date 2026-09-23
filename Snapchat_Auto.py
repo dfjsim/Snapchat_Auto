@@ -1,7 +1,7 @@
 import sys
 import FreeSimpleGUI as sg
 from scripts import ParseSnapchat_iOS
-from scripts import getCacheAndroid
+from scripts import ParseSnapchat_Android
 from scripts.data import extract_zip
 from scripts import parseSnapvideos_PREFETCH
 from scripts import offline_maps
@@ -373,8 +373,30 @@ def add_log_file(directory):
     logger.info(f"Log file: {os.path.abspath(log_path)}")
 
 
+#: The Android run's reports, described by what they read on that platform. Same folders and named
+#: tabs as the iOS set (the cross-report links rely on both), different sources.
+ANDROID_REPORTS = (
+    ("Contacts", "Contacts/Contacts_report.html",
+     "Every user in main.db's Friend table, with what the table records about each link, and "
+     "linked to their conversation(s).", "scauto_contacts"),
+    ("Conversations", "Conversations/Conversations_report.html",
+     "Every conversation in arroyo.db, with a detail page per conversation: messages, senders, "
+     "timestamps and cached chat media.", "scauto_convs"),
+    ("Memories", "Memories/Memories_report.html",
+     "Snapchat Memories from memories.db — every snap, its times, its location and its media "
+     "where the app's caches hold it.", "scauto_memories"),
+    ("Cache controller (cache_controller.db)", "CacheController/CacheController_report.html",
+     "Every file indexed by cache_controller.db (databases/native_content_manager), i.e. the "
+     "native content cache, linked to on-disk cache files, Memories and chats.",
+     "scauto_cache"),
+    ("Communications (legacy)", "Communications_legacy/Communications_legacy_report.html",
+     "The original single-page Android chats report, kept until the Conversations and Contacts "
+     "reports have been validated.", "scauto_comms_legacy"),
+)
+
+
 def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path=None,
-                closure=None, prov=None):
+                closure=None, prov=None, platform="ios"):
     """Write <root_dir>/index.html linking to whichever sub-reports were produced under
     <root_dir>/<reports_subdir>/, with the source extraction / keychain paths at the top.
 
@@ -409,6 +431,9 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
         ("Local Memories (legacy)", f"{reports_subdir}/LocalMemories_legacy/LocalMemories_legacy_report.html",
          "Legacy Memories / My Eyes Only decryption report.", "scauto_localmem"),
     ]
+    if platform == "android":
+        reports = [(title, f"{reports_subdir}/{rel}", desc, target)
+                   for title, rel, desc, target in ANDROID_REPORTS]
     items = []
     for title, rel, desc, target in reports:
         if os.path.exists(os.path.join(root_dir, rel)):
@@ -519,7 +544,7 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
  .sources .snote{{font-size:12px;color:#666;margin:10px 0 2px;line-height:1.5}}
 {partial_css}
 </style></head><body>
-<header><h1>Snapchat Auto v{get_version()} &mdash; Report index</h1><div class="sub">Generated {generated}</div></header>
+<header><h1>Snapchat Auto v{get_version()} &mdash; Report index{" (Android)" if platform == "android" else ""}</h1><div class="sub">Generated {generated}</div></header>
 {banner}{provenance}
 <ul>{''.join(items)}</ul>
 {sources}
@@ -619,8 +644,19 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 os.system("pause")
         else:
             logger.info("You chose Android")
-            extracted_files_dir = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
-            getCacheAndroid.main(extracted_files_dir)
+            if partial is not None:
+                # the selection machinery is built on the iOS report set; refusing is honest, an
+                # extract that quietly ignored the selection would not be
+                raise LookupError("partial reports (--selection) are not available for Android yet")
+            extracted_root = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
+            ParseSnapchat_Android.main(extracted_root, keychain, padding=padding, tz=tz,
+                                       report_dir="./Reports", tile_server=tile_server,
+                                       zip_path=os.path.abspath(zip_path) if zip_path else "",
+                                       hash_zip=hash_zip, legacy_reports=legacy_reports)
+            write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain, platform="android")
+            logger.info(f"Report index: {os.path.abspath('index.html')}")
+            if pause:
+                os.system("pause")
     finally:
         os.chdir(started)
     return run_folder
@@ -1487,9 +1523,9 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
         [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
 
         [sg.Text('Report options', font=SECTION_FONT)],
-        [sg.Text('Memories media hashes (iOS)', size=(28, 1)),
+        [sg.Text('Memories media hashes', size=(28, 1)),
          sg.Combo(PADDING_OPTIONS, default_value=cfg.get("padding", PADDING_OPTIONS[0]), key="padding", readonly=True, size=(30, 1))],
-        [sg.Text('Timestamp timezone (iOS)', size=(28, 1)),
+        [sg.Text('Timestamp timezone', size=(28, 1)),
          sg.Combo(TZ_OPTIONS, default_value=cfg.get("timezone", "Local time"), key="timezone", size=(30, 1)),
          sg.Text('(or an IANA name / ±HH:MM)'),
          _help('Daylight saving time is applied automatically for named zones '
@@ -1828,6 +1864,11 @@ def main(args):
         logger.error(str(error))
         sg.popup_error(f"The partial report was not built.\n\n{error}",
                        title="Partial report refused", keep_on_top=True)
+        os.system("pause")
+    except extract_zip.SnapchatNotFound as error:
+        # the same reasoning: an extraction without the app is an answer, and it belongs in the log
+        logger.error(str(error))
+        sg.popup_error(str(error), title="Snapchat not found", keep_on_top=True)
         os.system("pause")
 
 

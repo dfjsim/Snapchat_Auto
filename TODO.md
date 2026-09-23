@@ -58,11 +58,14 @@ corpus these are the correct answers. The fixes that came out of the same pass a
 # Extraction archives — what is still not read
 - A **GrayKey** archive carries, per entry, a tool-computed **SHA-256 of the content** in extra field
   `0x3253` (`S2`, 32 bytes — verified equal to the entry's bytes on every sample), plus two
-  undocumented fields: `0x4e49` (`NI`, 12 bytes — looks like the inode as 8 LE bytes plus 4 bytes of
-  flags) and `0x4b47` (`KG`, 6 bytes, `010103000000` on every sample). The hash is an
-  acquisition-time record we could verify our extracted bytes and reported hashes against — a
-  chain-of-custody line per file, and a candidate input for `source_fingerprint`. Not read yet;
-  `device_fs.from_zip_entry` is where it would go.
+  undocumented fields: `0x4e49` (`IN` in byte order, 12 bytes) and `0x4b47` (`KG`, 6 bytes,
+  `010103000000` on every iOS sample; 2 bytes, `0100`, on the Android one). **The Android extraction
+  now reads them** (`device_fs.from_zip_entry(..., extended=True)`): every extracted file is checked
+  against `S2`, and `IN` is the inode (8 LE bytes) plus the device number (4 LE bytes) — established
+  on the Android archive, where the three mounts of `/data` carry the same pair and `/data`,
+  `/system` and `/vendor` each carry their own device number. The iOS extraction does not read them
+  yet: do it the same way (and re-check the `IN` reading on an iOS archive) once the iOS output may
+  change; `S2` is also a candidate input for `source_fingerprint`.
 - A UFED (CLBX) archive's `Log.txt` (UTF-16) records the UFED version and the acquisition log;
   `extra/KeychainDump/` holds the keychain. Neither is surfaced in a report yet.
 
@@ -86,10 +89,27 @@ corpus these are the correct answers. The fixes that came out of the same pass a
 # Keychain auto-detection
 - Add logic to locate GK/Cellebrite/XRY keychain files either inside or outside the extraction ZIP.
 
-# Android tests/improvements
-- Make sure we properly support all the same features on Android than on iOS, for example:
-  - Keystore auto-detection.
-  - Memories decoding with media/geolcation decryption.
+# Android — after the 1.8.0 rewrite (see docs/snapchat_android.md)
+- **Cross-check with ALEAPP**: compare the Android Contacts and Memories reports with ALEAPP's
+  Snapchat module on the same extraction (it reads `main.db` `Friend` and `memories.db`).
+- **Private conversations' other participant**: name it from `feed_entry.participants` /
+  `conversation.conversation_metadata` — today such a conversation is named after its first non-owner
+  sender, and one with no message from them stays unidentified.
+- `arroyo.db` `conversation_message.local_message_references` is not read on Android (iOS stores an
+  NSKeyedArchiver archive there).
+- **Several Android users / work profile**: only the first app folder (user 0) is reported; the others
+  are named in the log. Each needs its own report set.
+- **`databases/clientsearch.db`** — the Android Memories search index (FTS4: captions, titles, place
+  names, visual and time tags; `records(external_id, …)`). Not read yet. Which id
+  `records.external_id` holds and whether the FTS `docid` is `records.rowid` has to be proved the way
+  the iOS index's join was — by cross-checking the visual tags against the media — before any tag is
+  attached to a snap.
+- The older `files/file_manager/<type>/` caches (with `core.db` `DataConsumption`) are only in the
+  legacy report — an Android counterpart of the Library/Caches report would list them.
+- The app version (from the APK's manifest under `/data/app`, or `/data/system/packages.xml`) is not
+  read; the report cannot say which Snapchat version wrote the data.
+- Keystore auto-detection (was in this list before; nothing on the Android side needs a key yet).
+- Partial reports (`--selection`) are refused on Android.
 
 # Cleanup: remove legacy Memories report + SnapFixedVideos (AFTER validation)
 - Keep the legacy path for now. Only remove it once the new Memories + cache_controller reports

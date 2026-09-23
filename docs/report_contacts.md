@@ -118,7 +118,19 @@ table means:
 
 The last two are shown as a red warning banner rather than a neutral note. `SOURCE_NOTES` in
 `scripts/contacts_report.py` holds the text; `friends_source` is set in `ParseSnapchat_iOS.main`
-next to the call that succeeded. The display names those two fallbacks read out of the
+next to the call that succeeded.
+
+On **Android** there is one source, `main.db` → `Friend` (`friends_source` = `main.db Friend`, set by
+`ParseSnapchat_Android`), and it too is the app's record of every user it has to show rather than the
+friends list, so it carries the warning banner. Every row is listed; what makes the Android rows
+different is that each carries the table's own fields for the contact (`_extra` in the friends frame,
+rendered by `_extra_html` as *What the contact table records*): the two "added" timestamps, the stored
+`friendLinkType` and `syncSource`, the phone number and birthday, which other friend table lists the
+user, and — quoted as such — the comment the app wrote beside the column in the table's
+`CREATE TABLE` text. The username fields name `main.db`'s tables instead of `primary.docobjects`'
+(`_USERNAME_TABLES`), and the owner's row carries the account values the Android run found
+(`arroyo.db` `required_values`, `shared_prefs`) instead of `user.plist`. See
+[snapchat_android.md](snapchat_android.md#contacts--maindb-friend). The display names those two fallbacks read out of the
 `snapchatters__displaymetadata` documents come from a FlatBuffers root-table read
 (`scripts/data/flatbuffers_doc.py`, slot 0 self-checked against the row's user id, slot 1 the name);
 the fixed byte-offset carve the parser used before is kept only as the fallback for a document that

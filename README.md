@@ -80,6 +80,23 @@ with newer builds"* field at it and each start will offer a newer build found th
 nothing is sent anywhere. Headless runs never check. See
 [docs/auto_update.md](docs/auto_update.md) for the filename convention builds have to follow.
 
+## Android
+
+Choosing **Android** (or `--os android`) builds the same report set from an Android extraction —
+Conversations, Contacts, Memories and cache_controller — because the chat database (`arroyo.db`) and
+the cached-file index (`cache_controller.db`) are the same databases the iOS app keeps. The contacts
+come from `main.db`'s `Friend` table (every user the app knows, not only friends — each row says what
+the table records about the link), the Memories from `memories.db` (location without a keychain; media
+decrypted with each snap's own key where the app's cache still holds it), and the account from
+`arroyo.db` and `shared_prefs`.
+
+The extraction maps each archive entry to one device path (`/data/data/com.snapchat.android/…`), so a
+GrayKey archive's three copies of every file and a UFED archive's several views of shared storage are
+written once, and every file GrayKey hashed is checked against that hash. Each run also writes
+`android_survey.json` next to its log: the app folder's structure (tables, columns, row counts,
+preference key names, folder sizes) with no content. See
+[docs/snapchat_android.md](docs/snapchat_android.md) for what each report reads.
+
 ## Memories media report (iOS)
 
 The iOS run also produces a **Memories** report (`<output>/Memories/Memories.html`) that links

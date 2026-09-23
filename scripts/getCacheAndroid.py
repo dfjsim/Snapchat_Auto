@@ -48,7 +48,7 @@ def encodeChat(message):
 
 
 def getChats(database):
-    logger.info("Parsing messages from: ",database)
+    logger.info(f"Parsing messages from: {database}")
     db_arroyo = database
     query_arroyo ="""select
     client_conversation_id as 'Client Conversation ID',
@@ -109,10 +109,13 @@ def getFriends(database):
     return df
 
 def getCache(cachePath):
-    logger.info("Getting cached files")
+    logger.info(f"Getting cached files from {os.path.basename(cachePath)}")
+    if not os.path.isdir(cachePath):
+        logger.info(f"{cachePath} not present — no cached files from it")
+        return []
     files = [f for f in os.listdir(cachePath) if os.path.isfile(os.path.join(cachePath, f))]
+    kept = []
     for f in files:
-        #logger.info(f)
         ftype = filetype.guess(cachePath+'//'+f)
         if os.stat(cachePath+'//'+f).st_size != 0 and ftype != None:
             shutil.copy(cachePath+'//'+f, outputDir +'//cacheFiles')
@@ -121,10 +124,9 @@ def getCache(cachePath):
             except Exception as Error:
                 logger.error(Error)
                 pass
-        else:
-            files.remove(f)
-    
-    return files
+            kept.append(f)
+
+    return kept
 def joinCache(dataframe, chatfiles, snapfiles):
     filelist = [*chatfiles, *snapfiles]
     for i,j in enumerate(filelist):
@@ -181,19 +183,13 @@ def path_to_image_html(filename):
         return
 
 def writeHTML(final_df):
-    
-    if getattr(sys, 'frozen', False):
-        exe_path = sys._MEIPASS
-        shutil.copytree(f"{exe_path}/css", f"{outputDir}/css")
-    else:
-        exe_path = os.path.dirname(os.path.abspath(__file__))
-        shutil.copytree(f"{exe_path}/data/css", f"{outputDir}/css")
-    
-    
-    for index, row in final_df.iterrows():
-        final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
-    
+    from scripts import report_ui
+    report_ui.copy_css(outputDir)
+
     logger.info("Writing HTML report")
+    # object dtype first: the column receives HTML strings, and pandas 3 refuses a string in a
+    # column it inferred as numeric (docs/pandas3_python314_compat.md)
+    final_df['Message Content'] = final_df['Message Content'].astype(object)
     for index, row in final_df.iterrows():
         final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
         
@@ -203,6 +199,7 @@ def writeHTML(final_df):
 """
     
     html = """
+<meta charset="utf-8">
 <link href="./css/bootstrap.min.css" rel="stylesheet">
 <style>
 th {
@@ -227,23 +224,31 @@ th {
     html = html.replace('<th>User ID</th>', '<th style="min-width: 150px;">User ID</th>')
     html = html.replace('<th>Server Message ID</th>', '<th style="min-width: 70px;">Server Message ID</th>')
     
-    text_file = open(outputDir + "/Snapchat_report.html", "w", encoding="cp1252")
+    text_file = open(outputDir + "/Communications_legacy_report.html", "w", encoding="utf-8")
     text_file.write(html)
     text_file.close()
     logger.info("Success, report can be found in "+ os.path.abspath(outputDir))
     
-def main(snapchatFolder):
+def main(snapchatFolder, output_dir=None):
+    """The original single-page Android report, kept as the legacy Communications report.
+
+    ``snapchatFolder`` is the app's private-data folder (``…/data/data/com.snapchat.android``);
+    ``output_dir`` is where the report is written (``Reports/Communications_legacy``). Superseded by
+    the Conversations and Contacts reports, which ParseSnapchat_Android builds for every run; this one
+    is only produced when the legacy reports are asked for.
+    """
     global outputDir
     global platform
 
     platform = system()
-    #if len(sys.argv) <2:
-    #    logger.info("ParseAndroid.py <Snapchat folder>")
-    #    sys.exit()
-    #snapchatFolder = sys.argv[1]
-    #snapchatFolder = output
-    outputDir = "./Snapchat_Android_report_" + datetime.datetime.today().strftime('%Y%m%d_%H%M%S')
+    outputDir = output_dir or ("./Snapchat_Android_report_"
+                               + datetime.datetime.today().strftime('%Y%m%d_%H%M%S'))
     os.makedirs(outputDir+"//cacheFiles", exist_ok = True)
+    for name in ("core.db", "main.db", "arroyo.db"):
+        if not os.path.isfile(snapchatFolder + "/databases/" + name):
+            logger.info(f"Legacy Communications report: databases/{name} not present — report not "
+                        f"produced")
+            return
 
     df_core = getCore(snapchatFolder+"/databases/core.db")
     df_friends = getFriends(snapchatFolder+"/databases/main.db")
@@ -276,5 +281,5 @@ def main(snapchatFolder):
             
     
 if __name__ == "__main__":
-
-    main()
+    import sys as _sys
+    main(_sys.argv[1], _sys.argv[2] if len(_sys.argv) > 2 else None)

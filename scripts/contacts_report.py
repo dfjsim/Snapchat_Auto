@@ -63,6 +63,35 @@ SOURCE_NOTES = {
         "'index_snapchatterusername' for usernames and to arroyo.db user_conversation for the "
         "conversation id. WARNING: this is every Snapchatter the device knows about -- it WILL "
         "contain users who are not friends."),
+    # Android: one table, read whole. See ParseSnapchat_Android.read_contacts.
+    "main.db Friend": (
+        "Read from the Android app's databases/main.db, table 'Friend' (userId, username, "
+        "displayName), joined to 'CombinedUsername' on combinedUsernameRowId for the username pair. "
+        "Every row of the table is listed. Expand a row for what the table itself records about the "
+        "link: the two 'added' timestamps (with the column comments the table's own schema carries), "
+        "the stored friendLinkType, and which other friend table of main.db lists the user "
+        "(FriendWhoAddedMe, SuggestedFriend, BestFriend). WARNING: this table is the app's record of "
+        "every user it has to show, not the friends list -- it MIGHT contain users who are not "
+        "friends (people who added the account, people it added, group members, suggestions)."),
+}
+
+#: Where each of the three username fields was read, per source; iOS's tables unless named here.
+_USERNAME_TABLES = {
+    "main.db Friend": ("main.db Friend.username / CombinedUsername.mutableUsername",
+                       "main.db CombinedUsername.mutableUsername",
+                       "main.db CombinedUsername.originalUsername"),
+}
+_IOS_USERNAME_TABLES = ("index_snapchatterusername", "index_snapchattermutableUsername",
+                        "index_snapchatterlegacyUsername")
+
+#: The header's "username history from …" line, per source (iOS's primary.docobjects otherwise).
+ANDROID_IDENTIFIERS_NOTE = (
+    "Read from the Android app's databases/main.db: table 'CombinedUsername' (originalUsername, "
+    "mutableUsername), which each Friend row points at through combinedUsernameRowId. When the two "
+    "differ, the mutable username is shown as the username and the original one as the legacy "
+    "username — the one the account had before it was changed. Both are shown as stored.")
+_IDENTIFIER_SOURCES = {
+    "main.db Friend": ("main.db CombinedUsername", ANDROID_IDENTIFIERS_NOTE),
 }
 
 # Index-table geometry: one fixed row height and one column track list for the header and the rows.
@@ -197,6 +226,8 @@ def normalize_contacts(friends_df, owner_user_id="", owner_username=""):
     col_username = _pick_col(friends_df, _USERNAME_COLS)
     col_userid = _pick_col(friends_df, _USERID_COLS)
     col_convid = _pick_col(friends_df, _CONVID_COLS)
+    # the source's own per-row fields, as (label, value, note) — only the Android parser supplies them
+    col_extra = "_extra" if "_extra" in friends_df.columns else None
     owner_id = cell(owner_user_id).lower()
     owner_name = _unbold(owner_username)[0].lower()
     for _index, row in friends_df.iterrows():
@@ -213,8 +244,12 @@ def normalize_contacts(friends_df, owner_user_id="", owner_username=""):
         if key in seen:
             continue
         seen.add(key)
-        contacts.append({"display": display, "username": username, "user_id": user_id,
-                         "legacy_username": "", "conv_id": conv_id, "is_owner": is_owner})
+        contact = {"display": display, "username": username, "user_id": user_id,
+                   "legacy_username": "", "conv_id": conv_id, "is_owner": is_owner}
+        if col_extra:
+            extra = row.get(col_extra)
+            contact["extra"] = list(extra) if isinstance(extra, (list, tuple)) else []
+        contacts.append(contact)
     return contacts
 
 
@@ -636,19 +671,48 @@ _ACCOUNT_LABELS = (("username", "Username (user.plist)"), ("user_id", "User ID (
 def _username_rows(contact):
     """The three stored username fields as ``(label, html)`` grid rows, each naming its table."""
     def src(table):
-        return f' <span class="muted">{table}</span>'
+        return f' <span class="muted">{_esc(table)}</span>'
+    user_table, mutable_table, legacy_table = contact.get("username_tables") or _IOS_USERNAME_TABLES
     mutable = contact.get("mutable_username") or ""
     legacy = contact.get("legacy_username") or ""
-    return [("Username", text_html(contact["username"]) + src("index_snapchatterusername")
+    # the note on the mutable username is about primary.docobjects; another source is named as stored
+    mutable_note = report_ui.info_icon(MUTABLE_NOTE) if not contact.get("username_tables") else ""
+    return [("Username", text_html(contact["username"]) + src(user_table)
              if contact["username"] else ""),
             ("Mutable username",
              (text_html(mutable) + (' <span class="legacy">differs from the username</span>'
                                     if contact.get("mutable_differs") else "")
               if mutable else '<span class="muted">not stored</span>')
-             + src("index_snapchattermutableUsername") + report_ui.info_icon(MUTABLE_NOTE)),
+             + src(mutable_table) + mutable_note),
             ("Legacy username",
              (text_html(legacy) if legacy else '<span class="muted">not stored</span>')
-             + src("index_snapchatterlegacyUsername"))]
+             + src(legacy_table))]
+
+
+_SCHEMA_NOTE = "The table's own schema text (sqlite_master) describes this column as: "
+
+
+def _extra_html(contact):
+    """The source's own fields for this contact (the Android Friend row), each as stored.
+
+    A note that begins with :data:`_SCHEMA_NOTE`'s subject is the comment the app wrote beside the
+    column in its CREATE TABLE statement, which SQLite keeps verbatim — quoted, not interpreted.
+    """
+    extra = contact.get("extra") or []
+    if not extra:
+        return ""
+    rows = []
+    for label, value, note in extra:
+        hint = ""
+        if note and note.startswith("schema:"):
+            hint = report_ui.info_icon(_SCHEMA_NOTE + note[len("schema:"):].strip())
+        elif note:
+            hint = report_ui.info_icon(note)
+        rows.append(f'<div class="k">{_esc(label)}</div><div class="v">{text_html(value)}'
+                    f'{hint}</div>')
+    return ('<div class="sect">What the contact table records'
+            + report_ui.info_icon(SOURCE_NOTES.get("main.db Friend", "")) + "</div>"
+            + f'<div class="grid">{"".join(rows)}</div>')
 
 
 def _contact_detail(contact, convs, rel_prefix, closure=None, account=None):
@@ -690,7 +754,14 @@ def _contact_detail(contact, convs, rel_prefix, closure=None, account=None):
            ("User ID", f'<span class="mono">{_esc(contact["user_id"])}</span>')]
     grid = "".join(f'<div class="k">{k}</div><div class="v">{v}</div>' for k, v in ids if v)
     account_html = ""
-    if contact["is_owner"] and account:
+    if contact["is_owner"] and account and account.get("_rows"):
+        # rows that already name the file and key they were read from (the Android parser)
+        account_grid = "".join(f'<div class="k">{_esc(k)}</div><div class="v mono">{_esc(v)}</div>'
+                               for k, v in account["_rows"])
+        note = report_ui.info_icon(account["_note"]) if account.get("_note") else ""
+        account_html = (f'<div class="sect">{_esc(account.get("_title") or "Account")}{note}</div>'
+                        f'<div class="grid">{account_grid}</div>')
+    elif contact["is_owner"] and account:
         pairs = [(label, account[key]) for key, label in _ACCOUNT_LABELS if account.get(key)]
         account_grid = "".join(f'<div class="k">{_esc(k)}</div><div class="v mono">{_esc(v)}</div>'
                                for k, v in pairs)
@@ -700,7 +771,7 @@ def _contact_detail(contact, convs, rel_prefix, closure=None, account=None):
     return (f'<div class="sect">Conversations ({len(convs)})'
             + report_ui.info_icon(MULTI_CONV_NOTE) + "</div>" + table
             + '<div class="sect">Identifiers' + report_ui.info_icon(IDENTIFIER_NOTE) + "</div>"
-            + f'<div class="grid">{grid}</div>' + account_html)
+            + f'<div class="grid">{grid}</div>' + _extra_html(contact) + account_html)
 
 
 def _snapchatters_section(snapchatters, closure=None):
@@ -843,6 +914,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
         # every conversation id and title the contact is in, so searching an id finds the people in
         # it — and so a group chat's members are findable from the group's own id
         searchable += [c["id"] for c in convs] + [c.get("title") or "" for c in convs]
+        searchable += [str(value) for _label, value, _note in contact.get("extra") or ()]
         if contact["is_owner"]:
             searchable.append("device owner")
         rows.append([
@@ -891,6 +963,8 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
 """
 
     partial_css, banner, figures = partial_report.page_chrome(closure, "ct", prov)
+    ident_label, ident_note = _IDENTIFIER_SOURCES.get(friends_source,
+                                                      ("primary.docobjects", PRIMARY_SOURCE_NOTE))
 
     counts_hint = ("Message and time counts are the total across EVERY conversation this contact "
                    "takes part in (see the Conversations column), taken from the Conversations "
@@ -921,11 +995,11 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            f'</div>'
            f'<div class="sum">Up to four identifiers per contact'
            f'{report_ui.info_icon(IDENTIFIER_NOTE)}'
-           + (f' &middot; username history from primary.docobjects'
-              f'{report_ui.info_icon(PRIMARY_SOURCE_NOTE)}' if identifiers_read else
+           + (f' &middot; username history from {_esc(ident_label)}'
+              f'{report_ui.info_icon(ident_note)}' if identifiers_read else
               f' &middot; <span title="the username index tables were not available">no username '
               f'history available</span>'
-              f'{report_ui.info_icon(PRIMARY_SOURCE_NOTE)}') +
+              f'{report_ui.info_icon(ident_note)}') +
            f'{figures}</div></header>'
            f'{banner}'
            f'{_source_block(friends_source)}'
@@ -1038,6 +1112,9 @@ def index(friends_df, outdir, owner_user_id="", owner_username="", friends_sourc
     identifiers = load_identifiers(primary) if identifiers is None else identifiers
     contacts = apply_identifiers(
         normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)
+    if friends_source in _USERNAME_TABLES:
+        for contact in contacts:
+            contact["username_tables"] = _USERNAME_TABLES[friends_source]
     if snapchatters is None:
         # everyone else the store knows: the contacts (whichever artifact they came from) and the
         # owner are what make the rest "not contacts", so they are decided here, after the contacts

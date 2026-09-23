@@ -1,11 +1,13 @@
 from zipfile import ZipFile
 import fnmatch
+import functools
 import sys
 import glob
 import os
 import json
 import struct
 import shutil
+import hashlib
 import logging
 import re
 import plistlib
@@ -91,6 +93,108 @@ def wanted(path, patterns):
     return False
 
 
+#: Snapchat's Android package name — the directory every one of its data areas is named after.
+ANDROID_PACKAGE = "com.snapchat.android"
+
+# Where an Android extraction keeps one app's files, and the device path each is written under.
+#
+# A full file system extraction shows the **same** files through several of the paths Android mounts
+# them at, and which of them an archive carries depends on the tool: one GrayKey archive of a Pixel
+# holds every file of an app's private data three times — /data/data/<pkg>, /data/user/0/<pkg> and
+# /data_mirror/data_ce/null/0/<pkg> — and a UFED archive holds the app's external folder under
+# Dump/data/media/0/Android/data/<pkg> and again under four Dump/mnt/runtime/*/emulated/0/… views.
+# Matching the package name anywhere in the path, as this module used to, wrote every copy onto the
+# same file and merged the app's external folder into its private one. So each entry is mapped to one
+# canonical device path instead, and where several entries map to the same path the one read through
+# the canonical mount (lowest rank) is kept.
+#
+# Each pattern is (regex, area, rank). The regex runs on the entry name with separators normalised
+# and any leading "/" removed; `pre` is the tool's own prefix ("Dump/", "") and `rest` the path inside
+# the app's directory. Areas:
+#   ce  — the app's private data (credential-encrypted storage): databases, files, shared_prefs, cache
+#   de  — device-encrypted storage, readable before the first unlock
+#   ext — the app-specific folders on shared storage: Android/data, Android/media, Android/obb
+@functools.lru_cache(maxsize=4)
+def _android_patterns(package):
+    pkg = re.escape(package)
+    roots = (
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data/data/{pkg}(?P<rest>/.*|$)"), "ce", 0),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data/user/(?P<user>\d+)/{pkg}(?P<rest>/.*|$)"), "ce", 1),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data_mirror/data_ce/[^/]+/(?P<user>\d+)/{pkg}"
+                    rf"(?P<rest>/.*|$)"), "ce", 2),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data/user_de/(?P<user>\d+)/{pkg}(?P<rest>/.*|$)"), "de", 0),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data_mirror/data_de/[^/]+/(?P<user>\d+)/{pkg}"
+                    rf"(?P<rest>/.*|$)"), "de", 2),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)data/media/(?P<user>\d+)/Android/(?P<sub>data|media|obb)/"
+                    rf"{pkg}(?P<rest>/.*|$)"), "ext", 0),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)(?:mnt/runtime/[^/]+/emulated|mnt/user/\d+/emulated|"
+                    rf"storage/emulated|mnt/pass_through/\d+/emulated)/(?P<user>\d+)/Android/"
+                    rf"(?P<sub>data|media|obb)/{pkg}(?P<rest>/.*|$)"), "ext", 2),
+        (re.compile(rf"^(?P<pre>(?:.*?/)??)(?:sdcard|storage/self/primary)/Android/"
+                    rf"(?P<sub>data|media|obb)/{pkg}(?P<rest>/.*|$)"), "ext", 3),
+    )
+    # The last resort for an archive that holds the app's directory on its own ("com.snapchat.android/
+    # databases/…", as an app-only export or an older version of this tool would leave it): only when
+    # no entry matched a device path above, and only when the next segment is a directory an Android
+    # app's private data actually has — the package name also appears inside other apps' data and in
+    # /data/misc/profiles, which are not the app's own files.
+    flat = re.compile(
+        rf"^(?P<pre>(?:.*?/)??){pkg}(?P<rest>/(?:databases|files|shared_prefs|cache|no_backup|"
+        rf"code_cache|app_[^/]+|lock_screen_mode)(?:/.*|$))")
+    return roots, flat
+
+
+def android_canonical_root(area, user="0", sub="data", package=ANDROID_PACKAGE):
+    """The device path an Android data area is written under, relative to the extraction folder."""
+    user = str(int(user)) if str(user).isdigit() else "0"
+    if area == "ce":
+        return f"data/data/{package}" if user == "0" else f"data/user/{user}/{package}"
+    if area == "de":
+        return f"data/user_de/{user}/{package}"
+    return f"data/media/{user}/Android/{sub}/{package}"
+
+
+def android_entry(name, flat=False, package=ANDROID_PACKAGE):
+    """``(canonical relative path, area, rank, archive path up to the package)`` for one archive
+    entry of the app's Android data, or ``None`` when the entry is not one of its files.
+
+    ``flat`` also accepts an app directory that sits in the archive with no device path around it —
+    only asked for when nothing in the archive matched a device path.
+    """
+    if package not in name:                                  # the cheap test, for a million entries
+        return None
+    path = name.replace("\\", "/").lstrip("/")
+    roots, flat_re = _android_patterns(package)
+    # The match that starts EARLIEST in the path wins, whichever pattern it is: an app's own folders
+    # can contain a path shaped like another mount point (one Pixel's Play services data holds
+    # cache/data/user/0/<its own package>/…), and that inner path must stay inside the app's tree.
+    best = None
+    for regex, area, rank in roots:
+        mo = regex.match(path)
+        if mo and (best is None or len(mo.group("pre")) < len(best[0].group("pre"))):
+            best = (mo, area, rank)
+    if best is not None:
+        mo, area, rank = best
+        groups = mo.groupdict()
+        root = android_canonical_root(area, groups.get("user") or "0", groups.get("sub") or "data",
+                                      package)
+        rest = mo.group("rest")
+        archive_root = path[:len(path) - len(rest)] if rest else path
+        return root + rest, area, rank, archive_root
+    if flat:
+        mo = flat_re.match(path)
+        if mo:
+            rest = mo.group("rest")
+            return (android_canonical_root("ce", package=package) + rest, "ce", 9,
+                    path[:len(path) - len(rest)])
+    return None
+
+
+def _is_symlink(info):
+    """A ZIP entry recording a symbolic link (Unix mode in the high half of external_attr)."""
+    return ((info.external_attr >> 16) & 0o170000) == 0o120000
+
+
 #: The "extended timestamp" extra field (`UT`), which carries **UTC** seconds.
 _ZIP_UT_ID = 0x5455
 
@@ -120,6 +224,184 @@ def zip_mtime(info):
         if header == _ZIP_UT_ID and body and body[0] & 1 and len(body) >= 5:
             return struct.unpack_from("<i", body, 1)[0]
     return None
+
+
+class SnapchatNotFound(RuntimeError):
+    """The extraction holds no data of the Snapchat app for the platform the run was asked for."""
+
+
+def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
+    """Write every file of Snapchat's Android data areas under its device path (see
+    :func:`android_entry`) and record what the archive said about each one.
+
+    The whole of each area is taken — the databases, ``files/`` (the cache folders, whose file names
+    are only meaningful next to the databases that index them), ``shared_prefs`` and ``cache`` — rather
+    than a list of folders: which of them an app version uses moves between versions, and a folder
+    this tool did not ask for is a folder the reports cannot account for.
+
+    Returns the extraction folder, i.e. the directory ``data/`` is written into. Raises
+    :class:`SnapchatNotFound` when the archive holds none of the app's files.
+    """
+    def root_of(rel):
+        return rel[:rel.index(package) + len(package)]
+
+    def pick(flat):
+        chosen, seen_at, dropped, differing, symlinks = {}, {}, 0, 0, 0
+        for name in names:
+            hit = android_entry(name, flat=flat, package=package)
+            if hit is None or name.endswith("/"):
+                continue
+            rel, area, rank, archive_root = hit
+            seen_at.setdefault(root_of(rel), set()).add(archive_root)
+            try:
+                info = zip1.getinfo(name)
+            except KeyError:
+                continue
+            if _is_symlink(info):
+                symlinks += 1
+                continue
+            current = chosen.get(rel)
+            if current is not None:
+                dropped += 1
+                if (current[4].CRC, current[4].file_size) != (info.CRC, info.file_size):
+                    differing += 1
+                if current[0] <= rank:
+                    continue
+            chosen[rel] = (rank, name, area, archive_root, info)
+        return chosen, seen_at, dropped, differing, symlinks
+
+    chosen, seen_at, dropped, differing, symlinks = pick(flat=False)
+    if not chosen:
+        chosen, seen_at, dropped, differing, symlinks = pick(flat=True)
+    if not chosen:
+        raise SnapchatNotFound(
+            f"No Snapchat data ({ANDROID_PACKAGE}) was found in this extraction: no file under "
+            f"/data/data/{ANDROID_PACKAGE}, /data/user/<n>/{ANDROID_PACKAGE}, "
+            f"/data/user_de/<n>/{ANDROID_PACKAGE} or …/Android/data/{ANDROID_PACKAGE}. "
+            f"Check that the app is installed on the device and that the extraction is a full "
+            f"file system extraction.")
+
+    wanted_names = {record[1] for record in chosen.values()}
+    fs_meta = device_fs.load_ufed_metadata(zip1, names, lambda name: name in wanted_names)
+
+    roots, renamed, mtimes, fs = {}, {}, {}, {}
+    written = failed = hash_checked = 0
+    hash_mismatch = []
+    for rel in sorted(chosen):
+        _rank, name, area, archive_root, info = chosen[rel]
+        root = root_of(rel)
+        stats = roots.setdefault(root, {"area": area, "files": 0, "bytes": 0,
+                                        "archive_roots": []})
+        if archive_root not in stats["archive_roots"]:
+            stats["archive_roots"].append(archive_root)
+        safe = _safe_rel(rel)
+        if safe != rel:
+            renamed[safe] = rel
+        target = out(safe)
+        digest = hashlib.sha256()
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with zip1.open(name) as src, open(target, "wb") as dst:
+                for block in iter(lambda: src.read(1 << 20), b""):
+                    digest.update(block)
+                    dst.write(block)
+        except (OSError, RuntimeError, ValueError) as error:
+            # an entry the archive cannot give back (a bad CRC, a name the filesystem refuses) is
+            # counted and named in the log: silently leaving it out is how evidence goes missing
+            failed += 1
+            logger.warning(f"Could not extract {name}: {error}")
+            continue
+        written += 1
+        stats["files"] += 1
+        stats["bytes"] += info.file_size
+        stamp = zip_mtime(info)
+        if stamp is not None and stamp <= 0:
+            stamp = None                                     # not recorded, not 1970
+        record = fs_meta.get(name) or device_fs.from_zip_entry(info, extended=True)
+        if record and record.get("archive_sha256"):
+            # the acquisition tool's own hash of this entry (GrayKey): the bytes written here must
+            # be the bytes it read, and a difference is named rather than trusted away
+            hash_checked += 1
+            record["archive_sha256_matches"] = record["archive_sha256"] == digest.hexdigest()
+            if not record["archive_sha256_matches"]:
+                hash_mismatch.append(name)
+        if stamp is not None:
+            mtimes[safe] = stamp
+        if record:
+            fs[safe] = record
+        try:
+            if record and record.get("precision") == "ns" and record.get("mtime"):
+                os.utime(target, ns=(record.get("atime") or record["mtime"], record["mtime"]))
+            elif stamp is not None and stamp > 0:
+                os.utime(target, (stamp, stamp))
+        except (OSError, KeyError, TypeError, ValueError):
+            pass                                             # a time the filesystem will not take
+
+    for root, stats in roots.items():
+        others = sorted(seen_at.get(root, set()) - set(stats["archive_roots"]))
+        if others:
+            stats["also_seen_at"] = others
+    # An owner of uid 0 / gid 0 on EVERY file of an app's folders is not the device's record: Android
+    # gives each app's private files the app's own uid (10000 and up). A UFED archive of an Android
+    # phone writes 0/0 for every entry, so there the owner is a placeholder and is left out rather
+    # than shown as "root". An archive that records owners (GrayKey) keeps them.
+    owned = [r for r in fs.values() if "uid" in r or "gid" in r]
+    placeholder_owner = bool(owned) and all(r.get("uid", 0) == 0 and r.get("gid", 0) == 0
+                                            for r in owned)
+    if placeholder_owner:
+        for r in owned:
+            r.pop("uid", None)
+            r.pop("gid", None)
+    logger.info(f"Snapchat ({package}) data areas in this extraction:")
+    for root, stats in sorted(roots.items()):
+        where = ", ".join(stats["archive_roots"][:3])
+        logger.info(f"  /{root}: {stats['files']} file(s), {stats['bytes'] / (1024 * 1024):.1f} MB "
+                    f"(archive: {where})")
+    if dropped:
+        logger.info(f"{dropped} archive entr(y/ies) were the same files seen through another mount "
+                    f"point (/data/user/0, /data_mirror, /mnt/runtime …) and were written once"
+                    + (f" — {differing} of them differ in size or CRC from the copy kept, which "
+                       f"was read through the canonical path" if differing else ""))
+    if symlinks:
+        logger.info(f"{symlinks} symbolic link(s) in the app's folders were not written (a link is "
+                    f"a pointer to another path, not a file of the app's)")
+    if renamed:
+        logger.info(f"{len(renamed)} file name(s) contained characters Windows does not allow and "
+                    f"were percent-encoded on disk; their exact names are in extraction_manifest.json")
+    if failed:
+        logger.warning(f"{failed} file(s) could not be extracted — see the lines above")
+    if hash_checked:
+        if hash_mismatch:
+            logger.warning(f"{len(hash_mismatch)} of {hash_checked} file(s) do NOT match the SHA-256 "
+                           f"the acquisition tool recorded in the archive, e.g. {hash_mismatch[0]}")
+        else:
+            logger.info(f"All {hash_checked} extracted file(s) that carry the acquisition tool's own "
+                        f"SHA-256 in the archive match it")
+    if placeholder_owner:
+        logger.info("The archive records owner uid 0 / gid 0 for every file of the app — not the "
+                    "device's owner (an Android app's files belong to its own uid); the owner is "
+                    "left out of the reports")
+    try:
+        with open(out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
+            json.dump({"platform": "android", "package": package,
+                       # canonical device folder -> the area, how much of it was written, the
+                       # archive paths it was read from (the tool's own prefix included) and the
+                       # other mount points the archive carried the same files under
+                       "roots": roots,
+                       # iOS folders carry a truncated device prefix here; Android files are written
+                       # under their device path already, so there is nothing to put back
+                       "container_prefixes": {},
+                       "renamed": renamed, "mtimes": mtimes, "fs": fs,
+                       "duplicates_skipped": dropped, "duplicates_differing": differing,
+                       "symlinks_skipped": symlinks, "failed": failed,
+                       "archive_hashes_checked": hash_checked,
+                       "archive_hash_mismatches": hash_mismatch,
+                       "owner_placeholder": placeholder_owner}, mf, indent=2)
+    except OSError as err:
+        logger.debug(f"Could not write extraction manifest: {err}")
+    logger.info(f"Snapchat files extracted: {written} file(s) under "
+                f"{os.path.realpath(out('data'))}")
+    return os.path.realpath(dest if dest not in ("", ".") else ".").replace("\\", "/")
 
 
 def extract(file_name, mode, dest="."):
@@ -160,11 +442,7 @@ def extract(file_name, mode, dest="."):
         "app_group_plist_storage",
     ]
 
-    android_files = [
-        "com.snapchat.android/databases",  #### Filer som behövs från Android
-        "com.snapchat.android/files/file_manager/chat_snap",
-        "com.snapchat.android/files/file_manager/snap",
-    ]
+    # Android takes the app's whole data areas rather than a list of folders: see _extract_android.
 
     if dest not in ("", "."):
         os.makedirs(dest, exist_ok=True)
@@ -178,15 +456,17 @@ Rename the folders and run again to extract Snapchat data from zip
 ##################################################################################################################""")
             return os.path.realpath(_out("Application")).replace("\\", "/"), os.path.realpath(_out("AppGroup")).replace("\\", "/")
     elif mode == "android":
-        if os.path.isdir(_out("com.snapchat.android")):
+        # this build's layout (the device paths, see android_entry), or the flat
+        # "com.snapchat.android" folder earlier versions wrote — the Android parser reads both
+        if (os.path.isdir(_out("data")) and os.path.isfile(_out("extraction_manifest.json"))) \
+                or os.path.isdir(_out(ANDROID_PACKAGE)):
             logger.info("""
 ##################################################################################################################
-com.snapchat.android folder already found, assuming files are already extracted.
+Android Snapchat data already found in the extraction folder, assuming files are already extracted.
 Rename the folder and run again to extract Snapchat data from zip
 ##################################################################################################################""")
-            return os.path.realpath(_out("com.snapchat.android")).replace("\\", "/")
+            return os.path.realpath(dest if dest not in ("", ".") else ".").replace("\\", "/")
 
-    snapchat_found = False
     logger.info(f"Reading contents of zip {file_name}")
     with ZipFile(file_name, "r") as zip1:
         files_in_zip = zip1.namelist()
@@ -194,42 +474,11 @@ Rename the folder and run again to extract Snapchat data from zip
         logger.info("Extracting relevant Snapchat files from zip")
         if mode == "ios":
             files_to_extract = ios_files
-        elif mode == "android":
-            files_to_extract = android_files
-        else:
+        elif mode != "android":
             logger.error("Invalid OS when extracting files from zip")
 
         if mode == "android":
-            try:
-                for i in files_in_zip:
-                    if wanted(i, files_to_extract):
-                        try:
-                            index = i.find("com.snapchat.android")
-                            if index == -1:
-                                continue
-                            else:
-                                snapchat_found = True
-                                data = zip1.read(i)
-                                out_path = _out(i[index:])
-                                if not os.path.exists(os.path.dirname(out_path)):
-                                    os.makedirs(os.path.dirname(out_path))
-                                try:
-                                    with open(out_path, "wb") as file:
-                                        file.write(data)
-                                except PermissionError:
-                                    pass
-                        except Exception as err:
-                            pass
-                            # logger.info(err)
-            except Exception as err:
-                pass
-                # logger.info(err)
-            if snapchat_found:
-                logger.info("Snapchat files extracted to com.snapchat.android folder")
-                return os.path.realpath(_out("com.snapchat.android")).replace("\\", "/")
-            else:
-                logger.warning("Snapchat not found in extraction")
-                os.system("pause")
+            return _extract_android(zip1, files_in_zip, dest, _out)
 
         if mode == "ios":
             # Resolve Snapchat's containers first, then only pull files from within them.

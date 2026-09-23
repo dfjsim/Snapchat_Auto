@@ -31,7 +31,6 @@ import re
 import sys
 import json
 import html
-import glob
 import shutil
 import sqlite3
 import hashlib
@@ -42,6 +41,7 @@ from urllib.parse import urlparse
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
+from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
@@ -51,6 +51,7 @@ from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
+    cache_controller_paths,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -224,9 +225,10 @@ def _read_all(views, table):
 
 
 def find_cache_controllers(app):
-    """Locate every cache_controller.db under the app container."""
-    return glob.glob(os.path.join(app, "Documents", "global_scoped", "cachecontroller",
-                                  "cache_controller.db"))
+    """Locate every cache_controller.db under the app container — the iOS location
+    (``Documents/global_scoped/cachecontroller/``) and the Android one
+    (``databases/native_content_manager/``). See ``memories_media_report.cache_controller_paths``."""
+    return cache_controller_paths(app)
 
 
 # scdb URL columns whose CDN token addresses an SCContent cache file (CACHE_KEY = SHA256(token)[:16]).
@@ -259,6 +261,10 @@ def load_memory_index(app):
     linked to a Memory can be found by searching that URL (only ~1 cache entry in 3 carries a
     ``CONTENT_RETRIEVAL_METADATA`` URL of its own).
     """
+    if android_layout.is_app_dir(app):
+        # the Android app keeps its Memories in memories.db, not in a Core Data store
+        from scripts import memories_android_report
+        return memories_android_report.memory_index(app)
     snap_ids, url_keys, media_ids, snap_urls = {}, {}, {}, {}
     for p in find_profiles(app):
         try:
@@ -800,6 +806,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     url_keys = mem_index["url_keys"]
     media_ids = mem_index["media_ids"]
     snap_urls = mem_index.get("snap_urls") or {}
+    # the id columns in the words the link's explanation uses (iOS: the Core Data columns)
+    labels = mem_index.get("labels") or {"snap": "ZSNAPID", "media": "ZMEDIAID"}
     memory_pages = memory_pages or {}
     views = sqlite_open.open_views(db, workdir)
     try:
@@ -877,7 +885,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                 canonical, user_hash = snap_ids[c["snap_uuid"].upper()]
                 memory = {"snap_id": canonical, "user_hash": user_hash}
                 basis = (f"The claim EXTERNAL_KEY \"{c['external_key']}\" embeds this Memory's "
-                         f"ZSNAPID ({canonical}) — the primary, most direct link.")
+                         f"{labels['snap']} ({canonical}) — the primary, most direct link.")
                 break
         if not memory and key.lower() in url_keys:             # 2. CDN URL token == CACHE_KEY
             canonical, user_hash, field = url_keys[key.lower()]
@@ -892,7 +900,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     canonical, user_hash = media_ids[mo.group(0).upper()]
                     memory = {"snap_id": canonical, "user_hash": user_hash}
                     basis = (f"Fallback: EXTERNAL_KEY UUID {mo.group(0)} matches this Memory's "
-                             f"ZMEDIAID (Memory {canonical}).")
+                             f"{labels['media']} (Memory {canonical}).")
                     break
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
@@ -970,6 +978,34 @@ CC_SCOPE_NOTE = (
     "cache folders. Everything else under Library/Caches — the story renders, the URL-keyed "
     "PINCache stores, saved chat media and the cached documents — is the Cached media (Library/Caches) "
     "report's subject, and no file is listed by both.")
+
+# The words a few of this report's explanations use that differ between the platforms: the database
+# the Memories come from and the column that identifies one. The cached-file index itself, its tables
+# and its SCContent folders are the same on both — written by the content cache the two apps share.
+PLATFORM_WORDS = {
+    "ios": {
+        "scope": CC_SCOPE_NOTE,
+        "mem_id": "ZSNAPID",
+        "mem_key_src": "ZGALLERYSNAP / gallery.encrypteddb",
+        "mem_url": "scdb-27 ZGALLERYSNAP → linked Memory's CDN URL",
+    },
+    "android": {
+        "scope": ("Every file cache_controller.db (databases/native_content_manager) indexes, i.e. "
+                  "the com.snap.file_manager_*_SCContent_* folders under "
+                  "files/native_content_manager. The app's other cache folders "
+                  "(files/file_manager/…, cache/…) are not indexed by it and are not listed here."),
+        "mem_id": "memories_snap._id",
+        "mem_key_src": "memories.db memories_snap.media_key / media_iv",
+        "mem_url": "memories.db → linked Memory's download URL",
+    },
+}
+
+
+def _words(entry_or_platform):
+    """The :data:`PLATFORM_WORDS` for an entry (or a platform name) — iOS unless it says Android."""
+    platform = (entry_or_platform.get("platform") if isinstance(entry_or_platform, dict)
+                else entry_or_platform)
+    return PLATFORM_WORDS.get(platform or "ios", PLATFORM_WORDS["ios"])
 
 ORPHAN_CATEGORY = "Not in the index"
 
@@ -1174,10 +1210,10 @@ def _decrypted_basis(entry):
     snaps = sorted({d.get("snap_id", "") for d in entry.get("decrypted") or []})
     return ("The bytes cached here are encrypted, so they cannot be displayed as they are stored. "
             "The Memories report decrypted this exact CACHE_KEY with the AES-256-CBC key/IV of "
-            f"Memory {', '.join(s for s in snaps if s) or '(unknown)'} (from ZGALLERYSNAP / "
-            "gallery.encrypteddb) and wrote the plaintext media beside its report; this links to "
-            "that decrypted copy, which is a derived file — the original cached bytes' hashes are "
-            "shown above.")
+            f"Memory {', '.join(s for s in snaps if s) or '(unknown)'} (from "
+            f"{_words(entry)['mem_key_src']}) and wrote the plaintext media beside its report; this "
+            "links to that decrypted copy, which is a derived file — the original cached bytes' "
+            "hashes are shown above.")
 
 
 MULTI_TARGET_BASIS = (
@@ -1448,7 +1484,7 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     # entries carry no CONTENT_RETRIEVAL_METADATA of their own, so this is the only URL that
     # identifies the file's source.
     for u in (e["memory"] or {}).get("urls") or []:
-        grid.append(("scdb-27 ZGALLERYSNAP → linked Memory's CDN URL", u))
+        grid.append((_words(e)["mem_url"], u))
     ref = e["retrieval"].get("content_ref")
     if ref:
         ref = str(ref)
@@ -1628,7 +1664,8 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                          f"<td class='mono'>{_esc(d.get('snap_id'))}</td><td>{thumb}</td></tr>")
         parts.append("<div class='sect'>Decrypted copy (Memories report)" + _info(_decrypted_basis(e))
                      + "</div><table class='sub'><tr><th>role</th><th>type</th><th>size</th>"
-                       "<th>MD5 / SHA-256 of the decrypted media</th><th>Memory (ZSNAPID)</th>"
+                       "<th>MD5 / SHA-256 of the decrypted media</th>"
+                       f"<th>Memory ({_words(e)['mem_id']})</th>"
                        "<th>view</th></tr>" + "".join(drows) + "</table>")
 
     # tombstones
@@ -1662,7 +1699,8 @@ def _external_key_summary(claims):
 
 
 def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, manifest,
-                    db_display, run_id="default", wal_infos=None, closure=None, prov=None):
+                    db_display, run_id="default", wal_infos=None, closure=None, prov=None,
+                    platform="ios"):
     # The source fingerprints this run recorded, so the examiner's saved selection carries
     # them and a later partial run can check the extraction it is handed against this one.
     sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
@@ -1893,7 +1931,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  Memories report's decrypted copy &middot; <b>{encrypted_locked}</b> have no key available</div>
  <div class="sum"><b>{orphans}</b> file(s) on disk are not referenced by cache_controller.db
  {_info(ORPHAN_BASIS) if orphans else ''}</div>
- <div class="sum">Scope: {html.escape(CC_SCOPE_NOTE)}</div>
+ <div class="sum">Scope: {html.escape(_words(platform)["scope"])}</div>
  <div class="sum">Source: {html.escape(db_display)}</div>
  {figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
 {banner}{report_ui.missing_data_banner('CacheController_report.html')}
@@ -2082,6 +2120,12 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         e["ondisk_mtimes"] = stamps
         e["ondisk_fs"] = records
 
+    # which platform's words the explanations use (see PLATFORM_WORDS)
+    platform = "android" if android_layout.is_app_dir(app) else "ios"
+    if platform != "ios":
+        for e in all_entries:
+            e["platform"] = platform
+
     # The closure's view. Rows keep the order established above, which `render` preserves: poster
     # extraction runs under an overall budget, so re-ordering the publish could change which frames
     # get extracted.
@@ -2101,7 +2145,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                                 virtual=virtual, wal_infos=wal_infos, tz_label=tz_label,
                                 rel_prefix=rel_prefix, rdir=rdir, scfull=scfull, scparts=scparts,
                                 manifest=manifest, src_root=src_root, memory_media=memory_media,
-                                cache_media=cache_media, ms_fmt=ms_fmt)
+                                cache_media=cache_media, ms_fmt=ms_fmt, platform=platform)
 
 
 def _drop_sqlite_views(outdir):
@@ -2153,7 +2197,8 @@ def render(stage, closure=None, prov=None):
     report, stats = generate_report(all_entries, stage["virtual"], outdir, stage["tz_label"],
                                     stage["rel_prefix"], src_root, manifest, db_display,
                                     report_ui.run_id(rdir), stage["wal_infos"],
-                                    closure=closure, prov=prov)
+                                    closure=closure, prov=prov,
+                                    platform=stage.get("platform") or "ios")
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
     if closure is not None:
         removed = _drop_sqlite_views(outdir)

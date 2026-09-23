@@ -24,7 +24,22 @@ Memories / My Eyes Only.
 - iOS `Library/Caches` report: `scripts/cache_media_report.py` (everything under `Library/Caches`
   that `cache_controller.db` does **not** index: story renders, URL-keyed PINCache stores, saved
   chat media, and the cached documents). Disjoint from the cache_controller report by design.
-- Android: `scripts/getCacheAndroid.py`.
+- Android: `scripts/ParseSnapchat_Android.py` — the Android run. The chat database (`arroyo.db`) and
+  the cached-file index (`cache_controller.db` + `com.snap.file_manager_*_SCContent_*`) are the **same
+  databases as on iOS**, so the chat parsing is `ParseSnapchat_iOS`'s functions called unchanged and
+  the Conversations and cache_controller reports are the iOS ones; what is Android-only is the account
+  (`arroyo.db` `required_values`, `shared_prefs`), the contacts (`main.db` `Friend` +
+  `CombinedUsername`, carried into the Contacts report as per-row `_extra` fields) and the Memories
+  (`scripts/memories_android_report.py`, `memories.db`). `scripts/android_layout.py` finds every
+  artifact in an extracted tree and writes `android_survey.json` (structure only, no content).
+  `scripts/getCacheAndroid.py` is the legacy single-page Android report. The Android tests run on
+  `tests/android_fixture.py` (a synthetic app folder, archived GrayKey- or UFED-style) — see
+  [snapchat_android.md](docs/snapchat_android.md) before touching it.
+- Android extraction: `extract_zip.android_entry` maps every archive entry to its **canonical device
+  path** (`data/data/<pkg>`, `data/user_de/<n>/<pkg>`, `data/media/<n>/Android/data/<pkg>`) and writes
+  it once — a GrayKey archive carries an app's private data three times (`/data/data`, `/data/user/0`,
+  `/data_mirror/…`), a UFED one its shared-storage folder five times. Each file is checked against the
+  archive's own SHA-256 where GrayKey recorded one.
 - Shared report UI: `scripts/report_ui.py` (virtualized index tables, paging, row selection,
   cross-report anchor navigation, "?" popovers, page chrome) — used by the Conversations, Contacts,
   Memories and cache_controller reports, with its `NAV_JS`/`NAV_CSS` also injected into the legacy
@@ -175,6 +190,10 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   keychain-required matrix (geolocation and My Eyes Only always need the FFS keychain;
   new-schema regular-memory imagery does not), multi-user handling, and the decrypt-and-match
   pack linker. Verified on two devices. Implemented by `scripts/memories_media_report.py`.
+- [Snapchat for Android](docs/snapchat_android.md) — where the app keeps its data, how an Android
+  archive is mapped to one device path per file (GrayKey vs UFED layouts, their per-entry metadata:
+  the `IN` inode/device and `S2` SHA-256 fields, UFED's placeholder owner and change time), what each
+  Android report reads, and the layout survey. Credits ALEAPP's Android Snapchat module.
 - [Snapchat iOS `Library/Caches` media & documents](docs/snapchat_ios_cache_media.md) — what is
   cached outside `cache_controller.db`, how `sccache.gallery-stories-snap.data` is decrypted
   (AES-256-CBC, key + fixed IV in `Documents/ClientEncryptionService.plist`, no keychain), and
