@@ -241,7 +241,8 @@ Library/Caches reports so a file reads the same way in all three:
   text. Most cached files carry nothing beyond pixel size, and the block says so.
 * **The device's record of the file** — under every on-disk path: created (birth), modified, accessed
   and inode-changed times, protection class, inode, mode and owner, from `extraction_manifest.json`
-  (a UFED archive's `metadata.msgpack` at nanosecond precision, else the entry's `UT` field; see
+  (a UFED archive's `metadata.msgpack` at nanosecond precision, else the entry's `UT` field — which
+  in a UFED archive holds the access time only; see
   [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)).
   Never the extracted copy's own times, which are when *we* unzipped it — and not a claim time
   either: `CREATION_TIMESTAMP_MILLIS` is when the app registered the claim, *modified* is when the

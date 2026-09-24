@@ -6,6 +6,34 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.8.0-beta.2] — 2026-09-24
+
+### Fixed
+- **A UFED iOS archive's access time was shown as the device's modification time.** A UFED / CLBX
+  archive's `UT` extra field is flagged mtime / atime / ctime but holds the access time in all three
+  slots; the real times are in its `metadata.msgpack`. `extract_zip` read the field as the
+  modification time for the manifest's `mtimes`, for a file the stat table has no record of (or
+  every file, when the table cannot be read) and for the extracted copy's mtime. It now reads it as
+  the access time only (`device_fs.from_zip_entry(ut_access_only=True)`), takes `mtimes` from the
+  table, and never sets a time from it. The archive is recognised by its stat table, on iOS and
+  Android alike.
+  **Reports made by 1.6.0-beta.2 to 1.6.1-beta.1 from a UFED iOS extraction** show the access time
+  as *modified* wherever it differs from the modification time, and so does any later report built
+  from an extraction folder those versions wrote. Reports made since 1.6.2-beta.1 read the stat
+  table first and are right wherever it has a record of the file.
+- The manifest records which reading applied (`archive`: `clbx`, `graykey` or `zip`). A folder written
+  before that is read through `device_fs.manifest_times`: shown as the access time when it holds
+  stat-table records or its containers were read from under `filesystem<N>/`, with both readings when
+  it cannot say, and the run log advises re-extracting.
+- Wording: the popover no longer says a GrayKey acquisition *commonly* sets the access and change
+  times (it *can*); GrayKey's fourth `UT` value is the birth time because it matched UFED's named
+  birth time for the same device, not because it precedes the modification time; the claim that two
+  tools' agreeing stamps proved `UT` to be the modification time is withdrawn, and the extraction
+  dates quoted with it are removed from the docs. `_DEVICE_MTIME_BASIS` (unused) is gone.
+- The Android test archives carry the `UT` field each tool really writes — GrayKey modified /
+  accessed / changed plus its `S2` SHA-256, UFED modified / accessed / 0 — instead of a four-value
+  one no Android archive has.
+
 ## [1.8.0-beta.1] — 2026-09-22
 
 The Android side, rebuilt to produce the same reports as iOS — see

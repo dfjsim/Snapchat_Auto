@@ -7,16 +7,26 @@ Why this module exists
 An extraction archive records more about a file than its bytes, and the two acquisition tools in
 use record it differently:
 
-* A **Cellebrite UFED / CLBX** archive (``version`` = ``CLBX-…``) carries ``metadata<N>/metadata.msgpack``
-  beside ``filesystem<N>/``: one map of *every path on the volume* to its stat record —
+* A **Cellebrite UFED / CLBX** archive carries ``metadata<N>/metadata.msgpack`` beside
+  ``filesystem<N>/``: one map of *every path on the volume* to its stat record —
   ``atime``/``btime``/``ctime``/``mtime`` in **nanoseconds**, ``uid``/``gid``, ``inode``, ``links``,
-  ``mode``, ``prot`` (the iOS data-protection class) and ``xattr``. Its ZIP entries also carry a
-  standard ``UT`` extra field, but at whole seconds and without the birth time.
-* A **GrayKey** archive carries the record in each entry's extra fields: a ``UT`` field with **four**
-  timestamps — mtime, atime, ctime and a non-standard fourth that is at or before mtime in practically
-  every entry, i.e. the APFS birth time — plus Info-ZIP ``ux`` (uid/gid) and tool-specific fields
-  (``S2`` = SHA-256 of the content, ``NI``, ``KG``; see TODO.md).
+  ``mode``, ``prot`` (the iOS data-protection class) and ``xattr``. Its ZIP entries also carry a ``UT``
+  extra field flagged mtime / atime / ctime, but all three slots hold one value, the **access** time,
+  in whole seconds — it matched the table's ``atime`` on every file whose access and modification
+  times differ. So a CLBX entry's ``UT`` is read as the access time and nothing else. The archive is
+  recognised by the table (:func:`clbx_tables`), not by its ``version`` member (``CLBX-…``), which an
+  older UFED archive does not have.
+* A **GrayKey** archive carries the record in each entry's extra fields: a ``UT`` field with the
+  mtime, atime and ctime — and, for an iOS device, a non-standard fourth value, the APFS birth time —
+  plus Info-ZIP ``ux`` (uid/gid) and tool-specific fields (``S2`` = SHA-256 of the content, ``IN`` =
+  inode + device, ``GK``; see TODO.md). Compared with UFED's stat record of the same device, each of
+  the four matched only its own named time.
+* A **UFED archive of an Android phone** has no table; its ``UT`` holds the mtime, the atime and 0
+  (the partial — BFU, user-data, app-selective — archives fill only the mtime).
 * Any other ZIP carries at least the ``UT`` modification time, or nothing.
+
+`extract_zip` records which of these it read in the manifest's ``archive`` (:func:`archive_kind`), and
+:func:`manifest_times` reads a manifest written before that the way its archive means it.
 
 Every report used to show only the modification time. The rest matters: the **birth time** dates the
 file's creation independently of the app's database; the access and inode-change times can show
@@ -47,6 +57,9 @@ UX_ID = 0x7875
 IN_ID = 0x4E49
 #: GrayKey: the SHA-256 of the entry's content as the acquisition tool computed it (32 bytes).
 S2_ID = 0x3253
+#: GrayKey: two bytes, ``0100`` on every sample. Not read; one of the fields that mark a GrayKey entry.
+GK_ID = 0x4B47
+_GRAYKEY_IDS = frozenset((S2_ID, IN_ID, GK_ID))
 
 NS = 1_000_000_000
 
@@ -81,21 +94,26 @@ def _extra_fields(extra):
     return out
 
 
-def from_zip_entry(info, extended=False):
+def from_zip_entry(info, extended=False, ut_access_only=False):
     """The record an archive entry's own extra fields carry, or ``None`` when they carry no time.
 
     The ``UT`` field is read for every timestamp it flags, not only the first: a GrayKey archive writes
-    four (flags ``0b1111``) for an iOS device and three for an Android one, a UFED archive three, a
-    plain zip tool one. The fourth is not in the ``UT`` specification; it is recorded as the birth time
-    with its basis stated, because across the corpus it is at or before the modification time in
-    practically every entry, which is what a birth time does and an access or change time does not.
-    A time of 0 or less is a value the archive did not record — a UFED archive of an Android phone
-    writes 0 as every file's change time — and is left out rather than shown as 1970.
+    four (flags ``0b1111``) for an iOS device and three for an Android one, a UFED archive of an Android
+    phone three, a plain zip tool one. The fourth is not in the ``UT`` specification; it is recorded as
+    the birth time with its basis stated: compared with UFED's stat record of the same device, it
+    matched the named birth time and no other. A time of 0 or less is a value the archive did not
+    record — a UFED archive of an Android phone writes 0 as every file's change time — and is left out
+    rather than shown as 1970.
+
+    ``ut_access_only`` is for an entry of a UFED / CLBX archive, whose ``UT`` holds the access time in
+    every slot whatever its flags say: the record then carries that one value as ``atime`` — never a
+    modification, change or birth time — under the source ``zip-ut-clbx``.
 
     ``extended`` also reads what only the Android extraction uses so far: the permission bits of the
     entry's Unix mode, GrayKey's inode / device number (:data:`IN_ID`) and its SHA-256 of the content
     (:data:`S2_ID`, kept as ``archive_sha256`` so the extracted bytes can be checked against it).
     """
+    source = "zip-ut-clbx" if ut_access_only else "zip-ut"
     record = None
     for header, body in _extra_fields(info.extra):
         if header == UT_ID and body:
@@ -105,22 +123,27 @@ def from_zip_entry(info, extended=False):
             kinds = [k for bit, k in ((1, "mtime"), (2, "atime"), (4, "ctime")) if flags & bit]
             if not values:
                 continue
-            record = record or {"source": "zip-ut", "precision": "s"}
+            record = record or {"source": source, "precision": "s"}
+            if ut_access_only:
+                if values[0] > 0:
+                    record["atime"] = values[0] * NS
+                continue
             for kind, value in zip(kinds, values):
                 if value > 0:
                     record[kind] = value * NS
             if flags & 8 and len(values) > len(kinds) and values[len(kinds)] > 0:
                 record["btime"] = values[len(kinds)] * NS
                 record["btime_basis"] = ("the archive's fourth UT time — not part of the UT "
-                                         "specification; read as the birth time because it is at or "
-                                         "before the modification time in practically every entry")
+                                         "specification; read as the birth time because, compared "
+                                         "with UFED's stat record of the same device, it matched the "
+                                         "named birth time and no other")
         elif extended and header == IN_ID and len(body) >= 8:
-            record = record or {"source": "zip-ut", "precision": "s"}
+            record = record or {"source": source, "precision": "s"}
             record["inode"] = int.from_bytes(body[:8], "little")
             if len(body) >= 12:
                 record["dev"] = int.from_bytes(body[8:12], "little")
         elif extended and header == S2_ID and len(body) == 32:
-            record = record or {"source": "zip-ut", "precision": "s"}
+            record = record or {"source": source, "precision": "s"}
             record["archive_sha256"] = body.hex()
         elif header == UX_ID and len(body) >= 3:
             try:
@@ -130,7 +153,7 @@ def from_zip_entry(info, extended=False):
                 gid = int.from_bytes(body[3 + uid_size:3 + uid_size + gid_size], "little")
             except (IndexError, ValueError):
                 continue
-            record = record or {"source": "zip-ut", "precision": "s"}
+            record = record or {"source": source, "precision": "s"}
             record["uid"], record["gid"] = uid, gid
     if extended and record is not None:
         mode = (info.external_attr >> 16) & 0xFFFF
@@ -169,6 +192,31 @@ def from_ufed_record(raw):
     return record
 
 
+def clbx_tables(names):
+    """The ``metadata<N>/metadata.msgpack`` stat tables among an archive's entry names. Having one is
+    what makes an archive UFED / CLBX, whose entries' ``UT`` field holds only the access time."""
+    return [n for n in names if n.lower().endswith("/metadata.msgpack")
+            and n.lower().split("/")[0].startswith("metadata")]
+
+
+def archive_kind(names, infos):
+    """Which reading of the ``UT`` field applies to an archive — recorded in the extraction manifest as
+    ``archive``, so a reader can tell where a time came from.
+
+    ``"clbx"``: the archive has a stat table; its entries' ``UT`` is the access time only.
+    ``"graykey"``: an extracted entry (``infos``) carries GrayKey's own extra fields, or the fourth
+    ``UT`` value. ``"zip"``: neither, and the ``UT`` field is read as its specification defines it — a
+    UFED archive of an Android phone is one.
+    """
+    if clbx_tables(names):
+        return "clbx"
+    for info in infos:
+        for header, body in _extra_fields(info.extra):
+            if header in _GRAYKEY_IDS or (header == UT_ID and body and body[0] & 8):
+                return "graykey"
+    return "zip"
+
+
 def load_ufed_metadata(zip_file, names, keep):
     """``{zip entry name: record}`` for the entries ``keep(name)`` accepts, out of every
     ``metadata<N>/metadata.msgpack`` the archive carries.
@@ -185,9 +233,7 @@ def load_ufed_metadata(zip_file, names, keep):
         logger.warning("msgpack is not installed — the UFED per-file metadata cannot be read")
         return {}
     out = {}
-    tables = [n for n in names if n.lower().endswith("/metadata.msgpack")
-              and n.lower().split("/")[0].startswith("metadata")]
-    for table in tables:
+    for table in clbx_tables(names):
         folder = table.split("/")[0]
         fs_prefix = "filesystem" + folder[len("metadata"):] + "/"
         mount = "/"
@@ -219,6 +265,93 @@ def load_ufed_metadata(zip_file, names, keep):
                     f"volume) — birth/access/change times at nanosecond precision, protection class, "
                     f"owner and xattrs")
     return out
+
+
+# --------------------------------------------------------------------------- earlier builds' manifests
+
+#: A UFED/CLBX archive's volumes are ``filesystem<N>/``, so the archive path a container or app folder
+#: was read from starts with one.
+_CLBX_PREFIX = re.compile(r"^/?filesystem\d*/", re.I)
+
+_LEGACY_LOGGED = set()
+
+
+def legacy_archive_kind(manifest):
+    """``(kind, basis)`` for a manifest written before ``archive`` was recorded: ``"clbx"``, ``"zip"``
+    (its ``UT`` fields were read as the specification defines them, which is right for any archive
+    but a CLBX one) or ``None`` when the folder does not say."""
+    records = [r for r in (manifest.get("fs") or {}).values() if isinstance(r, dict)]
+    if any(r.get("source") == "ufed-metadata" for r in records):
+        return "clbx", "the folder holds records from the archive's metadata.msgpack"
+    # where each container (iOS) or app folder (Android) was read from in the archive
+    prefixes = [str(p) for p in (manifest.get("container_prefixes") or {}).values()]
+    prefixes += [str(p) for root in (manifest.get("roots") or {}).values() if isinstance(root, dict)
+                 for p in root.get("archive_roots") or []]
+    if any(_CLBX_PREFIX.match(p) for p in prefixes):
+        return "clbx", "the app's files were read from under filesystem<N>/, the layout of one"
+    if prefixes or any(r.get("btime_basis") or r.get("archive_sha256") for r in records):
+        return "zip", ""
+    return None, ""
+
+
+def manifest_times(manifest, where=""):
+    """``(mtimes, fs)`` out of an extraction manifest, read the way the archive it came from means them.
+
+    A manifest that records its ``archive`` is right as written. One written before that read a
+    UFED/CLBX entry's ``UT`` field — the access time — as the modification time: into ``mtimes`` for
+    every file (1.6.0-beta.2 to 1.6.1-beta.1 recorded nothing else), and into ``fs`` for a file the
+    stat table had no record of. When the folder shows its archive was CLBX
+    (:func:`legacy_archive_kind`), those values become ``atime`` under the source ``zip-ut-clbx``, and
+    ``mtimes`` keeps only the stat table's own modification times. When the folder cannot say, they
+    keep their place under ``zip-ut-unclassified``, whose label states both readings. Either case is
+    logged once per manifest (``where``), with the advice to re-extract.
+    """
+    manifest = manifest if isinstance(manifest, dict) else {}
+    mtimes = dict(manifest.get("mtimes") or {})
+    fs = dict(manifest.get("fs") or {})
+    if manifest.get("archive") or not (mtimes or fs):
+        return mtimes, fs
+    kind, basis = legacy_archive_kind(manifest)
+    if kind == "zip":
+        return mtimes, fs
+    source = "zip-ut-clbx" if kind == "clbx" else "zip-ut-unclassified"
+    for path, record in fs.items():
+        if isinstance(record, dict) and record.get("source") == "zip-ut":
+            record = dict(record, source=source)
+            if kind == "clbx":
+                access = record.get("atime") or record.get("mtime")
+                for field in ("mtime", "atime", "ctime", "btime", "btime_basis"):
+                    record.pop(field, None)
+                if access:
+                    record["atime"] = access
+            fs[path] = record
+    for path, stamp in list(mtimes.items()):
+        record = fs.get(path)
+        if isinstance(record, dict) and record.get("source") == "ufed-metadata":
+            if record.get("mtime"):
+                mtimes[path] = record["mtime"] // NS
+            else:
+                del mtimes[path]
+            continue
+        if kind == "clbx":
+            del mtimes[path]
+        if not record and isinstance(stamp, (int, float)) and stamp > 0:
+            fs[path] = {"source": source, "precision": "s",
+                        ("atime" if kind == "clbx" else "mtime"): int(stamp) * NS}
+    if where not in _LEGACY_LOGGED:
+        _LEGACY_LOGGED.add(where)
+        name = where or "The extraction manifest"
+        if kind == "clbx":
+            logger.warning(f"{name} was written by an earlier build, which read this UFED/CLBX "
+                           f"archive's UT field as the modification time. It is the access time, "
+                           f"and is shown as such ({basis}). Re-extract from the archive for the "
+                           f"device's full record of each file.")
+        else:
+            logger.warning(f"{name} was written by an earlier build and does not say which tool "
+                           f"made the archive: its UT times are the modification time if GrayKey "
+                           f"made it and the access time if UFED did, and are shown with both "
+                           f"readings. Re-extract from the archive to tell them apart.")
+    return mtimes, fs
 
 
 # --------------------------------------------------------------------------- rendering
@@ -337,6 +470,11 @@ def attributes(record):
 SOURCE_LABELS = {
     "ufed-metadata": "UFED/CLBX metadata.msgpack (nanosecond stat record)",
     "zip-ut": "the archive entry's UT extra field (whole seconds)",
+    "zip-ut-clbx": "the archive entry's UT extra field (whole seconds), which in a UFED/CLBX archive "
+                   "holds the access time only",
+    "zip-ut-unclassified": "the archive entry's UT extra field (whole seconds), in an extraction folder "
+                           "that does not say which tool made the archive: the modification time if "
+                           "GrayKey made it, the access time if UFED did — re-extract to tell",
 }
 
 
@@ -346,18 +484,21 @@ def source_label(record):
 
 DEVICE_FS_BASIS = (
     "What the DEVICE's filesystem recorded about the cache file, as the extraction archive carries "
-    "it — never the extracted copy's own timestamps, which are the moment this tool unzipped it. Two "
+    "it — never the extracted copy's own timestamps, which are the moment this tool unzipped it. The "
     "acquisition tools record it differently, and the report names which it read:\n\n"
     "• A Cellebrite UFED (CLBX) archive carries a stat record per path in metadata.msgpack: created "
     "(birth), modified, accessed and inode-changed times at nanosecond precision, the owner, mode, "
-    "inode and the iOS data-protection class, plus extended attributes.\n\n"
+    "inode and the iOS data-protection class, plus extended attributes. Its ZIP entries' own UT "
+    "field holds only the access time, so for a file the table has no record of, that is all that "
+    "is shown.\n\n"
     "• A GrayKey archive carries the times in each entry's UT extra field at whole seconds — "
-    "modified, accessed, changed, and a fourth, non-standard value read here as the birth time "
-    "because it is at or before the modification time in practically every entry.\n\n"
-    "• Any other archive carries at least the modification time, or nothing («not recorded»).\n\n"
+    "modified, accessed, changed and, for an iOS device, a fourth, non-standard value: the birth "
+    "time, which it matched in UFED's stat record of the same device.\n\n"
+    "• Any other archive carries what its UT field records — at least the modification time — or "
+    "nothing («not recorded»).\n\n"
     "Read the four with care: «modified» is when the content was last written; «created» when the "
-    "file came into being; «accessed» and «inode changed» can be set by the acquisition itself (a "
-    "GrayKey acquisition commonly leaves both at the acquisition time), so they date the last read or "
-    "metadata change, not the user's activity. Identical instants are shown on one line. A claim "
+    "file came into being; «accessed» and «inode changed» can be set by the acquisition itself, so "
+    "they date the last read or metadata change, not necessarily the user's activity. Identical "
+    "instants are shown on one line. A claim "
     "time in cache_controller.db (CREATION_TIMESTAMP_MILLIS) is a different record again: when the "
     "app registered the claim, not when the bytes were written.")

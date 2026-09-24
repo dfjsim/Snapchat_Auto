@@ -41,7 +41,8 @@ version-dependent and never assume it.
 ## The `modified` column
 
 The report's "Copies on disk" table shows each file's mtime **on the device**, read from the extraction
-archive's own record of it — the ZIP entry's `UT` extra field, which carries UTC seconds.
+archive's own record of it — a UFED archive's stat table, else the ZIP entry's `UT` extra field, which
+carries UTC seconds (see below for what each tool writes there).
 
 It used to show `os.path.getmtime()` of the extracted copy, which is when *we* unzipped the file. That
 is a fact about the run and none about the evidence, and it sat under a bare `modified` heading beside
@@ -49,10 +50,34 @@ the path, size, producer and stored SHA-256, which are all device facts — so a
 It also stamped the processing date onto every row. The corpus gate is what exposed it: re-extracting
 the same ZIP moved every timestamp in the report to the moment of the unzip.
 
-**That an extraction ZIP preserves the device's mtime is worth stating, because it is not obvious.**
-Two extractions of one phone, taken by *different tools fifteen days apart*, carry the same stamps for
-the same Snapchat cache files — 2026-07-14 11:5x in both, while the second extraction was taken on
-2026-07-29. Archive-creation stamping could not produce that agreement.
+**That an extraction ZIP preserves the device's times is worth stating, because it is not obvious — and
+which time the `UT` field holds depends on the tool.** Every entry of each archive was compared with
+UFED's named stat record where the archive has one, with the same phone acquired by the other tool, and
+with the times Cellebrite Physical Analyzer shows for the same files:
+
+| archive | `UT` flags, values | what the values are |
+|---|---|---|
+| GrayKey, iOS | `0x0F`, four | mtime, atime, ctime, birth time — each matched only its own named time in UFED's record of the same device |
+| GrayKey, Android | `0x07`, three | mtime, atime, ctime; no birth time |
+| UFED / CLBX, iOS (has `metadata<N>/metadata.msgpack`) | `0x07`, three | **the access time, the same value in all three slots**, whole seconds; the real four times are in the msgpack |
+| UFED, Android (no msgpack) | `0x07`, three | mtime, atime, then 0; the partial archives (BFU, user-data, app-selective) fill only the mtime |
+
+An earlier version of this note read the `UT` field as the modification time everywhere, because two
+extractions of one phone by different tools carried the same stamps for the same cache files. They
+agreed only because most of the app's files had not been read since they were last written, so the
+access and modification times were equal. The CLBX reading holds on every file whose two times differ,
+across every UFED iOS archive in the corpus, several UFED versions among them.
+
+So a CLBX entry's `UT` is read as the access time and nothing else. The archive is recognised by its
+stat table, not by the `version` member (`CLBX-…`), which an older UFED iOS archive does not have.
+`mtimes` takes the table's modification time (floored to the second); a file the table has no record
+of — or every file, when the table cannot be read — gets a record holding `atime` alone, no `mtimes`
+entry and no time on the extracted copy. The manifest's `archive` (`clbx` / `graykey` / `zip`) says
+which reading applied. A manifest without it predates the distinction: 1.6.0-beta.2 to 1.6.1-beta.1
+wrote only `mtimes`, which for a UFED iOS archive held the access time. `device_fs.manifest_times`
+reads such a folder as a CLBX one when it holds stat-table records or its containers were read from
+under `filesystem<N>/`, shows the time as *accessed*, and logs the advice to re-extract; one that
+cannot say shows the value with both readings.
 
 Three details that decide the implementation:
 
@@ -77,9 +102,9 @@ carry it differently (`scripts/data/device_fs.py` reads both into one shape):
 
 | | GrayKey ZIP | Cellebrite UFED (CLBX) | any other ZIP |
 |---|---|---|---|
-| where | each entry's `UT` extra field, plus Info-ZIP `ux` | `metadata<N>/metadata.msgpack` — one map of **every path on the volume** to its stat record, beside `filesystem<N>/` (`filesystem.msgpack` gives the mount point) | the entry's `UT` field |
+| where | each entry's `UT` extra field, plus Info-ZIP `ux` | `metadata<N>/metadata.msgpack` — one map of **every path on the volume** to its stat record, beside `filesystem<N>/` (`filesystem.msgpack` gives the mount point); the entries' own `UT` field holds only the access time | the entry's `UT` field |
 | mtime / atime / ctime | seconds | **nanoseconds** | mtime (seconds) |
-| birth time | a **fourth** `UT` value — not in the specification, read as the birth time because it is at or before mtime in practically every entry | `btime`, nanoseconds | — |
+| birth time | a **fourth** `UT` value (iOS only) — not in the specification; it matched the named birth time in UFED's record of the same device | `btime`, nanoseconds | — |
 | inode, links, mode, uid/gid | uid/gid | all | — |
 | data-protection class, xattrs | — | `prot`, `xattr` | — |
 
@@ -94,10 +119,11 @@ Every report shows the record under the source path it belongs to, through `repo
 *created / modified / accessed / inode changed* with identical instants merged onto one line and the
 parts of a split file bounded (earliest … latest), then the protection class, inode, mode, owner and
 xattrs, and which store the record was read from. Two things the hints say and the reader has to keep
-in mind: **accessed** and **inode changed** can be set by the acquisition itself — on the GrayKey device
-in the corpus both commonly sit at the acquisition time — so they date the last read or metadata
-change, not the user's activity; and a nanosecond value is shown with its fraction while a whole-second
-one is not, so precision is never dressed up. The GrayKey archive also carries a tool-computed
+in mind: **accessed** and **inode changed** can be set by the acquisition itself, so they date the last
+read or metadata change, not necessarily the user's activity (a recent GrayKey iOS acquisition was seen
+to leave nearly all of the app's files untouched, so this is a possibility, not a pattern); and a
+nanosecond value is shown with its fraction while a whole-second one is not, so precision is never
+dressed up. The GrayKey archive also carries a tool-computed
 SHA-256 per entry (`S2`) and two undocumented fields (`NI`, `KG`) — recorded in TODO.md, not yet read.
 
 ## Inventory by naming scheme

@@ -87,6 +87,13 @@ the copy read through the canonical path is the one kept, and the run log and
 | `S2` (0x3253) | SHA-256 of the content | — |
 | `GK` (0x4B47) | 2 bytes, `0100` on every sample | — |
 
+UFED's partial Android archives (BFU, user-data, app-selective) fill only the modified time: the
+accessed time is 0 there too. Neither tool writes a birth time for an Android phone. No UFED archive of
+an Android phone seen so far carries the `metadata<N>/metadata.msgpack` stat table of its iOS archives;
+one that does is read the iOS way — its entries' `UT` field as the access time only (see
+[snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-modified-column)). The manifest's
+`archive` says which reading applied.
+
 `device_fs.from_zip_entry(info, extended=True)` reads all of it, and the Android extraction:
 
 * **checks every extracted file against the archive's own SHA-256** (`S2`) as it writes it, and says

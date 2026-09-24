@@ -14,7 +14,10 @@ style)`` writes the same files into an archive shaped like one acquisition tool'
   Android phone carries it;
 * ``ufed`` — the ``Dump/`` prefix, and the app's shared-storage folder again under
   ``Dump/mnt/runtime/*/emulated/0``.
+
+The private files carry the extra fields that tool writes for an Android phone (see :func:`_entry`).
 """
+import hashlib
 import io
 import os
 import sqlite3
@@ -285,16 +288,22 @@ def build_app(root, key_encoding="base64"):
     return app
 
 
-#: The device times every archived file carries here (Unix seconds): modified, accessed, changed,
-#: and — as a GrayKey archive writes it — a fourth, the birth time.
-FILE_TIMES = (1_700_000_100, 1_700_000_200, 1_700_000_300, 1_700_000_000)
+#: The device times every archived private file carries here (Unix seconds): modified, accessed,
+#: changed. No Android archive carries a birth time.
+FILE_TIMES = (1_700_000_100, 1_700_000_200, 1_700_000_300)
 
 
-def _entry(name):
-    """A ZipInfo carrying a four-time ``UT`` extra field, the way a GrayKey archive writes one."""
+def _entry(name, style, data):
+    """A ZipInfo carrying what one tool writes for a file of an Android phone: a ``UT`` field flagged
+    ``0x07`` — GrayKey's modified / accessed / changed, UFED's modified / accessed / 0 — and, from
+    GrayKey, its SHA-256 of the content (``S2``)."""
     info = zipfile.ZipInfo(name)
     info.compress_type = zipfile.ZIP_DEFLATED
-    info.extra = struct.pack("<HHB4i", 0x5455, 17, 0x0F, *FILE_TIMES)
+    modified, accessed, changed = FILE_TIMES
+    info.extra = struct.pack("<HHB3i", 0x5455, 13, 0x07, modified, accessed,
+                             changed if style == "graykey" else 0)
+    if style == "graykey":
+        info.extra += struct.pack("<HH", 0x3253, 32) + hashlib.sha256(data).digest()
     return info
 
 
@@ -315,7 +324,8 @@ def build_zip(path, tmp_root, style="graykey", key_encoding="base64"):
         for prefix in prefixes:
             for rel, full in files:
                 with open(full, "rb") as fh:
-                    zf.writestr(_entry(f"{prefix}/{rel}"), fh.read())
+                    data = fh.read()
+                zf.writestr(_entry(f"{prefix}/{rel}", style, data), data)
         # an unrelated app, and the package name where it is NOT the app's data
         zf.writestr("/data/data/com.example.other/databases/x.db" if style == "graykey"
                     else "Dump/data/data/com.example.other/databases/x.db", b"other")

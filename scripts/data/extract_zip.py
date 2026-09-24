@@ -200,12 +200,15 @@ _ZIP_UT_ID = 0x5455
 
 
 def zip_mtime(info):
-    """An archive entry's modification time as unix seconds (UTC), or None if it records none.
+    """The modification time an archive entry's ``UT`` field flags, as unix seconds (UTC), or None if
+    it records none.
 
-    This is the file's time **on the device**: an extraction ZIP preserves it, which is worth stating
-    because it is not obvious. Two extractions of one phone taken by different tools fifteen days
-    apart carry the same stamps for the same Snapchat cache files, which archive-creation stamping
-    could not produce.
+    In a GrayKey archive, a UFED archive of an Android phone or a plain ZIP this is the file's
+    modification time **on the device**, as its specification says. In a UFED / CLBX archive it is
+    not: every slot of that archive's ``UT`` holds the access time, so this is never called for one
+    (see :func:`_device_mtime` and ``scripts/data/device_fs.py``). An earlier version of this note took
+    the agreement of two tools' stamps for the same files as proof of the modification time; they
+    agreed only because most of the app's files had not been read since they were last written.
 
     Read from the ``UT`` extra field rather than from the header's DOS date/time. The DOS field is a
     *local* wall clock with no zone recorded and a two-second resolution, so turning it into a real
@@ -224,6 +227,17 @@ def zip_mtime(info):
         if header == _ZIP_UT_ID and body and body[0] & 1 and len(body) >= 5:
             return struct.unpack_from("<i", body, 1)[0]
     return None
+
+
+def _device_mtime(info, record, clbx):
+    """The file's modification time on the device (unix seconds) for the manifest's ``mtimes`` and the
+    extracted copy, or None: the stat table's where the archive has one (floored to the second), never
+    a CLBX entry's ``UT`` field — that is the access time — and the ``UT`` field's otherwise."""
+    if record and record.get("source") == "ufed-metadata":
+        return record["mtime"] // device_fs.NS if record.get("mtime") else None
+    if clbx:
+        return None
+    return zip_mtime(info)
 
 
 class SnapchatNotFound(RuntimeError):
@@ -283,6 +297,10 @@ def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
 
     wanted_names = {record[1] for record in chosen.values()}
     fs_meta = device_fs.load_ufed_metadata(zip1, names, lambda name: name in wanted_names)
+    # keyed on the stat table, as on iOS: no UFED archive of an Android phone seen so far has one, but
+    # where an archive does, its entries' UT field is the access time only
+    archive = device_fs.archive_kind(names, [record[4] for record in chosen.values()])
+    clbx = archive == "clbx"
 
     roots, renamed, mtimes, fs = {}, {}, {}, {}
     written = failed = hash_checked = 0
@@ -314,10 +332,11 @@ def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
         written += 1
         stats["files"] += 1
         stats["bytes"] += info.file_size
-        stamp = zip_mtime(info)
+        record = fs_meta.get(name) or device_fs.from_zip_entry(info, extended=True,
+                                                               ut_access_only=clbx)
+        stamp = _device_mtime(info, record, clbx)
         if stamp is not None and stamp <= 0:
             stamp = None                                     # not recorded, not 1970
-        record = fs_meta.get(name) or device_fs.from_zip_entry(info, extended=True)
         if record and record.get("archive_sha256"):
             # the acquisition tool's own hash of this entry (GrayKey): the bytes written here must
             # be the bytes it read, and a difference is named rather than trusted away
@@ -384,6 +403,8 @@ def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
     try:
         with open(out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
             json.dump({"platform": "android", "package": package,
+                       # which reading of the entries' UT field applies (device_fs.archive_kind)
+                       "archive": archive,
                        # canonical device folder -> the area, how much of it was written, the
                        # archive paths it was read from (the tool's own prefix included) and the
                        # other mount points the archive carried the same files under
@@ -504,9 +525,9 @@ Rename the folder and run again to extract Snapchat data from zip
             # the full on-device path (e.g. private/var/mobile/Containers/Data/Application/<UUID>).
             container_prefixes = {}
             renamed = {}
-            # relative path on disk -> the file's mtime on the device, from the archive entry. Kept in
-            # the manifest rather than applied to the extracted copy: see zip_mtime for why a report
-            # has to be able to say "not recorded".
+            # relative path on disk -> the file's mtime on the device (see _device_mtime for where it
+            # comes from). Kept in the manifest rather than applied to the extracted copy: see
+            # zip_mtime for why a report has to be able to say "not recorded".
             mtimes = {}
             # relative path on disk -> everything the device's filesystem recorded about the file
             # (all four timestamps, owner, mode, inode, protection class), from the richest source
@@ -516,6 +537,11 @@ Rename the folder and run again to extract Snapchat data from zip
             fs = {}
             fs_meta = device_fs.load_ufed_metadata(
                 zip1, files_in_zip, lambda name: _in_snapchat(name) and wanted(name, files_to_extract))
+            # a UFED / CLBX archive — one with a stat table, whether or not it could be read — writes
+            # the access time into every slot of its entries' UT field, so that field is never read
+            # there as the modification time (see device_fs)
+            clbx = bool(device_fs.clbx_tables(files_in_zip))
+            extracted_infos = []
             caches_bytes = sanitized = 0
             try:
                 for i in files_in_zip:
@@ -548,13 +574,15 @@ Rename the folder and run again to extract Snapchat data from zip
                             record = None
                             try:
                                 info = zip1.getinfo(i)
-                                stamp = zip_mtime(info)
                                 # a directory entry is recorded by neither: it is not a file the
                                 # reports show, and its stat record would only be noise
+                                if not i.endswith("/"):
+                                    extracted_infos.append(info)
+                                    record = fs_meta.get(i) or device_fs.from_zip_entry(
+                                        info, ut_access_only=clbx)
+                                stamp = _device_mtime(info, record, clbx)
                                 if stamp is not None and not i.endswith("/"):
                                     mtimes[rel.replace("\\", "/")] = stamp
-                                if not i.endswith("/"):
-                                    record = fs_meta.get(i) or device_fs.from_zip_entry(info)
                                 if record:
                                     fs[rel.replace("\\", "/")] = record
                             except Exception:
@@ -603,6 +631,10 @@ Rename the folder and run again to extract Snapchat data from zip
             try:
                 with open(_out("extraction_manifest.json"), "w", encoding="utf-8") as mf:
                     json.dump({"container_prefixes": container_prefixes,
+                               # which reading of the entries' UT field applies: "clbx" (the access
+                               # time only), "graykey" or "zip" — see device_fs.archive_kind. A
+                               # manifest without it predates the distinction (device_fs.manifest_times)
+                               "archive": device_fs.archive_kind(files_in_zip, extracted_infos),
                                # sanitised path -> the exact name the file had on the device
                                "renamed": renamed,
                                # path on disk -> the file's mtime ON THE DEVICE, unix seconds UTC.

@@ -730,8 +730,8 @@ RENAMED_BASIS = (
     "back from extraction_manifest.json; percent-decoding either spelling yields the same URL.")
 
 
-def _load_manifest(src_root, app, field):
-    """One field of the extraction manifest, or ``{}`` when there is no manifest to read."""
+def _read_manifest(src_root, app):
+    """``(path, the whole extraction manifest)``, or ``("", {})`` when there is none to read."""
     for root in (src_root, app, os.path.dirname(app or ""), os.path.dirname(app or "") + "/.."):
         if not root:
             continue
@@ -739,10 +739,18 @@ def _load_manifest(src_root, app, field):
         if os.path.isfile(candidate):
             try:
                 with open(candidate, encoding="utf-8") as fh:
-                    return json.load(fh).get(field) or {}
+                    manifest = json.load(fh)
             except Exception as error:
                 logger.debug(f"could not read {candidate}: {error}")
-    return {}
+                continue
+            if isinstance(manifest, dict):
+                return os.path.abspath(candidate), manifest
+    return "", {}
+
+
+def _load_manifest(src_root, app, field):
+    """One field of the extraction manifest, or ``{}`` when there is no manifest to read."""
+    return _read_manifest(src_root, app)[1].get(field) or {}
 
 
 def load_renamed(src_root, app):
@@ -753,27 +761,19 @@ def load_renamed(src_root, app):
 def load_device_mtimes(src_root, app):
     """``{relative path on disk: mtime on the device}`` (unix seconds UTC) from the manifest.
 
-    Written by `extract_zip` out of each archive entry's ``UT`` field. Empty for an extraction folder
-    produced before this was recorded, in which case the report says the time was not recorded rather
-    than falling back to the extracted copy's own mtime — that is when *we* unzipped the file, which is
-    a fact about this run and not about the evidence.
+    Written by `extract_zip` out of the archive's record of each file, and read the way that archive
+    means it (`device_fs.manifest_times`: an earlier build took a UFED archive's access time for this).
+    Empty for an extraction folder produced before this was recorded, in which case the report says
+    the time was not recorded rather than falling back to the extracted copy's own mtime — that is
+    when *we* unzipped the file, which is a fact about this run and not about the evidence.
     """
-    return _load_manifest(src_root, app, "mtimes")
+    where, manifest = _read_manifest(src_root, app)
+    return device_fs.manifest_times(manifest, where)[0]
 
 
 #: Shown where the archive recorded no time for an entry. Not an empty cell: a blank
 #: reads as "nothing happened", where the truth is that we do not know.
 _NO_MTIME = "<span class=muted>not recorded</span>"
-
-
-_DEVICE_MTIME_BASIS = (
-    "The file's modification time ON THE DEVICE, read from the extraction archive's own record of it "
-    "(the ZIP entry's UT field, which carries UTC seconds). It is NOT the timestamp of the copy on "
-    "this machine: unzipping a file gives it a new mtime, so the extracted copy's is the moment this "
-    "run — or an earlier one — wrote it, and says nothing about the evidence. Verified by two "
-    "extractions of one device, taken by different tools fifteen days apart, carrying the same stamps "
-    "for the same cache files. «not recorded» means the archive carried no timestamp for this entry, "
-    "or the extraction folder was produced by a build older than this and holds none.")
 
 
 #: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to be
@@ -1072,7 +1072,7 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             "path": full, "rel": rel, "name": name, "bytes": size,
             "raw_md5": md5, "raw_sha256": sha,
             "producer": producer_of(name),
-            # The device's mtime, never the extracted copy's — see _DEVICE_MTIME_BASIS.
+            # The device's mtime, never the extracted copy's — see load_device_mtimes.
             "mtime": _device_mtime(full, device_mtimes, ms_fmt),
             # and everything else the device's filesystem recorded about it, where the archive
             # carries the record (see scripts/data/device_fs.py)

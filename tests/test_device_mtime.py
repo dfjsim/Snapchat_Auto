@@ -4,11 +4,11 @@
 under a bare `modified` heading beside the path, size, producer and stored SHA-256, which *are* facts
 about the device, so a reader took it as one. It also stamped the processing date onto every row.
 
-An extraction ZIP does record the file's real mtime, which is not obvious and worth pinning: two
-extractions of one device, taken by different tools fifteen days apart, carry the same stamps for the
-same Snapchat cache files — archive-creation stamping could not produce that agreement. It is in the
-entry's `UT` extra field as UTC seconds; the header's DOS date/time is a local wall clock with no zone
-recorded, so it cannot be turned into an instant without guessing whose clock wrote it.
+An extraction ZIP does record the file's device times, which is not obvious and worth pinning. They are
+in the entry's `UT` extra field as UTC seconds — the modification time first in a GrayKey archive or a
+plain ZIP, though not in a UFED/CLBX one, whose `UT` holds only the access time (see test_device_fs);
+the header's DOS date/time is a local wall clock with no zone recorded, so it cannot be turned into an
+instant without guessing whose clock wrote it.
 
 `extract_zip` records those in the extraction manifest and also applies them to the extracted copies.
 The report reads the **manifest**, not the files, because a file always has an mtime: from the file

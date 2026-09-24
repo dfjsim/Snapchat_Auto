@@ -14,9 +14,10 @@ import zipfile
 import pytest
 
 import android_fixture as fx
-from scripts.data import extract_zip
+from scripts.data import device_fs, extract_zip
 
 PKG = extract_zip.ANDROID_PACKAGE
+NS = device_fs.NS
 
 
 @pytest.mark.parametrize("name,expected", [
@@ -91,7 +92,22 @@ def test_each_file_is_written_once_under_its_device_path(tmp_path, style):
         assert manifest["duplicates_skipped"] == 1              # the /mnt/runtime copy
     assert manifest["duplicates_differing"] == 0
     # every written file has a device record keyed on its device path
-    assert f"data/data/{PKG}/databases/arroyo.db" in manifest["mtimes"]
+    key = f"data/data/{PKG}/databases/arroyo.db"
+    modified, accessed, changed = fx.FILE_TIMES
+    record = manifest["fs"][key]
+    assert manifest["mtimes"][key] == modified
+    assert (record["mtime"], record["atime"]) == (modified * NS, accessed * NS)
+    assert "btime" not in record                            # no Android archive carries one
+    if style == "graykey":
+        assert manifest["archive"] == "graykey"
+        assert record["ctime"] == changed * NS
+        assert record["archive_sha256_matches"] is True
+        assert manifest["archive_hash_mismatches"] == []
+    else:
+        # no stat table, so its UT field is read as specified: the 0 it writes as the change time
+        # is a time it did not record
+        assert manifest["archive"] == "zip"
+        assert "ctime" not in record
 
 
 def test_the_canonical_mount_wins_when_copies_differ(tmp_path):

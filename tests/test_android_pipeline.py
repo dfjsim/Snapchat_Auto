@@ -146,8 +146,10 @@ def test_the_device_record_of_a_cached_file_is_shown(run):
     _base, reports = run
     detail = open(reports / "CacheController" / "data" / "detail-0.js", encoding="utf-8").read()
     assert "/data/data/com.snapchat.android/files/native_content_manager/" in detail
-    modified = datetime.fromtimestamp(fx.FILE_TIMES[0], timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    assert modified in detail
+    # a GrayKey archive of an Android phone: modified, accessed and changed, and no birth time
+    for stamp in fx.FILE_TIMES:
+        assert datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") in detail
+    assert "<b>created" not in detail and "<b>modified" in detail
 
 
 def test_the_survey_carries_structure_and_no_values(run):

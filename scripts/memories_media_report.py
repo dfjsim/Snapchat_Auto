@@ -1927,12 +1927,9 @@ def load_path_manifest(*roots):
     return {}
 
 
-def load_device_mtimes(*roots):
-    """``{path on disk (from the container segment on): mtime on the device}`` — Unix seconds UTC,
-    written by `extract_zip` out of each archive entry's ``UT`` field. Empty when no manifest is
-    found, or for an extraction folder produced before this was recorded; the report then says the
-    time was *not recorded* rather than falling back to the extracted copy's own mtime, which is
-    when *we* unzipped the file and says nothing about the evidence."""
+def manifest_times(*roots):
+    """``(mtimes, fs)`` from the first extraction manifest found under ``roots``, read the way the
+    archive it came from means them (`device_fs.manifest_times`); two empty maps when there is none."""
     for root in roots:
         if not root:
             continue
@@ -1940,10 +1937,21 @@ def load_device_mtimes(*roots):
         if os.path.isfile(mf):
             try:
                 with open(mf, encoding="utf-8") as f:
-                    return json.load(f).get("mtimes", {}) or {}
+                    manifest = json.load(f)
             except Exception as error:
                 logger.debug(f"Could not read extraction manifest {mf}: {error}")
-    return {}
+                continue
+            return device_fs.manifest_times(manifest, os.path.abspath(mf))
+    return {}, {}
+
+
+def load_device_mtimes(*roots):
+    """``{path on disk (from the container segment on): mtime on the device}`` — Unix seconds UTC,
+    written by `extract_zip` out of the archive's record of each file. Empty when no manifest is
+    found, or for an extraction folder produced before this was recorded; the report then says the
+    time was *not recorded* rather than falling back to the extracted copy's own mtime, which is
+    when *we* unzipped the file and says nothing about the evidence."""
+    return manifest_times(*roots)[0]
 
 
 def load_fs_records(*roots):
@@ -1951,17 +1959,7 @@ def load_fs_records(*roots):
     the device kept for the file, its owner, mode, inode and protection class, as `extract_zip`
     recorded them from the archive (see `scripts/data/device_fs.py`). Empty for an extraction folder
     made by a build older than this, in which case the reports fall back to `load_device_mtimes`."""
-    for root in roots:
-        if not root:
-            continue
-        mf = os.path.join(root, "extraction_manifest.json")
-        if os.path.isfile(mf):
-            try:
-                with open(mf, encoding="utf-8") as f:
-                    return json.load(f).get("fs", {}) or {}
-            except Exception as error:
-                logger.debug(f"Could not read extraction manifest {mf}: {error}")
-    return {}
+    return manifest_times(*roots)[1]
 
 
 #: `extract_zip` keys the manifest on the path from the container segment onward, so a lookup has to
