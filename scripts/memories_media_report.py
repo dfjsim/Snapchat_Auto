@@ -2209,7 +2209,11 @@ _META_FILTER_HINT = (
     "most cached JPEGs carry nothing else. What was found is shown in the row's expanded area and on "
     "the detail page, and is matched by Search. Snapchat's servers re-encode most media, so «none "
     "found» says nothing about the capture; a file that does carry camera EXIF usually came from the "
-    "camera roll. A poster frame this tool generated never counts.")
+    "camera roll. A poster frame this tool generated never counts.\n\n"
+    "• «with the Snapchat app's tag» narrows that to the Memories whose media file carries the tag "
+    "the app writes into media it encodes — naming the app version, device model and operating "
+    "system of the app that wrote the file, and the lens used (see the tag's own «?» on the detail "
+    "page). Older versions of the app write none, so its absence says nothing.")
 
 _CREATED_COL_HINT = (
     "scdb-27.sqlite3 › ZGALLERYSNAP.ZCREATETIMEUTC — the app's own creation time for this snap, "
@@ -2593,6 +2597,19 @@ def _embedded_fields(f):
                                            structural=media_meta.STRUCTURAL)
 
 
+def _snap_tags(files):
+    """The Snapchat app's tags the recovered (not generated) files of a Memory carry, each once."""
+    seen, tags = set(), []
+    for f in files:
+        if f.get("generated"):
+            continue
+        for tag in (f.get("meta") or {}).get("snapchat") or []:
+            if tag.get("encoded") not in seen:
+                seen.add(tag.get("encoded"))
+                tags.append(tag)
+    return tags
+
+
 def _has_embedded(files):
     """Whether any recovered (not generated) file carries embedded metadata worth flagging — a
     timestamp, a GPS fix, or a field beyond the pixel size and orientation every encoder writes.
@@ -2649,7 +2666,8 @@ MORE_IDS_HINT = (
     "(each named by the scdb-27 column it came from), the AES-256 key and IV its media is encrypted "
     "with — in hex, exactly as another tool would print them — the app's search-index tags for it "
     "(place names, caption, visual concepts) — and the fields found inside the media "
-    "files (camera make and model, software, GPS). Typing any part of one of these into Search finds "
+    "files (camera make and model, software, GPS, the Snapchat app's tag and lens id, the names of "
+    "the source files an editing program lists). Typing any part of one of these into Search finds "
     "this row; this block is where to confirm what matched.")
 
 
@@ -2692,6 +2710,14 @@ def _index_more(m):
             g = meta["gps"]
             pairs.append(("GPS in the file", f"{g.get('lat', 0):.5f}, {g.get('lon', 0):.5f}",
                           f"inside {f.get('out', '')}"))
+        for tag in meta.get("snapchat") or []:
+            source = f"inside {f.get('out', '')} › {tag.get('field', '')}"
+            pairs.append(("Snapchat app tag", tag.get("user_agent", ""), source))
+            pairs += [("Snapchat app tag · lens id", str(lens), source)
+                      for lens in tag.get("lens_ids") or []]
+        for term in report_ui.xmp_source_search_terms(meta):
+            pairs.append(("Source file of the edit", term,
+                          f"inside {f.get('out', '')} › XMP xmpMM:Pantry / Ingredients"))
     if not pairs:
         return ""
     grid = "".join(f"<div class='k'>{html.escape(k)}</div><div class='v'>{html.escape(str(v))}</div>"
@@ -3874,6 +3900,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 kind += ("<div class='exif' title='a recovered media file carries embedded metadata "
                          "worth a look — its own timestamp, a GPS fix or a device / software name "
                          "(EXIF / XMP / container header); expand the row or open Details'>EXIF</div>")
+            snap_tags = _snap_tags(own)
+            if snap_tags:                                  # the file names the app that wrote it
+                named = "; ".join(f"Snapchat {t.get('app_version', '')} on {t.get('device', '')}, "
+                                  f"{t.get('os', '')}"
+                                  + (f", lens {', '.join(str(x) for x in t['lens_ids'])}"
+                                     if t.get("lens_ids") else "") for t in snap_tags)
+                kind += (f"<div class='stag' title='{html.escape(named)} — the Snapchat app tag in "
+                         f"the media file: the app that wrote it, not necessarily this device; "
+                         f"open Details'>APP TAG</div>")
             # Deleted since scdb-27's last checkpoint: THIS Memory's row survives only in the
             # database file without its -wal, so the app itself no longer lists it. The flag is
             # per-row, not per-group — one deleted snap must not badge its whole group.
@@ -3969,6 +4004,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  # disagree about what this Memory has
                  "geo": _geo_state(m),
                  "meta": "y" if has_meta else "n",
+                 **({"stag": "y"} if snap_tags else {}),   # only when true: paid per row
                  "wal": ("carved" if carved else
                          "keyrow" if recovery.get("method") == METHOD_KEY_ROW else
                          "index" if recovery else
@@ -3994,6 +4030,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
         for key in ("img", "meo", "part", "geo", "meta"):
             value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
+        if row[5].get("stag"):                             # a narrower option of the same filter
+            counts["meta"]["tag"] = counts["meta"].get("tag", 0) + 1
     part_opts = _media_filter_options(counts.get("part", {}))
     img_opts = report_ui.counted_options((("y", "with a thumbnail"), ("n", "no thumbnail")),
                                          counts.get("img", {}))
@@ -4005,6 +4043,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                           ("no", "no location")),
                                          counts.get("geo", {}))
     meta_opts = report_ui.counted_options((("y", "with embedded metadata"),
+                                           ("tag", "with the Snapchat app's tag"),
                                            ("n", "none worth a look")),
                                           counts.get("meta", {}))
 
@@ -4047,6 +4086,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .vcells>.vc.c2 .walchg{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .exif{background:#e2f2e6;color:#1f5e2e;border:1px solid #a9d3b4;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2 .stag{background:#fffbe6;color:#6b5a00;border:1px solid #f0e3a0;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walcarve{background:#3b1d5e;color:#fff;border:1px solid #2a1244;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
@@ -4192,7 +4233,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
            'ge=document.getElementById("geo").value,me=document.getElementById("meta").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!me||m.meta===me)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)'
+           '&&(!me||(me==="tag"?m.stag==="y":m.meta===me))'
            '&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
            'selectedOnly:scSelOnly,'

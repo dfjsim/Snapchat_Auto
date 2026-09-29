@@ -215,6 +215,11 @@ See `scripts/memories_android_report.py`. One row per `memories_snap` row, with 
   images.
 
 Each route proves itself on the file it finds: nothing is published that did not come out as media.
+Each published file (once per distinct content) is read for what it says about itself
+(`scripts/data/media_meta.py`) and shown under the file table as the same **Embedded metadata**
+block the iOS reports use — including the Snapchat app's tag, which the Android app writes into a
+video's `moov › udta › meta › ilst › desc` ([snapchat_media_tag.md](snapchat_media_tag.md)). Its key
+fields, the tag and its lens id join the row's search text.
 The app's own Memories search index, `databases/clientsearch.db` (FTS4 tables of captions, titles,
 place names, visual and time tags), is not read yet (TODO.md).
 

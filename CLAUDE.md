@@ -65,9 +65,14 @@ Memories / My Eyes Only.
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
   encrypted" — and `media_meta.py`, which reads what a media file says about **itself**: EXIF/XMP,
-  PNG text, an MP4's `mvhd` and QuickTime user data. Every timestamp it returns says what clock it
-  is on, and only one whose zone the file states becomes an instant; a naive EXIF wall clock is
-  handed back as the string it is; and `device_fs.py`, the device filesystem's own record of each
+  PNG text; in an MP4/MOV the movie and track headers, QuickTime user data (incl. 3GPP boxes),
+  `moov › meta` and XMP — walked by seeking, never reading the media data. Every timestamp it returns
+  says what clock it is on, and only one whose zone the file states becomes an instant; a naive EXIF
+  wall clock is handed back as the string it is; the source files an editor lists in XMP (pantry /
+  ingredients) come back apart (`xmp_sources`) and never become the file's own times or GPS; and
+  `snap_media_tag.py`, the decoder for the Snapchat app's tag — base64 of a protobuf in a
+  description field naming app version, device model, OS and lens id — whose one rule is that the
+  value is the tag only when all of it parses; and `device_fs.py`, the device filesystem's own record of each
   extracted file — all four timestamps, owner, mode, inode, protection class — read from a UFED
   archive's `metadata.msgpack` (nanoseconds; `msgpack` is a dependency for it) or the ZIP entry's
   `UT` field, into one shape every report renders the same way; `tsaf.py`, the keyed reader for
@@ -199,6 +204,13 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   (AES-256-CBC, key + fixed IV in `Documents/ClientEncryptionService.plist`, no keychain), and
   why a root-level filename UUID must never be quoted as a snap id. Implemented by
   `scripts/cache_media_report.py`.
+- [The Snapchat app's tag in media files](docs/snapchat_media_tag.md) — the base64 protobuf the app
+  writes into a media file's description field (MP4 `dscp`, MOV `com.apple.quicktime.description`,
+  ffmpeg `desc`, an image's EXIF `UserComment`): its layout (lens id packed on iOS, unpacked on
+  Android), why field 1.2 is the lens id, whose device it names (the writer: a received snap's
+  sender), the source files of an edit kept apart from the file's own XMP, and the other MP4/MOV
+  metadata the reader now reads. Implemented by `scripts/data/snap_media_tag.py` and
+  `scripts/data/media_meta.py`.
 - [Blurred text on scaled displays and over RDP](docs/hidpi_scaling.md) — why a Tk front end is DPI
   *unaware* by default and what Windows does about it, the two halves of the fix that have to move
   together (`tk scaling` for fonts in points, `hidpi.px` for constants in pixels), and why

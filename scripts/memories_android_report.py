@@ -494,7 +494,7 @@ def collect_media(memories, app, outdir, padding="both", file_manager=None, meo_
                 url_keys.setdefault(sid, []).append(
                     (hashlib.sha256(token.encode()).hexdigest()[:32], column))
     media_dir = os.path.join(outdir, "media")
-    published, count = {}, 0
+    published, published_meta, count = {}, {}, 0
 
     def publish(m, f, data, padded, ext, tail_ok, how, suffix):
         nonlocal count
@@ -510,6 +510,7 @@ def collect_media(memories, app, outdir, padding="both", file_manager=None, meo_
         md5 = f["hashes"][0][1]
         if md5 in published:
             f["path"] = published[md5]
+            f["meta"] = published_meta.get(md5)            # the same bytes say the same thing
         else:
             os.makedirs(media_dir, exist_ok=True)
             role = re.sub(r"[^A-Za-z0-9]+", "-", f["role"]).strip("-")
@@ -522,6 +523,7 @@ def collect_media(memories, app, outdir, padding="both", file_manager=None, meo_
                 f["meta"] = media_meta.extract(os.path.join(media_dir, name))
             except Exception:                                  # noqa: BLE001 — never costs a file
                 f["meta"] = None
+            published_meta[md5] = f["meta"]
         f["bytes"] = len(body)
 
     def examine(m, keys, f, raw, suffix):
@@ -745,9 +747,22 @@ def _files_html(m, src_root, fs_records, epochfmt):
         rows.append(f'<tr><td>{view}</td><td>{_esc(f.get("state"))}{extra}</td>'
                     f'<td>{_esc(f.get("role"))}<div class="muted small">{_esc(f.get("basis"))}</div>'
                     f'</td><td>{link}</td><td>{hashes}{paths}</td></tr>')
+    # what each published file says about itself — the same block the iOS reports show; one per
+    # distinct file, since two rows holding the same bytes carry the same metadata
+    embedded, seen = [], set()
+    for f in m["files"]:
+        if f.get("path") and f["path"] not in seen:
+            seen.add(f["path"])
+            embedded.append(report_ui.embedded_meta_html(
+                f.get("meta"), report_ui.file_time_rows(f.get("meta"), epochfmt),
+                label=os.path.basename(f["path"]), href=f["path"]))
+    embedded_block = (f'<div class="sect">Embedded metadata — inside the media files, with their own '
+                      f'timestamps{report_ui.info_icon(report_ui.EMBEDDED_BASIS)}</div>'
+                      + "".join(embedded)) if embedded else ""
     return ('<table class="sub"><tr><th>File</th><th>State</th><th>Role / how it was linked'
             f'{report_ui.info_icon(LINK_NOTE)}</th><th>Found through</th>'
-            '<th>Hashes / where it is on the device</th></tr>' + "".join(rows) + "</table>")
+            '<th>Hashes / where it is on the device</th></tr>' + "".join(rows) + "</table>"
+            + embedded_block)
 
 
 def _detail(m, timefmt, epochfmt, src_root, fs_records):
@@ -865,10 +880,15 @@ def generate_report(memories, outdir, tz_label, run_id, timefmt, epochfmt, src_r
         cells = ["&#9656;", _media_cell(m), _esc(created), _esc(captured), _esc(_kind(m)),
                  _esc(geo) or '<span class="none">&mdash;</span>', entry_cell or "",
                  _esc(state), _esc(m["snap_id"])]
+        embedded = [term for f in m["files"] if f.get("path")
+                    for term in report_ui.embedded_search_terms(
+                        f.get("meta"), report_ui.file_time_rows(f.get("meta"), epochfmt),
+                        media_meta.STRUCTURAL)]
         search = " ".join(str(x) for x in (
             m["snap_id"], m["media_id"], title, created, captured, geo, state,
             row.get("time_zone_id") or "", " ".join(f["cache_key"] for f in m["files"]),
-            " ".join(u for _c, u in _urls(m)), "my eyes only" if m["meo"] else "")).lower()
+            " ".join(u for _c, u in _urls(m)), "my eyes only" if m["meo"] else "",
+            " ".join(dict.fromkeys(embedded)))).lower()
         rows.append([f'mem-{m["snap_id"]}', cells, search,
                      {"2": _int(row.get("create_time")) or 0,
                       "3": _int(row.get("snap_capture_time")) or 0, "4": _kind(m),
@@ -895,7 +915,8 @@ def generate_report(memories, outdir, tz_label, run_id, timefmt, epochfmt, src_r
                      f'<th>master_key</th><th>master_key_iv</th></tr>{cells}</table></details>')
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'<style>{report_ui.PAGE_CSS}{_CSS}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}{report_ui.DEVICE_FS_CSS}</style>'
+           f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}{report_ui.DEVICE_FS_CSS}'
+           f'{report_ui.EMBEDDED_CSS}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};'
            f'window.SCAUTO_VERSION={json.dumps(app_version.get_version())};'
            f'window.SCAUTO_SELKIND="mem";</script>'

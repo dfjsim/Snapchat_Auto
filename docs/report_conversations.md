@@ -297,6 +297,17 @@ bytes so the displayed file can be corroborated.
 legacy report handles; anything else is still listed with its detected type and a link, rather than
 being hidden.
 
+**What an image or video says about itself.** Each image and video attachment is read once by
+`scripts/data/media_meta.py` (`publish_attachment` → `att["meta"]`) and shown, in the expanded
+message, as the same **Embedded metadata** block the Memories and cache reports use
+(`report_ui.embedded_meta_html`, with `popover=False`: the block's explanations are written once, in
+the **Content** column header, because a message detail is written once per message). The block
+matters most for the Snapchat app's tag ([snapchat_media_tag.md](snapchat_media_tag.md)): in a
+received snap it names the **sender's** app version, device model and operating system, and the lens
+used. The tag's user agent and lens id, and the names of an edit's source files, join the message's
+search text; the conversation's index row is found by the tags of the files sent in it. The file's
+own timestamps are not added to the message search — every video would bring two.
+
 **Duplicate rows.** `mergeCacheChats` produces one row per cache claim of a message, so a message
 with three claims arrives as three rows. For the two content types that only ever *are* their
 attachment — "Video (Unknown Source)" (`content_type` 3) and "Sticker" (`content_type` 5) — a row

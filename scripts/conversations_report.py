@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
-from scripts.data import sqlite_open
+from scripts.data import sqlite_open, media_meta
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, contact_anchor,
                                      text_html, cell)
@@ -296,7 +296,10 @@ def publish_attachment(cachefiles_dir, media_dir, basename, cache_key_for=None, 
     cache_key, cache_key_how = (cache_key_for(basename) if cache_key_for else (None, ""))
     info = {"name": basename, "ext": ext, "kind": kind, "bytes": size, "md5": md5,
             "sha256": sha256, "rel": ("media/" + name) if published else None, "how": how,
-            "cache_key": cache_key, "cache_key_how": cache_key_how}
+            "cache_key": cache_key, "cache_key_how": cache_key_how,
+            # what the file says about itself — for a received snap, the Snapchat app's tag names
+            # the SENDER's device (see report_ui.SNAP_TAG_BASIS); never raises
+            "meta": media_meta.extract(source) if kind in ("image", "video") and size else None}
     if cache is not None:
         cache[basename] = info
     return info
@@ -374,6 +377,9 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         raw = row.get(COL_CONTENT)
         content = "" if raw is None else str(raw)
         att = publish_attachment(cachefiles_dir, media_dir, content, cache_key_for, att_cache)
+        if att and "file_times" not in att:                # once per file: the dict is cached
+            att["file_times"] = report_ui.file_time_rows(
+                att.get("meta"), lambda unix_s: timefmt(unix_s - _COCOA_EPOCH))
         ctype = cell(row.get(COL_TYPE))
         if _drop_unrenderable(ctype, att):
             dropped += 1
@@ -874,7 +880,8 @@ def write_assets(outdir):
     with open(os.path.join(assets, "ui.css"), "w", encoding="utf-8") as fh:
         fh.write("/* Snapchat Auto — shared report UI (see scripts/report_ui.py) */\n"
                  + report_ui.PAGE_CSS + report_ui.VTABLE_CSS + report_ui.NAV_CSS
-                 + report_ui.SELECT_CSS + report_ui.HINT_CSS + report_ui.TIME_CSS + _REPORT_CSS)
+                 + report_ui.SELECT_CSS + report_ui.HINT_CSS + report_ui.TIME_CSS
+                 + report_ui.EMBEDDED_CSS + _REPORT_CSS)
     with open(os.path.join(assets, "ui.js"), "w", encoding="utf-8") as fh:
         # SELECT_JS first: ../selection.js is loaded right after this file and calls SCSel.preload().
         fh.write("/* Snapchat Auto — shared report UI (see scripts/report_ui.py) */\n"
@@ -1057,6 +1064,14 @@ _TEXT_HINT = (
 
 _CONTENT_HINT = "The message text and every cached file the message carries. " + _TEXT_HINT
 
+# Written once, in the Content column's header: an expanded message shows each image or video
+# attachment's «Embedded metadata» without the «?»s, whose text is the same for every message.
+_EMBEDDED_HINT = ("EMBEDDED METADATA (in an expanded message, under each attachment) — "
+                  + report_ui.EMBEDDED_BASIS + "\n\nTHE SNAPCHAT APP TAG — "
+                  + report_ui.SNAP_TAG_BASIS + " In a conversation, the tag of a snap someone "
+                  "else sent names THEIR app and device.\n\nSOURCE FILES OF AN EDIT — "
+                  + report_ui.XMP_SOURCES_BASIS)
+
 _SENDER_HINT = ("arroyo.db conversation_message.sender_id, replaced with the matching contact's "
                 "username by the parser (fixSenders) when the friends list has one — otherwise the "
                 "raw user id is shown.")
@@ -1125,6 +1140,10 @@ def _attachment_detail(att, prefix, index=None, total=1, closure=None):
                          "cache_controller CACHE_KEY, and SCPersistentMedia copies are matched "
                          "to a claim carrying the same conversation / message / part. Neither "
                          "applied to this file name, so there is no row to link to.") + '</div>')
+    if att["kind"] in ("image", "video") and att["bytes"]:
+        parts.append('<div class="sect">Embedded metadata</div>'
+                     + report_ui.embedded_meta_html(att.get("meta"), att.get("file_times"),
+                                                    popover=False))
     return "".join(parts)
 
 
@@ -1242,6 +1261,10 @@ def _message_rows(conv, chunk_of):
         for att in atts:
             searchable += [att["name"], att["ext"], att["md5"], att["sha256"],
                            att["cache_key"] or ""]
+            # the Snapchat app's tag and an edit's source file names only, not every embedded
+            # field: the mvhd times alone would add two timestamps to every video message's search
+            searchable += report_ui.snap_tag_search_terms(att.get("meta"))
+            searchable += report_ui.xmp_source_search_terms(att.get("meta"))
         rows.append([
             msg["anchor"], cells,
             " ".join(s for s in searchable if s).lower(),
@@ -1439,7 +1462,8 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         ' <span class="ar">&#8597;</span></div>'
         f'<div class="vc" onclick="SCV.setSort(4)">Type{report_ui.info_icon(_TYPE_HINT)}'
         ' <span class="ar">&#8597;</span></div>'
-        f'<div class="vc nosort">Content{report_ui.info_icon(_CONTENT_HINT)}</div>'
+        f'<div class="vc nosort">Content{report_ui.info_icon(_CONTENT_HINT)}'
+        f'{report_ui.info_icon(_EMBEDDED_HINT)}</div>'
         f'<div class="vc" onclick="SCV.setSort(6)">Msg ID{report_ui.info_icon(_SMID_HINT)}'
         ' <span class="ar">&#8597;</span></div>'
         '<div class="vc nosort">Read</div>'
@@ -1601,6 +1625,14 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         searchable += [p["user_id"] for p in parts] + [p["raw"] for p in parts]
         searchable += [p["username"] for p in parts] + [p["display"] for p in parts]
         searchable += list(conv["senders"])
+        # the Snapchat app tags its attachments carry, so a device model or a lens id finds the
+        # conversation it was sent in; each tag once, however many messages repeat the file
+        tags = {}
+        for msg in conv["messages"]:
+            for att in msg["atts"]:
+                for tag in (att.get("meta") or {}).get("snapchat") or []:
+                    tags.setdefault(tag["encoded"], tag)
+        searchable += report_ui.snap_tag_search_terms({"snapchat": list(tags.values())})
         rows.append([
             anchor, cells,
             " ".join(s for s in searchable if s).lower(),
@@ -1866,7 +1898,9 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
 
     # Attachment publishing happens inside build_messages, so it stays on the index side. Unlike the
     # decryption and hashing the other reports defer, these are hard links out of the folder the
-    # parser already filled — near-zero cost. What that does mean is that a partial run's media/ will
+    # parser already filled — near-zero cost; reading each image or video's embedded metadata seeks
+    # through its headers only (media_meta), once per file. What that does mean is that a partial
+    # run's media/ will
     # hold files no included message references, so the partial writer has to prune it to what the
     # rendered rows actually point at.
     by_conv, drop_stats = build_messages(msg_df, cachefiles_dir, os.path.join(outdir, "media"),

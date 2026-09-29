@@ -1615,14 +1615,51 @@ def _write_js(path, text):
 
 EMBEDDED_BASIS = (
     "What the recovered media file says about ITSELF — metadata stored inside the file by whatever "
-    "produced it, read from the recovered bytes: EXIF and XMP in a JPEG or WebP, text chunks in a PNG, "
-    "the mvhd header and QuickTime user data (©day, ©xyz, com.apple.quicktime.*) in an MP4 or MOV. It "
-    "is independent of everything the app's databases say. Snapchat's servers re-encode media, so a "
-    "cached file usually carries little of it; one that does most often came from the camera roll, "
+    "produced it, read from the recovered bytes: EXIF and XMP in a JPEG or WebP, text chunks in a PNG; "
+    "in an MP4 or MOV the movie and track headers (mvhd, tkhd, mdhd), QuickTime user data (©day, ©xyz, "
+    "the 3GPP boxes such as dscp), QuickTime metadata (com.apple.quicktime.* in moov › meta) and XMP. "
+    "It is independent of everything the app's databases say. Snapchat's servers re-encode media, so "
+    "a cached file usually carries little of it; one that does most often came from the camera roll, "
     "and then its camera make/model, software and GPS fix are the device that took it, not "
     "necessarily this one. The fields shown first are the ones that identify a device or place; "
-    "everything else the file holds is behind «all fields». A poster frame this tool generated is "
-    "never read — it is ours, not evidence. HEIF/HEIC is not read in this build, and says so.")
+    "everything else the file holds is behind «all fields». Two things get a block of their own: the "
+    "Snapchat app's tag, which names the app that wrote the file, and the source files an editing "
+    "program lists in XMP, whose dates and places are theirs, not this file's — each block has its own "
+    "«?». A poster frame this tool generated is never read — it is ours, not evidence. HEIF/HEIC is "
+    "not read in this build, and says so.")
+
+SNAP_TAG_BASIS = (
+    "The Snapchat app writes a tag into media it encodes: a base64 string in the file's description "
+    "field — an MP4's 3GPP «dscp» box, a MOV's com.apple.quicktime.description, the «desc» item an "
+    "ffmpeg muxer writes, an image's EXIF UserComment; every text field a file carries is checked — "
+    "whose bytes are a protobuf. It is shown decoded only "
+    "when all of it decodes (the whole string is base64, every byte of the protobuf is accounted for, "
+    "and its first text is a «Snapchat/<version> (…)» user agent); the encoded text itself is under "
+    "«all fields», as stored, and «Read from» gives the field and its byte offset in the file so the "
+    "decoding can be repeated. The user agent names the app version, the device model identifier and "
+    "the operating system of the app that WROTE the file: for a received snap or story that is the "
+    "sender's device; for a Memory it is the device that saved it — Memories follow the account, so "
+    "that can be a phone other than the one extracted. The lens id is the id of the lens used: each "
+    "value checked also appears in the app's own lens records on the device (a «…_lens_central» "
+    "document key and a LENSES row in rtus.db; an SCStoriesSnapLens archive in "
+    "content_feed_database), verified on two devices. Any other field is shown as stored, without a "
+    "meaning attached. A file with no tag says nothing: older versions of the app write none, and "
+    "anything that re-encodes the file drops it.")
+
+XMP_SOURCES_BASIS = (
+    "An editing program (Adobe Premiere Pro, After Effects, …) records in the XMP of the file it "
+    "exports every file that went into the edit: the clips, music, images and projects on its "
+    "timeline (xmpMM:Ingredients, with their paths on the editing computer and how often each is "
+    "used) and what it knew about each of them (xmpMM:Pantry: their own creation and modification "
+    "dates, the program that made or last saved them, their duration, sometimes a GPS fix — and, "
+    "for an image the Snapchat app saved, that app's tag, copied from the image's EXIF UserComment). "
+    "These "
+    "values are stored IN this file but describe THOSE files — a clip was recorded, dated and located "
+    "on its own device and clock, possibly long before the edit. So they are listed here, apart, and "
+    "never enter this file's own timestamps, its GPS, the search on dates, or anything else computed "
+    "from them. They say what the edit was made from and roughly when those inputs were made; they "
+    "say nothing about where or when this file itself was made, sent or received. A date of "
+    "1904-01-01T00:00:00Z is the zero value of a QuickTime time and is shown as «not set».")
 
 FILE_TIME_BASIS = (
     "Timestamps written INSIDE the media file by whatever produced it — an EXIF DateTimeOriginal "
@@ -1652,6 +1689,13 @@ EMBEDDED_CSS = """
  table.ftimes td.note{color:#666;font-size:11px;max-width:360px;white-space:normal}
  .assumed{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983;border-radius:8px;padding:0 6px;
    font-size:10px;white-space:nowrap;margin-left:4px}
+ .snaptag{border:1px solid #f0e3a0;background:#fffbe6;border-radius:6px;padding:4px 8px;margin-top:6px}
+ .snaptag .snaphd{font-size:11.5px;font-weight:700;color:#6b5a00}
+ .snaptag .grid{margin-top:2px}
+ details.metasrcs{margin-top:6px;font-size:12px} details.metasrcs summary{cursor:pointer;color:#2d2d71;font-weight:600}
+ details.metasrcs summary .muted{font-weight:400}
+ table.srcfiles td.path{font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere;
+   max-width:320px}
 """
 
 
@@ -1664,20 +1708,27 @@ def file_time_rows(meta, epochfmt):
     none at all is left as written, because converting a wall clock of unknown zone would be a guess
     presented as a fact. ``epochfmt`` is the run's Unix-seconds formatter, so a converted value lines
     up with the database's in the same table.
+
+    The times of the source files an editing program lists (``meta["xmp_sources"]``) are formatted
+    the same way into each source's own ``rows`` — never into the list returned, which holds only
+    what describes this file (see `XMP_SOURCES_BASIS`).
     """
-    rows = []
-    for t in (meta or {}).get("times") or []:
-        naive = t.get("epoch") is None
-        assumed = t.get("basis") == "format"
-        caveat = ("no timezone in the file — shown as written" if naive else
-                  f"{t['zone']} assumed: the format defines it so, the file states no zone"
-                  if assumed else "")
-        rows.append({"label": t["label"],
-                     "shown": t["wall"] if naive else epochfmt(t["epoch"]),
-                     "wall": t["wall"] + ("" if naive else f" {t['zone']}"),
-                     "zone": t.get("zone"), "naive": naive, "assumed": assumed, "caveat": caveat,
-                     "note": t.get("note", "")})
-    return rows
+    for source in (meta or {}).get("xmp_sources") or []:
+        source["rows"] = [_time_row(t, epochfmt) for t in source.get("times") or []]
+    return [_time_row(t, epochfmt) for t in (meta or {}).get("times") or []]
+
+
+def _time_row(t, epochfmt):
+    naive = t.get("epoch") is None
+    assumed = t.get("basis") == "format"
+    caveat = ("no timezone in the file — shown as written" if naive else
+              f"{t['zone']} assumed: the format defines it so, the file states no zone"
+              if assumed else "")
+    return {"label": t["label"],
+            "shown": t["wall"] if naive else epochfmt(t["epoch"]),
+            "wall": t["wall"] + ("" if naive else f" {t['zone']}"),
+            "zone": t.get("zone"), "naive": naive, "assumed": assumed, "caveat": caveat,
+            "note": t.get("note", "")}
 
 
 def file_times_table(times):
@@ -1702,13 +1753,129 @@ def file_times_table(times):
             "<th>In this report's timezone</th><th>Note</th></tr>" + "".join(rows) + "</table>")
 
 
-def embedded_meta_html(meta, times, *, label="", href=""):
-    """One file's «Embedded metadata» block: what it carries inside itself, key fields first, its own
-    timestamps as a table, the rest behind «all fields».
+def snap_tag_rows(tag):
+    """The Snapchat app's tag (one entry of ``meta["snapchat"]``) as ``[(label, value)]``: what the
+    user agent names, the lens ids, every other field as stored, the user agent itself and where in
+    the file the tag was read."""
+    rows = [("App version", tag.get("app_version", "")),
+            ("Device model (as written)", tag.get("device", "")),
+            ("Operating system (as written)", tag.get("os", ""))]
+    if tag.get("ua_extra"):
+        rows.append(("Other user-agent parts", " · ".join(tag["ua_extra"])))
+    rows += [("Lens id", str(lens)) for lens in tag.get("lens_ids") or []]
+    rows += [(f"Field {path} (as stored)", text) for path, text in tag.get("stored") or []]
+    rows.append(("User agent (as written)", tag.get("user_agent", "")))
+    where = tag.get("field", "")
+    if tag.get("offset") is not None:
+        where += f" — byte offset {tag['offset']} (0x{tag['offset']:X})"
+    rows.append(("Read from", where))
+    rows += [("Also in", field) for field in tag.get("also") or []]
+    return rows
+
+
+def snap_tag_html(meta, *, popover=True):
+    """The Snapchat app's tag(s) a file carries, as a block of their own under the key fields.
+    ``popover=False`` leaves the «?» out, for a page that carries `SNAP_TAG_BASIS` once elsewhere."""
+    blocks = []
+    for tag in (meta or {}).get("snapchat") or []:
+        cells = []
+        for key, value in snap_tag_rows(tag):
+            shown = html.escape(str(value))
+            if key.startswith("Device model"):
+                shown += (" <span class='muted'>— the app that wrote this file, not necessarily "
+                          "this device</span>")
+            cells.append(f"<div class='k'>{html.escape(key)}</div><div class='v'>{shown}</div>")
+        icon = info_icon(SNAP_TAG_BASIS) if popover else ""
+        blocks.append(f"<div class='snaptag'><div class='snaphd'>Snapchat app tag{icon}</div>"
+                      f"<div class='grid'>{''.join(cells)}</div></div>")
+    return "".join(blocks)
+
+
+_SOURCE_COLUMNS = (("xmp:CreateDate", "Created"), ("xmp:ModifyDate", "Modified"))
+
+
+def xmp_sources_html(meta, *, popover=True):
+    """The files an editing program lists in XMP as having gone into this one — collapsed, and
+    labelled throughout as theirs, because none of it describes this file (`XMP_SOURCES_BASIS`).
+    Their times are shown as `file_time_rows` formatted them into each source's ``rows``."""
+    sources = (meta or {}).get("xmp_sources") or []
+    if not sources:
+        return ""
+
+    def when(row):
+        if row.get("naive"):
+            return f"{html.escape(row['wall'])} <span class='muted'>(no zone)</span>"
+        if not row.get("shown"):                           # nothing to convert with: as written
+            return html.escape(row["wall"])
+        assumed = (f" <span class='assumed'>{html.escape(row.get('zone') or 'UTC')} assumed</span>"
+                   if row.get("assumed") else "")
+        return (f"<span title='as written: {html.escape(row['wall'])}'>{html.escape(row['shown'])}"
+                f"</span>{assumed}")
+
+    body = []
+    for s in sources:
+        rows = {r["label"]: r for r in s.get("rows") or []}
+        name = s.get("file_path") or s.get("title") or "(no path recorded)"
+        facts = [html.escape(name)]
+        if s.get("title") and s.get("title") != name:
+            facts.append(f"<span class='muted'>title:</span> {html.escape(s['title'])}")
+        if s.get("format"):
+            facts.append(f"<span class='muted'>format:</span> {html.escape(s['format'])}")
+        if s.get("uses", 0) > 1:
+            facts.append(f"<span class='muted'>used {s['uses']} times in the edit</span>")
+        if s.get("instance_id"):
+            facts.append(f"<span class='muted'>instance {html.escape(s['instance_id'])}</span>")
+        for tag in s.get("snapchat") or []:
+            lenses = ", ".join(str(lens) for lens in tag.get("lens_ids") or [])
+            facts.append(
+                f"<b>Snapchat app tag</b> <span class='muted'>(in its "
+                f"{html.escape(tag.get('field', '').rsplit(' › ', 1)[-1])}) — the app that wrote "
+                f"that source file:</span> {html.escape(tag.get('user_agent', ''))}"
+                + (f" · lens id {html.escape(lenses)}" if lenses else ""))
+        tools = [t for t in (s.get("creator_tool"), s.get("saved_by")) if t]
+        tool = " / ".join(html.escape(t) for t in dict.fromkeys(tools))
+        cells = []
+        for prop, _title in _SOURCE_COLUMNS:
+            label = f"XMP {prop}"
+            if label in rows:
+                cells.append(when(rows[label]))
+            elif prop in (s.get("not_set") or []):
+                cells.append("<span class='muted'>not set (1904-01-01T00:00:00Z)</span>")
+            else:
+                cells.append("")
+        other = [f"{html.escape(r['label'].replace('XMP ', ''))}: {when(r)}" for label, r in rows.items()
+                 if label not in {f"XMP {p}" for p, _t in _SOURCE_COLUMNS}]
+        gps = s.get("gps") or {}
+        fix = ""
+        if gps:
+            lat, lon = gps["lat"], gps["lon"]
+            fix = (f'<a href="https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}" '
+                   f'target="_blank">{lat:.6f}, {lon:.6f}</a> <span class="muted">— the source '
+                   f"file's fix, not this file's</span>")
+        body.append(f"<tr><td class='path'>{'<br>'.join(facts)}</td><td>{tool}</td>"
+                    + "".join(f"<td class='mono'>{c}</td>" for c in cells)
+                    + f"<td class='note'>{'<br>'.join(other)}</td>"
+                    + f"<td>{html.escape(s.get('duration') or '')}</td><td>{fix}</td></tr>")
+    icon = info_icon(XMP_SOURCES_BASIS) if popover else ""
+    head = "".join(f"<th>{t}</th>" for t in (
+        "Source file (path on the editing computer)", "Made / last saved with",
+        "Its creation date", "Its modification date", "Its other dates", "Duration", "Its GPS"))
+    return (f"<details class='metasrcs'><summary>Source files this file was edited from — "
+            f"{len(sources)} <span class='muted'>(recorded in this file's XMP by the editing "
+            f"program; their dates, GPS and paths describe those source files, not this one)</span>"
+            f"</summary>{icon}<table class='ftimes srcfiles'><tr>{head}</tr>{''.join(body)}</table>"
+            f"</details>")
+
+
+def embedded_meta_html(meta, times, *, label="", href="", popover=True):
+    """One file's «Embedded metadata» block: what it carries inside itself, key fields first, the
+    Snapchat app's tag when there is one, its own timestamps as a table, the source files an editing
+    program lists (apart, and collapsed), the rest behind «all fields».
 
     Rendered for a file with nothing too, because «no EXIF» is itself a finding an examiner wants
     stated rather than inferred from an absent block. ``meta`` is what `media_meta.extract` returned
-    (``None`` for a format not read here); ``times`` is `file_time_rows` of it.
+    (``None`` for a format not read here); ``times`` is `file_time_rows` of it. ``popover=False``
+    leaves the blocks' «?» out, for a page that carries their explanations once elsewhere.
     """
     name = html.escape(label or "")
     head = (f"<div class='metahd'><a href='{html.escape(href)}' target='_blank'>{name}</a></div>"
@@ -1744,18 +1911,46 @@ def embedded_meta_html(meta, times, *, label="", href=""):
     srcs = ", ".join(meta.get("sources") or [])
     return (f"<div class='metafile'>{head}<div class='metasrc'>read from: "
             f"{html.escape(srcs or 'the file header')}</div>"
-            f"<div class='grid'>{grid}</div>{file_times_table(times)}{more}</div>")
+            f"<div class='grid'>{grid}</div>{snap_tag_html(meta, popover=popover)}"
+            f"{file_times_table(times)}{xmp_sources_html(meta, popover=popover)}{more}</div>")
+
+
+def snap_tag_search_terms(meta):
+    """What the search box should match for the Snapchat app's tag: the user agent (so the app
+    version, the device model and the operating system each find it), every lens id, the encoded
+    text as stored (so a value copied out of another tool finds the file) and a phrase for the tag
+    itself."""
+    terms = []
+    for tag in (meta or {}).get("snapchat") or []:
+        terms += [tag.get("user_agent", ""), tag.get("encoded", "")]
+        terms += [str(lens) for lens in tag.get("lens_ids") or []]
+        terms.append("snapchat app tag lens")
+    return terms
+
+
+def xmp_source_search_terms(meta):
+    """The names and programs of the source files an editing program lists, and a Snapchat tag one
+    of them carries — never their dates or places, so a search by date never matches a source
+    file's date as if it were this file's."""
+    terms = []
+    for s in (meta or {}).get("xmp_sources") or []:
+        terms += [os.path.basename(s.get("file_path") or "").strip(), s.get("title") or "",
+                  s.get("creator_tool") or "", s.get("saved_by") or ""]
+        terms += snap_tag_search_terms({"snapchat": s.get("snapchat")})
+    return [t for t in dict.fromkeys(terms) if t]
 
 
 def embedded_search_terms(meta, times, structural=()):
     """What the search box should match for a file's embedded metadata: the fields that name a
-    device, a program or a place (not the pixel size every encoder writes), the GPS fix, and every
-    timestamp as this report shows it."""
+    device, a program or a place (not the pixel size every encoder writes), the GPS fix, every
+    timestamp as this report shows it, the Snapchat app's tag, and the names of the source files an
+    editing program lists."""
     terms = [str(v) for k, v in (meta or {}).get("key") or [] if k not in structural]
     gps = (meta or {}).get("gps") or {}
     if gps:
         terms.append(f"{gps.get('lat', 0):.5f}, {gps.get('lon', 0):.5f}")
     terms += [t["shown"] for t in times or []]
+    terms += snap_tag_search_terms(meta) + xmp_source_search_terms(meta)
     if (meta or {}).get("notable"):
         terms.append("exif xmp embedded metadata")
     return terms

@@ -56,7 +56,9 @@ Every recovered **media** file is then read for what it says about *itself* — 
 bytes, so a decrypted payload is read too (`media_meta.extract_bytes`) — and shown as an **Embedded
 metadata** block through the renderer the Memories and cache_controller reports share
 (`report_ui.embedded_meta_html`): EXIF/XMP fields, PNG text, and for any ISO base media container
-the `mvhd` creation/modification time, duration and QuickTime user data. This replaces the report's
+the `mvhd` (and track header) creation/modification times, duration, QuickTime user data and metadata,
+XMP, and the Snapchat app's tag when the file carries one
+([snapchat_media_tag.md](snapchat_media_tag.md)). This replaces the report's
 own `mvhd` grid, and keeps its caveat: an `mvhd` time is UTC by the format's definition, not by
 anything the file records, and Apple encoders have not been faithful to that, so the converted value
 is marked *UTC assumed* and should be corroborated against the device's own record of the file in the

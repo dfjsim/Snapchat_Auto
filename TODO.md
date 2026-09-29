@@ -234,3 +234,11 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   - `proto_to_msg` still concatenates every string in the protobuf, and `message_content` still
     depends on that for the cache join. Worth reading the media id from its own field too, so the
     concatenation can go.
+
+# Decoding (after the Snapchat app tag — see docs/snapchat_media_tag.md)
+- Resolve a tag's lens id to the lens's name from the app's own lens records (the
+  `<prefix>_<lensId>_lens_central` docobjects and `rtus.db`), and let the Memories index filter by lens.
+- A received video's `©cmt` can carry `vid:<id>` — the id TikTok writes into the videos it exports.
+  Shown as stored today; worth naming as what it is.
+- Another app's JSON in a video's `desc` (`creationDate`, `userDevice`, …) is shown cut at 200
+  characters like any other value; worth showing whole, and read as the fields it holds.

@@ -8,6 +8,46 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 
 ## [1.8.0-beta.2] — 2026-09-24
 
+### Added
+- **The Snapchat app's tag in media files is decoded** — `scripts/data/snap_media_tag.py`. The app
+  writes base64 of a protobuf into a file's description field (an MP4's 3GPP `dscp` box, a MOV's
+  `com.apple.quicktime.description`, the `desc` item of the Android app's ffmpeg-muxed MP4, an image's
+  EXIF `UserComment`); decoded, it names the app version, device model and operating system of the
+  app that **wrote** the file — for a received snap, the sender's — and the lens id (packed on iOS,
+  unpacked on Android; the id matches the app's own lens records). It is shown only when all of it
+  decodes, in a block of its own inside every *Embedded metadata* block, with the field and byte
+  offset it was read from; the encoded text stays under *all fields*, as stored. See
+  [docs/snapchat_media_tag.md](docs/snapchat_media_tag.md). The tag was found by **Keban
+  Bronsario**.
+- The Memories index has an **APP TAG** chip and a *with the Snapchat app's tag* option in its
+  *Embedded metadata* filter; the tag's user agent, lens id and encoded text are searchable in every
+  index where the file appears.
+- **Chat attachments show what they say about themselves**: an expanded message has the same
+  *Embedded metadata* block per image or video (`conversations_report.publish_attachment`), with
+  its explanations once in the *Content* header; a conversation is found by the tags of the files
+  sent in it.
+- **The Android Memories report shows embedded metadata**: it was read but never rendered, and a
+  file de-duplicated by content had none.
+- **The source files of an edit** — the clips, images and music an editing program lists in a
+  video's XMP (`xmpMM:Ingredients`, `xmpMM:Pantry`) — are shown in a collapsed table of their own,
+  labelled as theirs: their paths, programs, dates, durations, GPS and any Snapchat tag. None of it
+  enters the file's own timestamps, GPS or date search.
+
+### Changed
+- `media_meta` reads more of an MP4 / MOV: QuickTime metadata in `moov › meta` (where iOS keeps a
+  MOV's `com.apple.quicktime.make` / `model` / `creationdate` / `location.ISO6709` — never reached
+  before), 3GPP asset boxes (`titl`, `dscp`, …), XMP (a top-level `uuid` box or `udta › XMP_`), and
+  the track headers (`tkhd`, `mdhd`): their times are noted on the `mvhd` row where they agree and
+  listed where they differ. `data` atoms are read by their type — numbers as numbers, an image by its
+  size — instead of as text. XMP in an image is now parsed (entity declarations refused), so its own
+  properties are listed under *all fields* and its edit history is shown as timestamps.
+- An ISO base media file is walked by seeking from box to box: its media data is never read, and a
+  `udta` after more than 4 MB of sample tables is no longer lost.
+- The *read from* line names QuickTime user data whenever a field came from it; it said *the file
+  header* when every such field was also a key field.
+- `media_meta.STRUCTURAL` lists the XMP spellings of pixel size, orientation and stream layout, so an
+  XMP that only restates them does not make a file *notable*.
+
 ### Fixed
 - **A UFED iOS archive's access time was shown as the device's modification time.** A UFED / CLBX
   archive's `UT` extra field is flagged mtime / atime / ctime but holds the access time in all three

@@ -302,11 +302,18 @@ coordinates) carry no time of their own; they are dated only by the snap row the
 
 `scripts/data/media_meta.py` reads the metadata **inside** each recovered file, once per distinct
 content, at the point every published file passes through (`_save_media` → `stub["meta"]`): EXIF and
-XMP in a JPEG or WebP, text chunks in a PNG, the `mvhd` header and QuickTime user data (`©xyz`
-location, `©mak`, `keys`/`ilst` items) in an ISO base media file. Only Pillow and the standard library
-are used; HEIF/HEIC is **not** read in this build (no HEIF codec), and the page says so rather than
-reporting "no metadata". The reader never raises — a truncated or hostile header costs that file its
-block, not the report.
+XMP in a JPEG or WebP, text chunks in a PNG; in an ISO base media file the movie and track headers
+(`mvhd`, `tkhd`, `mdhd`), QuickTime user data (`©xyz` location, `©mak`, the 3GPP boxes such as
+`dscp`, `udta › meta` items), QuickTime metadata in `moov › meta` (where iOS keeps a MOV's
+`com.apple.quicktime.*`) and XMP. Only Pillow and the standard library are used; HEIF/HEIC is **not**
+read in this build (no HEIF codec), and the page says so rather than reporting "no metadata". The
+reader never raises — a truncated or hostile header costs that file its block, not the report.
+
+Two things inside those fields get a block of their own, described in
+[snapchat_media_tag.md](snapchat_media_tag.md): **the Snapchat app's tag** (app version, device model,
+OS and lens id of the app that wrote the file — for a Memory, the device that saved it, which can be
+another phone than the one extracted) and **the source files of an edit** that an editing program
+lists in XMP — shown apart, collapsed, and never as the file's own times or GPS.
 
 It is shown three ways. On the detail sub-page, **Embedded metadata — inside the media files** sits
 directly under the id band, next to the thumbnail: per file, the container and pixel size, the fields
@@ -316,14 +323,19 @@ the app's*), the file's own timestamps as a table, and everything else the file 
 fields — N more**. The renderer is `report_ui.embedded_meta_html`, shared with the two cache reports,
 so the same file reads the same way wherever the examiner meets it. A file with nothing inside says so — *none — the file carries no EXIF, XMP or dated
 header* — because "no EXIF" is itself a finding. On the index, an **EXIF** chip in the Kind column and
-an **Embedded metadata** filter (*with* / *none found*, counted), and the fields in the row's expanded
-area and its search text.
+an **Embedded metadata** filter (*with* / *with the Snapchat app's tag* / *none found*, counted), and
+the fields in the row's expanded area and its search text. A Memory whose media carries the
+Snapchat app's tag also gets an **APP TAG** chip (its tooltip names the app, model, OS and lens) and a
+`stag` flag in its row data, written only when true; the tag's user agent, lens id and encoded text
+are in the search text, and the row's expanded area lists them with the file and field they were
+read from.
 
 Expect *none found* to be the common state: Snapchat's servers re-encode media, so a cached file
 usually carries nothing. When one does carry EXIF it most often came from the camera roll, and then its
 make, model and GPS fix describe the device that took the picture — not necessarily this one. The
 hints say so (`report_ui.EMBEDDED_BASIS`, `_META_FILTER_HINT`). Pixel size and orientation alone do
-not make a file *notable* (`media_meta.STRUCTURAL`): every encoder writes those, and on a real device
+not make a file *notable* (`media_meta.STRUCTURAL`, which lists the XMP spellings of those facts too):
+every encoder writes those, and on a real device
 three quarters of the cached JPEGs carry exactly that set and nothing else — a chip on all of them
 would say nothing. The **EXIF** chip, the filter and the search token follow `notable`; the block on
 the detail page shows whatever is there.
