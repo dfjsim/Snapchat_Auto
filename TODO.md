@@ -226,14 +226,17 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
     "advanced settings" section of the Related-items step, where the user can exclude some details and
     fields from the final report (for example, some of the fields in the `ZGALLERYSNAP values` section
     of the Memory details page) and save the choice as a default config for future reports.
-- Chat decoding, still open after the 1.5.2 fixes:
-  - The other event kinds under `4.4.8` — fields `2`, `5`, `6`, `8` and `22`, of which `2` is by far
-    the most common — are identified as events but not named. They are labelled `System message`
-    with no description.
-    Naming them needs ground truth: compare a conversation containing them against another tool.
+- Chat decoding, still open (see docs/report_communications.md, *What a row is*). Each of these
+  needs data the test extractions do not have:
   - `proto_to_msg` still concatenates every string in the protobuf, and `message_content` still
-    depends on that for the cache join. Worth reading the media id from its own field too, so the
-    concatenation can go.
+    depends on that for the cache join: the `<mediaId>.1020` EXTERNAL_KEY match (`Unknown .1020`)
+    and the `local_message_references` route. Neither fires on any test extraction, so replacing the
+    concatenation with a read of the media id's own field cannot be checked yet — do it with an
+    extraction whose report shows those labels.
+  - An erased message: check on an extraction with a known deletion whether the `4.4.8.5` row *is*
+    the erased message (same ids), and say so in the report if it is.
+  - Body field `4.4.22` occurs on a Snap row and is reported as not described; `content_type` 8
+    (Location) has no body kind of its own yet.
 
 # Decoding (after the Snapchat app tag — see docs/snapchat_media_tag.md)
 - Resolve a tag's lens id to the lens's name from the app's own lens records (the

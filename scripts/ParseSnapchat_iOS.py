@@ -12,6 +12,7 @@ import ntpath
 import filetype
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
+from scripts.data import arroyo_content
 from scripts.data import flatbuffers_doc
 from scripts.data import tsaf
 from pathlib import Path
@@ -254,8 +255,8 @@ def path_to_image_html(filename):
     global outputDir_name
     dots_regex = re.compile(r"^\.+$")
 
-    # A message that carries no attachment holds "" here — an app event getChats decoded but could
-    # not describe (see describeEventMessages) — and "." / ".." resolve the same way. Joined onto
+    # A message that carries no attachment can hold "" here — a message whose body carries no
+    # string (see getChats) — and "." / ".." resolve the same way. Joined onto
     # the folder below they all name the cacheFiles *directory*, which of course exists, so the
     # identification step would open a directory and Windows answers PermissionError. There is no
     # attachment to render in any of these cases, so the value is returned untouched: calling an
@@ -936,11 +937,29 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
                 if sender == item[0]:
                     df_messages.loc[index, "sender_id"] = item[1]
                     #logger.info(item)
-                    found = True    
+                    found = True
             if not found:
                 for i in array2:
                     if sender in i:
                         df_messages.loc[index, "sender_id"] = i[1]
+        # The people an app event names ("X deleted a chat message", "X was added to the group")
+        # are user ids in its description. `message_body` keeps them as they are — the id is the
+        # one identifier that never changes, and the Conversations report names each one from the
+        # Contacts data while still showing it. The legacy report shows an app event's description
+        # as its content, so that copy gets "name (id)": the name to read, the id to rely on.
+        # Whole-column writes (docs/pandas3_python314_compat.md).
+        names = {}
+        for uid, name in array2 + array:                   # the friends list wins
+            if isinstance(uid, str) and isinstance(name, str) and name:
+                # the owner's name arrives bolded for the legacy table; a sentence wants it plain
+                names[uid.lower()] = f"{re.sub(r'</?b>', '', name)} ({uid.lower()})"
+        if names and "message_body" in df_messages.columns \
+                and "message_content" in df_messages.columns:
+            df_messages["message_content"] = [
+                arroyo_content.name_users(content, names)
+                if isinstance(content, str) and content and content == body else content
+                for content, body in zip(df_messages["message_content"],
+                                         df_messages["message_body"])]
     except Exception as E:
         logger.error(E)
         pass
@@ -1267,22 +1286,24 @@ def mergeCache(df_cache, df_content):
         # KeyError on the missing EXTERNAL_KEY/CACHE_KEY columns.
         return empty_cache_frame()
 
-# Where the text a person actually typed lives inside conversation_message.message_content:
+# Where the text a message carries lives inside conversation_message.message_content (see
+# scripts/data/arroyo_content.py, which reads it):
 #
 #   4.4.2.1     — the body of a text message (content_type 1)
-#   4.4.7.11.1  — the caption typed on a media message (content_type 2)
+#   4.4.7.11.1  — the text of a reply to a Snap or Story. The media such a row carries is the Snap
+#                 replied to, not something the replier sent: this is not a caption.
+#   4.4.19.1.1  — the text of a Tiny Snap; 4.4.24.2.1.1 — each part of a bot's response
 #
 # proto_to_msg does not read these fields: it concatenates every string it finds anywhere in the
 # protobuf. That is what lets the cache join recognise a media id, so message_content keeps it — but
-# it also glues the encryption key, IV, lens name, sticker name and the caption into one value, so a
-# caption reached the report buried inside "<key>=<iv>==<uuid><caption><mediaId>" and was unreadable
+# it also glues the encryption key, IV, lens name, sticker name and the reply into one value, so a
+# reply reached the report buried inside "<key>=<iv>==<uuid><reply><mediaId>" and was unreadable
 # as a message. Reading the field itself is what separates the message from its plumbing.
 #
-# Verified against the test extractions: every text message carries 4.4.2.1, media captions appear
-# at 4.4.7.11.1, and no text is produced that the concatenated value did not already contain. Text
-# found anywhere else in these protobufs is not the message — lens and sticker names, colour codes,
-# advertisement copy, and the overlay text drawn onto a snap.
-MESSAGE_TEXT_PATHS = ((4, 4, 2, 1), (4, 4, 7, 11, 1))
+# Verified against the test extractions: every text message carries 4.4.2.1, and no text is produced
+# that the concatenated value did not already contain. Text found anywhere else in these protobufs is
+# not the message — lens and sticker names, colour codes, advertisement copy, and the overlay text
+# drawn onto a snap.
 
 
 def _readVarint(data, pos):
@@ -1347,82 +1368,40 @@ def protoField(blob, path):
 
 
 def messageText(blob):
-    """The text a person typed in this message, read from its own field. "" when there is none.
+    """The text this message carries, read from its own field. "" when there is none.
 
     Encoded the way getChats encodes message text — cp1252 with the rest as XML character
     references — because the legacy report is written as cp1252 and both reports render the
     entities.
     """
-    for path in MESSAGE_TEXT_PATHS:
-        raw = protoField(blob, path)
-        if raw is None:
-            continue
-        try:
-            text = bytes(raw).decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        if text:
-            return text.encode("cp1252", "xmlcharrefreplace").decode("cp1252")
-    return ""
+    text = arroyo_content.message_text(blob)
+    return text.encode("cp1252", "xmlcharrefreplace").decode("cp1252") if text else ""
 
 
-# Where a "media saved in chat" event keeps its payload inside conversation_message.message_content:
-# 4->4->8->7 = { 1: { 1: <16-byte user id of whoever saved it> }, 2: <server_message_id saved> }.
-# Established on few examples and corroborated against the database itself — the row its field 2
-# names carries is_saved = 1 — which is why savedMediaEventText refuses to call it a save unless
-# that flag agrees.
-SAVED_MEDIA_EVENT_PATH = ("4", "4", "8", "7")
+def describeBodies(df, blobs, event_rows):
+    """Fill ``message_body`` — what each row carries — and the content of its app-event rows.
 
-
-def savedMediaEventText(blob, conversation, saved_flags):
-    """Readable text for a content_type 9 event message, or "" if this is not one we can read.
-
-    These rows carry no string anywhere in their protobuf — they are something the app recorded in
-    the conversation, not something a user typed — so the text parser finds nothing and the row used
-    to be reported as a failed parse. It is not a failure: the body decodes cleanly and says which
-    message the event is about.
-
-    The "saved" wording is only used when the message the event points at independently says it was
-    saved (``conversation_message.is_saved``). Without that agreement the event is reported as a
-    reference to that message and nothing more, because one decoded field is a lead, not a finding.
+    An app event (a body at 4.4.8: a call, a deleted message, a save to the camera roll, a group
+    renamed…) is something the app recorded in the conversation, not something a user typed, so it
+    has no text: its description *is* its content, and the legacy report shows it as the message.
+    The other descriptions (a reply to a Snap, a shared Story, a voice note…) are shown beside the
+    row's own text and media, never in place of them. Returns how many events were described.
     """
-    if blob is None or isinstance(blob, str):
-        return ""
-    try:
-        body, _typedef = blackboxprotobuf.decode_message(blob)
-    except Exception:
-        return ""
-    for key in SAVED_MEDIA_EVENT_PATH:
-        body = body.get(key) if isinstance(body, dict) else None
-        if body is None:
-            return ""
-    target = body.get("2")
-    if not isinstance(target, int):
-        return ""
-    if saved_flags.get((conversation, target)) == 1:
-        return f"Saved the media of message {target} in this chat"
-    return f"Event message referring to message {target}"
-
-
-def describeEventMessages(df, blobs, indices):
-    """Fill in the content of rows whose protobuf decoded but held no text. Returns how many."""
-    saved_flags = {}
-    if "is_saved" in df.columns:
-        for _index, row in df.iterrows():
-            saved_flags[(row["client_conversation_id"], row["server_message_id"])] = row["is_saved"]
-    named = 0
-    for index in indices:
-        text = savedMediaEventText(blobs.get(index), df.loc[index, "client_conversation_id"],
-                                   saved_flags)
-        if text:
-            df.loc[index, "message_content"] = text
-            if "message_text" in df.columns:
-                # the description IS this row's content: it is what the reports display for it
-                df.loc[index, "message_text"] = text
-            named += 1
-    logger.info(f"{len(indices)} message(s) carry no text of their own (app events rather than "
-                f"anything a user typed); {named} of them could be described")
-    return named
+    df["message_body"] = [arroyo_content.describe(blobs.get(index)) for index in df.index]
+    # the message an event is about (a save to the camera roll names the one whose media it saved),
+    # so the Conversations report can link the two; "" when the row refers to none
+    refs = [arroyo_content.referenced_message(blobs.get(index)) for index in df.index]
+    df["message_ref"] = ["" if ref is None else str(ref) for ref in refs]
+    described = 0
+    for index in event_rows:
+        text = df.loc[index, "message_body"]
+        df.loc[index, "message_content"] = text
+        if text and "not described" not in text:
+            described += 1
+    if event_rows:
+        logger.info(f"{len(event_rows)} message(s) are app events rather than anything a user "
+                    f"typed; {described} of them could be described")
+    return described
 
 
 def reportExcludedMessages(database, conv_filter):
@@ -1460,10 +1439,7 @@ def getChats(database):
     # column names differ between app versions, so the optional ones are selected only when present.
     columns = sqlite_open.table_columns(database, "conversation_message")
     optional = ""
-    # is_saved is not reported as a column of its own; it is what corroborates a "media saved in
-    # chat" event before savedMediaEventText will describe one as a save.
-    for candidate in ("client_message_id", "local_message_id", "server_conversation_id",
-                      "is_saved"):
+    for candidate in ("client_message_id", "local_message_id", "server_conversation_id"):
         if candidate in columns:
             optional += f"    {candidate} as {candidate},\n"
 
@@ -1508,16 +1484,21 @@ def getChats(database):
 
     for index, row in df.iterrows():
         message = (row["message_content"])
+        if arroyo_content.event_number(message) is not None:
+            # An event the app recorded in the conversation (a call, a deleted message, a save to
+            # the camera roll…) rather than anything a user typed. Most carry no string at all, and
+            # used to be reported as a failed parse; the few that do (a group's old and new name)
+            # used to show those strings glued together. Both are described from the event instead.
+            event_rows.append(index)
+            df.loc[index, "message_content"] = ""
+            continue
         messages = proto_to_msg(message)
         if messages == "":
             df.loc[
                 index, "message_content"] = """ERROR - Something went wrong when parsing this message. <br> Manually verify the message with Client Conversation ID and Server Message ID in arroyo.db"""
             continue
         if len(messages) == 0:
-            # The protobuf decoded, it simply carries no string — an event the app recorded in the
-            # conversation (a save, for one) rather than anything a user typed. Reporting that as a
-            # failed parse states something untrue about the message, so it is described instead.
-            event_rows.append(index)
+            # The protobuf decoded, it simply carries no string. Not a parse failure.
             df.loc[index, "message_content"] = ""
             continue
         meddelande = ""
@@ -1540,27 +1521,10 @@ def getChats(database):
             df.loc[
                 index, "message_content"] = """ERROR - Something went wrong when parsing this message. <br> Manually verify the message with Client Conversation ID and Server Message ID in arroyo.db"""
 
-    if event_rows:
-        describeEventMessages(df, blobs, event_rows)
+    describeBodies(df, blobs, event_rows)
 
     logger.info("")
     return df
-
-
-# arroyo.db conversation_message.content_type values observed to carry media: their message_content
-# protobuf holds the 32-byte key / 16-byte IV pair a media message needs, and every one of them that
-# a cache claim did resolve became a media row. Values 1 (text), 3 (video) and 5 (sticker) are named
-# by mergeCacheChats itself and never reach uncachedLabel.
-MEDIA_CONTENT_TYPES = (0, 2)
-
-# content_type values that are not media at all, so "no cached file" would be the wrong thing to say
-# about them. Each keeps its content in the protobuf's 4.4.8 branch and carries no text anywhere —
-# they are events the app recorded in the conversation, not something a user sent. Which event is
-# named by the field inside 4.4.8 (7 = media saved in chat, see savedMediaEventText; 2, 5, 6, 8 and
-# 22 also occur and are not yet identified, so those rows are labelled but not described).
-# Corroborated for content_type 9, which another tool also renders as a system message.
-CONTENT_TYPE_NAMES = {6: "System message", 9: "System message",
-                      12: "System message", 13: "System message"}
 
 
 def uncachedLabel(content_type):
@@ -1568,19 +1532,21 @@ def uncachedLabel(content_type):
 
     Says only what is known: the message is there, and its file is not. It deliberately does **not**
     say the media "expired" — the claim may have been evicted, never cached on this device, or
-    simply not carried by the extraction, and those are different statements. A content_type that is
-    not media is named rather than described as a missing file, and one this parser has never seen
-    is reported by its number rather than guessed at.
+    simply not carried by the extraction, and those are different statements. An app event (a call,
+    a deleted message, a save to the camera roll…) never had a file, so it is a "System message", not
+    a missing one; any other type that is not media is named (arroyo_content.CONTENT_TYPES), and one
+    this parser does not know is reported by its number rather than guessed at.
     """
     try:
         value = int(content_type)
     except (TypeError, ValueError):
         return "No cached file"
-    if value in CONTENT_TYPE_NAMES:
-        return CONTENT_TYPE_NAMES[value]
-    if value in MEDIA_CONTENT_TYPES:
+    category = arroyo_content.content_type_category(value)
+    if category == "event":
+        return "System message"
+    if category == "media":
         return "Media (no cached file)"
-    return f"Unrecognised (content_type {value})"
+    return arroyo_content.content_type_label(value) or f"Unrecognised (content_type {value})"
 
 
 def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
@@ -1754,8 +1720,6 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
             
             if row['content_type'] == 1:
                 merge_df.loc[index, 'content_type'] = "Text"
-            #elif row['content_type'] == 1:
-            #     merge_df.loc[index, 'content_type'] = "Video (Unknown Source)"
             else:
                 if row['content_type'] in ['local_message_reference', "Unknown .1020"]:# or row['content_type'] == 'Unknown .1020':
                     continue
@@ -1767,7 +1731,9 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
                     elif row["TYPE"] == "thumbnail~1":
                         merge_df.loc[index, 'content_type'] = "Thumbnail"
                     elif row["content_type"] == 3:
-                        merge_df.loc[index, 'content_type'] = "Video (Unknown Source)"
+                        # something shared into the chat — a Story, a Spotlight Snap, a map pin…
+                        # (Message Body says which). Its media may be a photo as well as a video.
+                        merge_df.loc[index, 'content_type'] = "Shared content"
                     elif row["content_type"] == 5:
                         merge_df.loc[index, 'content_type'] = "Sticker"
                     elif type(row["TYPE"]) != str:
@@ -1801,6 +1767,10 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
                # again on a later run. See fixSenders.
                'sender_user_id': 'Sender User ID',
                'server_conversation_id': 'Server Conversation ID', 'message_text': 'Message Text',
+               # what the row carries, beside its text and media (arroyo_content.describe)
+               'message_body': 'Message Body',
+               # the server_message_id an app event is about (arroyo_content.referenced_message)
+               'message_ref': 'Message Ref',
                # arroyo's own numeric content_type, kept beside the label derived from it
                'arroyo_content_type': 'Content Type (arroyo)',
                # which reading of arroyo.db the row came from (scripts/data/sqlite_open.py)
@@ -2209,11 +2179,11 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # The device-side ids are only present when this app version's conversation_message has them
     # (see getChats), so the column list is filtered rather than fixed.
     wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Sender User ID",
-              "Message Content", "Message Text", "Content Type", "Content Type (arroyo)",
-              "Creation Timestamp UTC+0", "Read Timestamp UTC+0", "Server Message ID",
-              "Client Message ID", "WAL View"]
+              "Message Content", "Message Text", "Message Body", "Message Ref", "Content Type",
+              "Content Type (arroyo)", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
+              "Server Message ID", "Client Message ID", "WAL View"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
-     
+
     logger.info("Cleaning up cache files not linked to messages")
     messages = final_df["Message Content"].tolist()
     for file in os.listdir(outputDir + '/cacheFiles/'):
@@ -2257,22 +2227,29 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # per-conversation pages), so it needs them while Message Content still holds the raw attachment
     # filename — the loop below replaces it with the legacy report's HTML in place.
     msg_df = final_df.copy()
-    # "Message Text" is the parsed content the merge would otherwise have thrown away, and "Sender
-    # User ID" the sender's permanent id that fixSenders replaced with a name; only the Conversations
-    # report uses either, so the legacy report's table is left exactly as it was.
-    final_df = final_df.drop(columns=["Message Text", "Sender User ID"], errors="ignore")
+    # "Message Text" is the parsed content the merge would otherwise have thrown away, "Message Body"
+    # what the row carries, and "Sender User ID" the sender's permanent id that fixSenders replaced
+    # with a name; only the Conversations report uses them, so the legacy report's table is left
+    # exactly as it was.
+    final_df = final_df.drop(columns=["Message Text", "Message Body", "Message Ref",
+                                      "Sender User ID"], errors="ignore")
 
     if legacy_wanted:
         for index, row in final_df.iterrows():
             final_df.loc[index, 'Message Content'] = path_to_image_html(row["Message Content"])
 
         logger.info("Cleaning up messages")
+        # A shared-content or sticker row whose claim produced no picture is one of the join's
+        # duplicate rows. The rendered attachment is wrapped in its <span id="cf-…"> anchor, so the
+        # test is whether it *contains* media: a startswith() test here matched nothing and dropped
+        # every one of these rows, the real ones included. A share may be a photo as well as a video.
         for index, row in final_df.iterrows():
-            if row["Content Type"] == "Video (Unknown Source)":
-                if not row["Message Content"].startswith("<video"):
+            content = str(row["Message Content"])
+            if row["Content Type"] == "Shared content":
+                if "<video" not in content and "<img" not in content:
                     final_df = final_df.drop(index)
             elif row["Content Type"] == "Sticker":
-                if not row["Message Content"].startswith("<a href"):
+                if "<img" not in content:
                     final_df = final_df.drop(index)
             elif not uuid_pattern.match(row["Client Conversation ID"]):
                 final_df = final_df.drop(index)

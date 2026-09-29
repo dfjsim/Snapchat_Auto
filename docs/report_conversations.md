@@ -310,10 +310,32 @@ own timestamps are not added to the message search — every video would bring t
 
 **Duplicate rows.** `mergeCacheChats` produces one row per cache claim of a message, so a message
 with three claims arrives as three rows. For the two content types that only ever *are* their
-attachment — "Video (Unknown Source)" (`content_type` 3) and "Sticker" (`content_type` 5) — a row
-whose claim has no renderable file is one of those duplicates and is dropped, exactly as the legacy
-report drops it. Every other row is kept even when its file is missing: a message whose media was
-not recovered is a finding, not noise.
+attachment — "Shared content" (`content_type` 3; a photo or a video) and "Sticker" (`content_type`
+5) — a row whose claim has no renderable file is one of those duplicates **when another row of the
+same message is listed**, and only then is it dropped (`_drop_unrenderable`, checked in
+`build_messages` once every row is read). A message whose only row it is stays, file or no file: a
+message whose media was not recovered is a finding, not noise, and a shared map pin has no media at
+all. The report used to drop every such row that had no *video* — a shared photo, a map pin, a
+sticker whose file was gone — and the legacy report still drops those it cannot render.
+
+**What the row carries.** `Message Body` (see
+[report_communications.md](report_communications.md#what-a-row-is-its-content-type-and-its-body)) is
+shown in italics above the message's text in the row, as *Message body* in the expanded message,
+and is searched. For an app event it is the whole content; for a reply it says the media is the Snap
+replied to; for a share, what was shared. The expanded message shows the raw `content_type` with its
+name, e.g. `6 (App event)`.
+
+**Names, and the ids behind them.** The body names people by their permanent user id. The row
+shows each by name (`_body_people`, resolved through the Contacts data like the participants); the
+expanded message lists every person it names with their **full user id** and a link to their
+contact record, and the row detail gives the sender's own id as `sender_id (user id, as stored)`.
+Both the names and the ids are searchable. A display name is set on this device and a username can
+change; the id is the one identifier that does not, so it is never replaced, only accompanied.
+
+**The message an event is about.** A save to the camera roll names the message whose media was saved
+(`4.4.8.7.2`, carried as `Message Ref`). The expanded event links to that message's row on the same
+page — "About: message N ▸" — or names it as *not listed in this report* when it is not there (a
+partial report that left it out, or a message no longer in `arroyo.db`).
 
 **Messages with no cache claim at all.** These reach the report as `Media (no cached file)` (or
 `No cached file (content_type <n>)` for a type the parser cannot name) — see
@@ -322,20 +344,21 @@ how the label is derived and why it does not say "expired". The parser used to d
 which is what made the reports list fewer messages than `arroyo.db` holds. The row detail shows
 arroyo's own numeric value as `content_type (arroyo, raw)` beside the label.
 
-### Text sent with media
+### Text on a row that carries media
 The parser replaces a message's content with its attachment, which used to destroy any text the
 message also carried. `getChats` now reads the text out of **the field that holds it** and keeps it
-in `Message Text`, so a caption sent with a photo appears next to it in the row and in the expanded
-detail. See
+in `Message Text`, so the text of a reply to a Snap or Story appears next to the Snap it answers, in
+the row and in the expanded detail — marked as a reply, because that media is the Snap replied to,
+not the replier's. See
 [report_communications.md](report_communications.md#reading-the-text-a-person-actually-typed) for
 the field paths and why the whole-protobuf scan they replace could not be relied on.
 
 `_own_text` is now only a screen for a value that arrived through the old concatenating path — a
 cache key, an `EXTERNAL_KEY`, a bare UUID, a media id, or the attachment's own file name. It
-deliberately does **not** decide by content type: a media message can carry a caption the sender
-typed, so "only show text for `content_type` 1" would drop real evidence. Nothing is hidden either
-way: the expanded row always lists the raw value as `message_content (parsed)`, with the raw
-`content_type` beside it.
+deliberately does **not** decide by content type: a row that carries media can carry typed text too,
+so "only show text for `content_type` 1" would drop real evidence. Nothing is hidden either way: the
+expanded row always lists the raw value as `message_content (parsed)`, with the raw `content_type`
+beside it.
 
 A message whose protobuf `getChats` could not parse is marked **⚠ not parsed** instead of showing
 the parser's error string as if it were the message; the expanded row explains it and gives the ids

@@ -618,9 +618,9 @@ def read_messages(layout, owner, friends_df, staging_dir):
     final_df = final_df.rename(columns={"Creation Timestamp": "Creation Timestamp UTC+0",
                                         "Read Timestamp": "Read Timestamp UTC+0"})
     wanted = ["Client Conversation ID", "Server Conversation ID", "Sender ID", "Sender User ID",
-              "Message Content", "Message Text", "Content Type", "Content Type (arroyo)",
-              "Creation Timestamp UTC+0", "Read Timestamp UTC+0", "Server Message ID",
-              "Client Message ID", "WAL View"]
+              "Message Content", "Message Text", "Message Body", "Message Ref", "Content Type",
+              "Content Type (arroyo)", "Creation Timestamp UTC+0", "Read Timestamp UTC+0",
+              "Server Message ID", "Client Message ID", "WAL View"]
     final_df = final_df[[c for c in wanted if c in final_df.columns]]
 
     # the attachments no message ended up pointing at are not the report's to publish

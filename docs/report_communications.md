@@ -32,7 +32,9 @@ The join key between a message and the cache is the **`EXTERNAL_KEY`**, which re
    (a UUID) is matched against `CACHE_FILE_CLAIM.EXTERNAL_KEY`, yielding the `CACHE_KEY`.
 2. **`content_type == 5`** — a protobuf whose `4→4→4→1→2` field is matched *inside* an
    `EXTERNAL_KEY`.
-3. **`content_type == 3`** — a protobuf whose `4→4→5→5→1` field is matched inside an `EXTERNAL_KEY`.
+3. **`content_type == 3`** — a share: its `4→4→5→5→1` field (the shared Story's id) is matched
+   inside an `EXTERNAL_KEY`. Only a share of that kind can match this way — see
+   [the body kinds](#what-a-row-is-its-content-type-and-its-body).
 
 `getCache` reads claims with `MEDIA_CONTEXT_TYPE IN (2, 3, 19)` (chat-media contexts) for the
 logged-in `USER_ID`; `mergeCache` merges in the `contentManagerDb` rows and **copies each matched
@@ -86,19 +88,26 @@ already-open tab. See [report_ui.md](report_ui.md).
 `proto_to_msg` does not read a message's text field: it walks the whole protobuf and concatenates
 **every** string it finds. That is what lets the cache join recognise a media id, so
 `message_content` still holds it — but it also glues the encryption key, IV, lens name, sticker name
-and the caption into one value, so a caption reached the report as `…` buried inside
-`<key>=<iv>==<uuid>…`. `getChats` therefore fills `message_text` from the field that holds the text:
+and any typed text into one value, so a reply to a Snap reached the report as `…` buried inside
+`<key>=<iv>==<uuid>…`. `getChats` therefore fills `message_text` from the field that holds the text
+(`arroyo_content.message_text`):
 
 | Field | Holds |
 |---|---|
 | `4.4.2.1` | the body of a text message (`content_type` 1) |
-| `4.4.7.11.1` | the caption typed on a media message (`content_type` 2) |
+| `4.4.7.11.1` | the text of a **reply to a Snap or Story** — see below |
+| `4.4.19.1.1` | a Tiny Snap's text |
+| `4.4.24.2.1.1` | each part of a bot's response, joined with line breaks |
 
-Every text message was found to carry `4.4.2.1`, media captions appear at `4.4.7.11.1`, and no text
-is produced that the concatenated value did not already contain. Text found anywhere else in these
-protobufs is not the message — lens and sticker names, colour codes, advertisement copy, and the
-overlay text drawn onto a snap. Recovering captions this way is the point of the change: a caption
-sent with a photo used to arrive glued to the encryption key and media id, unreadable as a message.
+**A reply is not a caption.** `4.4.7` is a reply: `4.4.7.3` is the Snap being replied to and
+`4.4.7.11` the reply (or `.12` / `.15` / `.17` when the reply is media, a voice note or a Snap). The
+media such a row carries is therefore the Snap replied to — typically the *other* person's Story —
+not something the replier sent, and the text is what they wrote back to it. The report used to call
+it a caption on the sender's media, which states the opposite of who made the picture.
+
+Every text message was found to carry `4.4.2.1`, and no text is produced that the concatenated value
+did not already contain. Text found anywhere else in these protobufs is not the message — lens and
+sticker names, colour codes, advertisement copy, and the overlay text drawn onto a snap.
 
 `protoField` reads those fields **straight off the wire format** rather than through
 `blackboxprotobuf`. Without a schema, a decoder has to guess whether a length-delimited field is a
@@ -107,23 +116,83 @@ sentence whose UTF-8 bytes are themselves valid protobuf decodes as a submessage
 reinterpreted as field numbers, and the text becomes unreachable. A field number and a length are
 unambiguous; only the caller decides what the bytes mean.
 
-## Messages that carry no text at all
+## What a row is: its content type and its body
 
-Some rows hold no string anywhere: their content lives in the protobuf's **`4.4.8` branch**, and
-they are events the app recorded in the conversation rather than anything a user sent. `getChats`
-used to report these as `ERROR - Something went wrong when parsing this message`, which states
-something untrue — the protobuf decodes cleanly. They are now labelled **System message**
-(`content_type` 6, 9, 12 and 13) and described where the event is understood:
+`scripts/data/arroyo_content.py` reads what a `conversation_message` row *is* from two places:
 
-| Event field | Meaning |
-|---|---|
-| `4.4.8.7` | media saved in the chat — `1.1` is the user who saved it, `2` the `server_message_id` whose media it was |
-| `4.4.8.2`, `.5`, `.6`, `.8`, `.22` | also occur, not yet identified; those rows are labelled but not described |
+* **`content_type`.** The same value is stored inside `message_content` at `4.2` (the field is left
+  out when it is 0), and the column and the field agree on every row of every test extraction.
+  `arroyo_content.CONTENT_TYPES` names every value — 0 Snap, 1 Text, 2 Media, 3 Shared content,
+  4 Voice note, 5 Sticker, 6 App event, 8 Location, 9 Saved to camera roll, 10 Screenshot, 11 Screen
+  recording, 12 / 13 Missed video / audio call, 14 Group invite link changed, … 37 Poll — and says
+  which are media and which are app events. The row detail shows the raw value with its name.
+* **The body, `4.4`.** It holds exactly one field, and *which* one is the kind of message: `2` text,
+  `3` media sent in the chat, `5` something shared, `6` voice note, `7` reply to a Snap or Story,
+  `8` app event, `11` Snap, `19` Tiny Snap, `24` bot response, `25` notification item, `26` poll.
 
-`savedMediaEventText` only calls a `4.4.8.7` event a *save* when the message it points at
-independently agrees — `conversation_message.is_saved = 1` on that row. Without that, it reports the
-event as a reference to that message and nothing more: one decoded protobuf field is a lead, not a
-finding. Another tool renders the same row as "You saved a photo from …".
+`getChats` writes `arroyo_content.describe` into **`Message Body`**: nothing for plain text, media
+and Snaps, and otherwise one line saying what the row carries — the app event, "Shared a Story",
+"Shared a map pin at <latitude>, <longitude> “<title>”", "Reply to a Snap or Story — the media is the
+Snap replied to, not something the replier sent", "Voice note", "Poll: …". A body or an event it does
+not know is named by its field number ("App event 4.4.8.<n> (not described)"), never guessed at.
+The people a description names are **user ids**, and `Message Body` keeps them so: a display name is
+whatever this device's user typed and a username can change, while the id never does. The
+Conversations report shows each id by name (from the Contacts data) and lists every person with
+their full id; the legacy report, whose content for an app event is this description, gets
+"name (id)" from `fixSenders`.
+
+Shares (`4.4.5.<n>`): `5` a Story (`.1` its id — the one the cache join above matches), `14` a public
+profile Snap, `16` a Spotlight Snap, `18` a map pin (`.1` / `.2` latitude / longitude as doubles,
+`.6` its title), `24` a saved Story (`.1` who posted it; `.2` its Snap, with the media keys, whose
+own `.2.18.1` names the poster as well), `35` a sports game, `37` an event.
+
+A saved Story is described as "Shared a saved Story posted by <name>". The two poster ids are written
+independently — one by the share, one inside the Snap — and agree on the test extractions; if they
+ever disagree, the description gives both rather than picking one. The share's media joins through
+the ordinary `<conversation>:<message>` claims, so the story-id route above is not needed for it.
+
+## App events
+
+Some rows are events the app recorded in the conversation rather than anything a user sent: their
+body is **`4.4.8`**, and the field under it names the event. `getChats` used to report the ones that
+hold no string as `ERROR - Something went wrong when parsing this message`, which states something
+untrue — the protobuf decodes cleanly — and the ones that do (a group's old and new name) as those
+strings glued together. Every one is now described from its own fields; the description is the
+row's content (and the legacy report's *Message Content*), and a row with no cached file is labelled
+**System message**. User ids are the `{1: <16 bytes>}` messages below.
+
+| `4.4.8.<n>` | Event | Fields |
+|---|---|---|
+| `1` | screenshot / screen recording | `1` who, `2` 0 screenshot · 1 recording, `3` of 0 the chat · 1 the friendship profile · 2 the group profile · 3 the call, `4` = 2: by someone no longer in the group |
+| `2` | call | `1` 0 started · 1 ended · 2 left · 3 joined · 4 missed, `2` 0 audio · 1 video, `3` user, `4` duration in **milliseconds**, `5` participants, `6` call id |
+| `3` | group membership | `1` each change: {`1` who, `2` 0 added · 1 created the group · 2 left, `3` how they joined (1 invite sticker, 2 invite link, 3 community, 4 public group), `4` 1 left · 2 removed}; `3` by whom |
+| `4` | group renamed | `1` by whom, `2` old name, `3` new name |
+| `5` | message deleted | `1` by whom, `2` 1 a chat message · 2 a Snap |
+| `6` | group created | `1` by whom, `2` participants, `3` group name |
+| `7` | media saved to the **camera roll** | `1` by whom, `2` the `server_message_id` whose media was saved, `3` each {`1` 1 photo · 2 video, `2` count} |
+| `8` | when this chat's messages delete | `1` by whom, `2.1` {`3` unviewed / `4` viewed retention in seconds, `5` messages are kept} |
+| `10` | group invite link | `1` by whom, `2` 1 created · 2 deleted |
+| `13` | live location sharing ended | `1` by whom, `2` 1 session expired · 2 stopped |
+| `21` | streak | `1` 1 started · 2 ended · 3 restored, `2` days |
+| `22` | My AI's welcome message | — |
+| `25` | countdown | `2` 1 created · 2 deleted · 3 updated · 4 started, `3` name |
+| `28` | friend place alert | `1` 1 home safe · 2 custom place, `2` state, `3` name |
+
+and, described by name only: `9` a game closed, `11` a group invite prompt, `12` an app update,
+`14` a contact joined, `15` / `16` Family Center invite accepted / left, `17` a Snapchat-for-web
+notice, `18` a reply added to a Story, `19` chat wallpaper changed or remixed, `20` a Snapchat+ gift,
+`23` group live location, `24` how Snaps can be viewed after opening, `26` a Snap remixed, `27` a
+sticker made from a photo, `29` a brand collaboration intro, `30` / `31` welcome messages, `32` a
+location request accepted, `33` an event update.
+
+The content types an event arrives with: a missed call is 12 (video) or 13 (audio) and every other
+call event 6; a save to the camera roll is 9, a screenshot 10, a screen recording 11, an invite link
+14; events with no type of their own — deleted messages, group changes, retention changes, streaks,
+the My AI welcome — are 6.
+
+A save to the camera roll (`4.4.8.7`) used to be reported as "Saved the media of message N **in this
+chat**", and only when the target row's `is_saved` agreed; the event is a save to the device's
+camera roll, which `is_saved` does not record.
 
 ## Messages whose media is no longer cached
 
@@ -137,9 +206,14 @@ They are now kept and labelled by `uncachedLabel`:
 
 | Content Type | Meaning |
 |---|---|
-| `Media (no cached file)` | `content_type` is one of `MEDIA_CONTENT_TYPES` (0, 2) — the message's `message_content` protobuf carries the 32-byte key / 16-byte IV pair a media message needs, so it *is* media, and no surviving cache file backs it |
-| `System message` | `content_type` in `CONTENT_TYPE_NAMES` (6, 9, 12, 13) — not media at all, so "no cached file" would be the wrong thing to say about it (see above) |
-| `Unrecognised (content_type <n>)` | any other `content_type` — the number is reported rather than guessed at |
+| `Media (no cached file)` | a media `content_type` (0 Snap, 2 media, 4 voice note, 26 Tiny Snap) — the message carries media, and no surviving cache file backs it |
+| `System message` | an app event (6, 9–14, 19, 20, 22, 27, 30–32, 36) — not media at all, so "no cached file" would be the wrong thing to say about it (see [App events](#app-events)) |
+| its name | any other `content_type` in `arroyo_content.CONTENT_TYPES` — e.g. `Poll`, `Location`, `Bot response` |
+| `Unrecognised (content_type <n>)` | a value not in the table — the number is reported rather than guessed at |
+
+`content_type` 3 and 5 never reach this: `mergeCacheChats` labels them **Shared content** and
+**Sticker** whether or not a claim joined (`Shared content` was `Video (Unknown Source)`; a share can
+be a photo, or a map pin with no media at all).
 
 The label deliberately does **not** say the media "expired". A missing file may equally have been
 evicted from the cache, never cached on this device, or not carried by the extraction, and those

@@ -30,8 +30,8 @@ def test_real_text_is_shown_whatever_it_looks_like():
         "https://link.snapchat.com/add-friends"
 
 
-def test_a_caption_on_a_media_message_is_still_shown():
-    """Gating on "is this a text message" would drop a caption the sender actually typed."""
+def test_text_on_a_row_that_carries_media_is_still_shown():
+    """Gating on "is this a text message" would drop text the sender typed (a reply to a Snap)."""
     for raw_type in ("0", "2", "3", "5"):
         assert _own_text("nice one", [], CONV, raw_type) == "nice one"
 
@@ -113,9 +113,9 @@ def _text_message(text):
     return _sub(4, _sub(4, _sub(2, _sub(1, text.encode("utf-8")))))
 
 
-def _media_with_caption(caption):
-    """A content_type 2 body: the caption sits at 4.4.7.11.1, beside the media plumbing."""
-    seven = _sub(11, _sub(1, caption.encode("utf-8")))
+def _reply_with_text(text):
+    """A reply to a Snap or Story: the reply's text sits at 4.4.7.11.1, beside the Snap replied to."""
+    seven = _sub(11, _sub(1, text.encode("utf-8")))
     return _sub(4, _sub(4, _sub(7, seven)))
 
 
@@ -125,12 +125,12 @@ def test_a_text_message_body_is_read_from_its_field():
     assert parse_snapchat_ios.messageText(_text_message("on my way")) == "on my way"
 
 
-def test_a_media_caption_is_recovered():
-    """A caption typed on a photo is the message; it must not be lost with the media plumbing."""
-    assert parse_snapchat_ios.messageText(_media_with_caption("look at this")) == "look at this"
+def test_the_text_of_a_reply_to_a_snap_is_recovered():
+    """The reply is the message; it must not be lost with the media plumbing of the Snap replied to."""
+    assert parse_snapchat_ios.messageText(_reply_with_text("look at this")) == "look at this"
 
 
-def test_a_media_message_with_no_caption_yields_no_text():
+def test_a_message_with_no_text_field_yields_no_text():
     assert parse_snapchat_ios.messageText(_saved_event()) == ""
     assert parse_snapchat_ios.messageText(b"") == ""
     assert parse_snapchat_ios.messageText(None) == ""
@@ -169,29 +169,12 @@ def test_proto_field_returns_none_for_a_path_that_is_not_there():
     assert parse_snapchat_ios.protoField(b"\xff\xff", (4,)) is None
 
 
-# ------------------------------------------------- content_type 9 event messages
+# ------------------------------------------------- app-event messages (the 4.4.8 body)
 
-def test_a_saved_media_event_is_described_when_the_target_says_it_was_saved():
-    blob = _saved_event(target=66)
-    saved = {(CONV, 66): 1}                                    # conversation_message.is_saved
-    assert parse_snapchat_ios.savedMediaEventText(blob, CONV, saved) == \
-        "Saved the media of message 66 in this chat"
+_SAVER = "fffefdfc-fffe-fdfc-fffe-fdfcfffefdfc"                # _FAKE_USER_ID as a UUID
 
 
-def test_a_saved_media_event_is_not_called_a_save_without_corroboration():
-    """One decoded protobuf field is a lead; the database has to agree before it is a finding."""
-    blob = _saved_event(target=66)
-    for saved in ({}, {(CONV, 66): 0}):
-        assert parse_snapchat_ios.savedMediaEventText(blob, CONV, saved) == \
-            "Event message referring to message 66"
-
-
-def test_an_unreadable_event_body_yields_no_description():
-    assert parse_snapchat_ios.savedMediaEventText(b"\xff\xff\xff", CONV, {}) == ""
-    assert parse_snapchat_ios.savedMediaEventText(None, CONV, {}) == ""
-
-
-def test_a_text_less_message_is_not_reported_as_a_parse_failure(tmp_path):
+def test_an_app_event_is_not_reported_as_a_parse_failure(tmp_path):
     """The protobuf decodes; it simply holds no string. Calling that a parse error is untrue."""
     db = _arroyo(tmp_path, [(CONV, 73, _saved_event(target=66), 1784044448932, 0, 9, "sender")])
 
@@ -199,12 +182,29 @@ def test_a_text_less_message_is_not_reported_as_a_parse_failure(tmp_path):
 
     assert len(df) == 1
     assert not str(df.iloc[0]["message_content"]).startswith("ERROR")
-    assert df.iloc[0]["message_content"] == "Event message referring to message 66"
+    described = f"{_SAVER} saved media from message 66 to the camera roll"
+    assert df.iloc[0]["message_content"] == described          # what the legacy report shows
+    assert df.iloc[0]["message_body"] == described
+    assert df.iloc[0]["message_text"] == "", "an app event has no typed text"
 
 
-def test_content_type_9_is_labelled_a_system_message_not_missing_media():
-    assert parse_snapchat_ios.uncachedLabel(9) == "System message"
-    assert parse_snapchat_ios.uncachedLabel(0) == "Media (no cached file)"
+def test_an_event_that_carries_strings_is_described_not_concatenated(tmp_path):
+    """A group rename holds the two names as strings; they used to be shown glued together."""
+    four = _sub(1, _sub(1, _FAKE_USER_ID)) + _sub(2, b"old") + _sub(3, b"new")
+    blob = _sub(4, _sub(4, _sub(8, _sub(4, four))))
+    db = _arroyo(tmp_path, [(CONV, 74, blob, 1784044448932, 0, 6, "sender")])
+
+    df = parse_snapchat_ios.getChats(db)
+
+    assert df.iloc[0]["message_content"] == f"{_SAVER} renamed the group from “old” to “new”"
+
+
+def test_app_events_are_labelled_system_messages_not_missing_media():
+    for value in (6, 9, 10, 12, 13):
+        assert parse_snapchat_ios.uncachedLabel(value) == "System message"
+    for value in (0, 2, 4):                                    # Snap, media, voice note
+        assert parse_snapchat_ios.uncachedLabel(value) == "Media (no cached file)"
+    assert parse_snapchat_ios.uncachedLabel(37) == "Poll"
     assert parse_snapchat_ios.uncachedLabel(77) == "Unrecognised (content_type 77)"
 
 

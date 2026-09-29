@@ -79,7 +79,10 @@ Memories / My Eyes Only.
   Snap's TSAF containers — `user.plist` and `ClientEncryptionService.plist` are not plists — whose
   one rule is that a value must *immediately* follow its key; and `flatbuffers_doc.py`, a root-table
   reader for the `*.docobjects` FlatBuffers documents that hands back a name only when the document's
-  slot 0 is the user id the caller already knows).
+  slot 0 is the user id the caller already knows; and `arroyo_content.py`, what an arroyo.db
+  `conversation_message` row *is* — every `content_type` named, and its `message_content` body (4.4)
+  described: app events from their own fields, shares, replies — read straight off the wire, and a
+  kind it does not know named by its field number, never guessed).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app

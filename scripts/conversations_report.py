@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
-from scripts.data import sqlite_open, media_meta
+from scripts.data import sqlite_open, media_meta, arroyo_content
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, contact_anchor,
                                      text_html, cell)
@@ -72,11 +72,11 @@ _UUID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 _VIDEO_EXT = {"mp4", "mov", "m4v", "webm"}
 _IMAGE_EXT = {"jpg", "jpeg", "png", "webp", "gif"}
 
-# Content Type values that mergeCacheChats assigns to a row *because of the cache claim it merged
-# in*. A message with several claims produces one row per claim, and the rows whose claim has no
-# renderable file are the duplicates — the legacy report drops exactly these two (see
-# `_drop_unrenderable`).
-_MEDIA_ONLY_TYPES = {"Video (Unknown Source)": "video", "Sticker": "image"}
+# Content Type values whose message only ever *is* its attachment, with the kinds of file that can be
+# it. A message with several cache claims produces one row per claim, and for these types a row whose
+# claim has no such file is a duplicate of the row that has it (see `_drop_unrenderable`). Shared
+# content can be a photo as well as a video.
+_MEDIA_ONLY_TYPES = {"Shared content": ("image", "video"), "Sticker": ("image",)}
 
 # Columns of the message frame ParseSnapchat_iOS hands over (after its final rename). The two id
 # columns marked optional only exist when this app version's conversation_message has them.
@@ -98,6 +98,10 @@ COL_READ = "Read Timestamp UTC+0"
 COL_SMID = "Server Message ID"
 COL_CMID = "Client Message ID"                                 # optional
 COL_TEXT = "Message Text"                                      # the parsed text, kept by the parser
+COL_BODY = "Message Body"                                      # optional: what the row carries
+                                                               # (arroyo_content.describe)
+COL_REF = "Message Ref"                                        # optional: the server_message_id an
+                                                               # app event is about
 COL_WAL = "WAL View"                                           # which reading of arroyo.db (optional)
                                                                # before the attachment replaced it
 
@@ -124,8 +128,8 @@ def _own_text(raw, atts, conv_id, raw_type=""):
     nothing is hidden either way.
 
     ``raw_type`` — arroyo's own ``content_type`` — is deliberately **not** used to decide this. A
-    media message can carry a caption the sender typed, so gating on "is this a text message" would
-    drop real evidence.
+    row that carries media can carry typed text too (a reply to a Snap or Story), so gating on "is
+    this a text message" would drop real evidence.
     """
     text = _CONTROL_RE.sub("", cell(raw))
     if not text or text.startswith(_PARSE_ERROR):
@@ -330,17 +334,18 @@ def _attachment_cell(att, prefix="../"):
 # --------------------------------------------------------------------------- message model
 
 def _drop_unrenderable(ctype, att):
-    """Whether this row is one of the merge's duplicate rows and should not be listed.
+    """Whether this row may be one of the merge's duplicate rows.
 
     ``mergeCacheChats`` left-joins every ``CACHE_FILE_CLAIM`` of a message onto that message, so a
     message with three claims becomes three rows. For the two content types that only ever *are*
-    their attachment ("Video (Unknown Source)" from ``content_type`` 3 and "Sticker" from
-    ``content_type`` 5) a row whose claim has no renderable file on disk is such a duplicate, and the
-    legacy report drops it too. Everything else is kept, even when its file is missing — a message
-    whose media was not recovered is a finding, not noise.
+    their attachment ("Shared content" from ``content_type`` 3 and "Sticker" from ``content_type``
+    5) a row whose claim has no renderable file on disk is such a duplicate — **when another row of
+    the same message remains**, which ``build_messages`` checks before dropping it. A message whose
+    only row this is is kept, file or no file: a message whose media was not recovered is a finding,
+    not noise, and a share need not carry media at all (a map pin).
     """
     want = _MEDIA_ONLY_TYPES.get(ctype)
-    return bool(want) and (att is None or att["kind"] != want)
+    return bool(want) and (att is None or att["kind"] not in want)
 
 
 def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=None,
@@ -360,6 +365,7 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
     owner_lc = {n.lower() for n in owner_names if n}
     owner_id_lc = cell(owner_user_id).lower()
     dropped = skipped_conv = 0
+    held = []                                  # (conversation, message) — see _drop_unrenderable
     if msg_df is None or len(msg_df) == 0:
         return by_conv, {"dropped": 0, "skipped_conv": 0}
     columns = list(getattr(msg_df, "columns", []))
@@ -381,9 +387,7 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             att["file_times"] = report_ui.file_time_rows(
                 att.get("meta"), lambda unix_s: timefmt(unix_s - _COCOA_EPOCH))
         ctype = cell(row.get(COL_TYPE))
-        if _drop_unrenderable(ctype, att):
-            dropped += 1
-            continue
+        maybe_duplicate = _drop_unrenderable(ctype, att)
         sender = cell(row.get(COL_SENDER))
         sender_plain = re.sub(r"</?b>", "", sender).strip()
         created_utc = cell(row.get(COL_CREATED))
@@ -400,12 +404,12 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         # equal to the content itself for a row that has no attachment
         raw_text = cell(row.get(COL_TEXT)) if COL_TEXT in columns else ("" if att else content)
         raw_type = _id_str(row.get(COL_RAWTYPE)) if cell(row.get(COL_RAWTYPE)) else ""
-        by_conv.setdefault(conv_id, []).append({
+        message = {
             "smid": cell(row.get(COL_SMID)),
             "cmid": _id_str(row.get(COL_CMID)),
             "sender": sender_plain,
-            # The sender's permanent id when the frame carries it, for matching this message again;
-            # never shown, since the name above is what a reader needs. See COL_SENDER_UID.
+            # The sender's permanent id when the frame carries it, for matching this message again
+            # and shown in the expanded message beside the name. See COL_SENDER_UID.
             "sender_uid": cell(row.get(COL_SENDER_UID)) if COL_SENDER_UID in columns else "",
             "sender_bold": sender != sender_plain,
             "direction": "Sent" if outgoing else ("Received" if sender_plain else ""),
@@ -413,6 +417,10 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "raw_types": [raw_type] if raw_type else [],
             "text": _own_text(raw_text, [att] if att else [], conv_id, raw_type),
             "raw_text": raw_text,
+            # what the row carries, written by the parser from the message body: an app event's
+            # description, or what a reply / share / voice note is. Never the typed text.
+            "body": cell(row.get(COL_BODY)) if COL_BODY in columns else "",
+            "ref": _id_str(row.get(COL_REF)) if COL_REF in columns and cell(row.get(COL_REF)) else "",
             "parse_error": bool(raw_text.startswith(_PARSE_ERROR)),
             "atts": [att] if att else [],
             # which reading of arroyo.db this row came from: MAIN_ONLY means the write-ahead log
@@ -423,7 +431,18 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
             "created_unix": created_unix,
             "read_utc": read_utc,
             "read": timefmt(read_unix - _COCOA_EPOCH) if read_unix else "",
-        })
+        }
+        if maybe_duplicate:
+            held.append((conv_id, message))
+        else:
+            by_conv.setdefault(conv_id, []).append(message)
+    # A held row is dropped only when another row of the same message is listed; otherwise it is the
+    # message, and a message whose file is gone is still reported (see _drop_unrenderable).
+    for conv_id, message in held:
+        if message["smid"] and any(m["smid"] == message["smid"] for m in by_conv.get(conv_id, [])):
+            dropped += 1
+        else:
+            by_conv.setdefault(conv_id, []).append(message)
     merged = 0
     for conv_id, rows in list(by_conv.items()):
         msgs, n = _merge_rows(rows)
@@ -494,6 +513,10 @@ def _merge_rows(rows):
             first["text"] = row["text"]
         if not first["raw_text"] and row["raw_text"]:
             first["raw_text"] = row["raw_text"]
+        if not first.get("body") and row.get("body"):
+            first["body"] = row["body"]
+        if not first.get("ref") and row.get("ref"):
+            first["ref"] = row["ref"]
         first["parse_error"] = first["parse_error"] and row["parse_error"]
         if not first["created_unix"] and row["created_unix"]:
             for key in ("created_utc", "created", "created_unix", "read_utc", "read"):
@@ -919,6 +942,13 @@ _REPORT_CSS = """
    display:flex;flex-direction:column;align-items:flex-start;gap:3px}
  .msgs .vcells>.vc.c5 .msgtext{flex:0 1 auto;min-height:0;overflow:hidden;display:-webkit-box;
    -webkit-box-orient:vertical;-webkit-line-clamp:2}
+ /* what the row carries (an app event, a reply, a share), set apart from anything a person typed */
+ .msgs .vcells>.vc.c5 .msgbody{flex:0 1 auto;min-height:0;overflow:hidden;display:-webkit-box;
+   -webkit-box-orient:vertical;-webkit-line-clamp:2}
+ .msgs .vcells>.vc.c5 .msgbody.one{flex:0 0 auto;-webkit-line-clamp:1}
+ .msgbody,.msgbodyd{font-style:italic;color:#4a4a66} .msgbody{display:block}
+ .bodypeople{font-size:12px;margin-top:4px;line-height:1.6}
+ .bodypeople .mono{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#33367a}
  .msgs .vcells>.vc.c5 .atts{flex:0 0 auto;display:flex;flex-wrap:nowrap;gap:4px;max-width:100%;
    overflow:hidden}
  /* a preview in the row is a marker, not the picture: the expanded row shows it properly */
@@ -1036,16 +1066,18 @@ _TYPE_HINT = ("\"Text\" is arroyo.db conversation_message.content_type = 1. The 
               "derived from the CACHE_FILE_CLAIM.EXTERNAL_KEY prefix of the cache claim joined to "
               "the message (\"1:\" = temporarily stored media, \"thumbnail~1:\" = thumbnail, "
               "\"cm-chat-media-video-1\" = media the user saved in the chat), or from content_type "
-              "3 (video of unknown source) / 5 (sticker). \"local_message_reference\" means the "
-              "attachment was resolved through the row's local_message_references plist. "
-              "\"Media (no cached file)\" is a message arroyo.db records as carrying media for "
-              "which no cache file survives on this device — the message itself (sender, times, "
-              "both ids) is unaffected; only its content was not recovered. It does NOT mean the "
-              "media expired: it may equally have been evicted from the cache or never carried by "
-              "the extraction. The raw arroyo content_type is in the row detail below. \"System message\" is "
-    "content_type 9: an event the app recorded in the conversation rather than anything a user "
-    "typed or sent — its protobuf carries no text at all, and the description shown as its content "
-    "is written by the parser from the decoded structure.")
+              "3 (shared content: a Story, a Spotlight Snap, a map pin…) / 5 (sticker). "
+              "\"local_message_reference\" means the attachment was resolved through the row's "
+              "local_message_references plist. \"Media (no cached file)\" is a message arroyo.db "
+              "records as carrying media for which no cache file survives on this device — the "
+              "message itself (sender, times, both ids) is unaffected; only its content was not "
+              "recovered. It does NOT mean the media expired: it may equally have been evicted from "
+              "the cache or never carried by the extraction. \"System message\" is an event the app "
+              "recorded in the conversation rather than anything a user typed or sent — a call, a "
+              "deleted message, a save to the camera roll, a group created or renamed… (content_type "
+              "6 and 9 to 14 among others). It carries no text; the description shown in italics as "
+              "its content is written by the parser from the event's own fields. The raw arroyo "
+              "content_type, with its name, is in the row detail below.")
 
 _PARSE_FAIL_HINT = (
     "getChats could not read this message's conversation_message.message_content protobuf, so the "
@@ -1055,12 +1087,17 @@ _PARSE_FAIL_HINT = (
 
 _TEXT_HINT = (
     "What the sender typed, read out of the field of conversation_message.message_content that "
-    "holds it — the message body for a text message, and the caption for a media message that "
-    "carries one. It is read from that field rather than from the whole protobuf on purpose: a "
-    "message's protobuf also contains its encryption key, its media id and any lens or sticker "
-    "name, and those are not the message. A media message with no caption therefore shows no text "
-    "at all. Nothing is hidden: the full parsed value is always in the expanded row under "
-    "\"message_content (parsed)\", with the content_type it came from beside it.")
+    "holds it — the message body for a text message, and the text of a reply to a Snap or Story. "
+    "It is read from that field rather than from the whole protobuf on purpose: a message's "
+    "protobuf also contains its encryption key, its media id and any lens or sticker name, and "
+    "those are not the message. A media message therefore shows no text at all unless it has some. "
+    "Text in italics is not typed: it is the parser's description of what the row carries — an app "
+    "event (a call, a deleted message, a save to the camera roll…), a shared Story or map pin, a "
+    "voice note. A REPLY to a Snap or Story is marked so: the media such a row carries is the Snap "
+    "being replied to — typically the other person's Story — not something the replier sent, and "
+    "its text is the reply, not a caption. Nothing is hidden: the full parsed value is always in "
+    "the expanded row under \"message_content (parsed)\", with the content_type it came from "
+    "beside it.")
 
 _CONTENT_HINT = "The message text and every cached file the message carries. " + _TEXT_HINT
 
@@ -1147,9 +1184,65 @@ def _attachment_detail(att, prefix, index=None, total=1, closure=None):
     return "".join(parts)
 
 
+_ANY_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                          r"[0-9a-fA-F]{12}")
+
+
+def _body_people(body, contact_links):
+    """``(body with each user id shown by name, [the people it names])``.
+
+    The parser's Message Body names users by their permanent id. A reader wants the name, but a
+    display name is whatever this device's user typed and a username can change, so the id has to stay
+    in view: the row shows the name, and the expanded message lists every person with their full id
+    and a link to their contact record (`_participant`, as for the conversation's participants).
+    """
+    people, seen = [], set()
+
+    def named(match):
+        uid = match.group(0)
+        part = _participant(uid, contact_links)
+        if uid.lower() not in seen:
+            seen.add(uid.lower())
+            people.append(part)
+        return part["label"] or uid
+
+    return _ANY_UUID_RE.sub(named, body or ""), people
+
+
+def _raw_type_named(raw):
+    """arroyo's content_type as stored, with its name: "6 (App event)"."""
+    label = arroyo_content.content_type_label(raw)
+    return f"{raw} ({label})" if label else raw
+
+
 def _message_detail(msg, conv, prefix="../", contact_links=None, closure=None):
     """The expandable per-message block: full text / media, hashes, provenance."""
     parts = []
+    if msg.get("body"):
+        parts.append('<div class="sect">Message body</div>'
+                     f'<div class="body msgbodyd">{text_html(msg.get("body_named") or msg["body"])}'
+                     '</div>')
+        people = msg.get("body_people") or []
+        if people:
+            # every person the body names, with the permanent id the name stands for
+            parts.append('<div class="bodypeople">' + "".join(
+                f'<div>{_participant_html(p, "../../", chip=False, closure=closure)}'
+                + (f' &mdash; <span class="mono">{_esc(p["user_id"] or p["raw"])}</span>'
+                   if p["label"] != (p["user_id"] or p["raw"]) else "")
+                + '</div>' for p in people) + '</div>')
+    if msg.get("ref"):
+        # the message this event is about (a save to the camera roll names the one whose media was
+        # saved): linked when it is listed on this page, named when it is not
+        ref = msg["ref"]
+        target = next((m for m in conv.get("messages") or ()
+                       if m.get("smid") == ref or str(m.get("smid") or "").startswith(ref + ".")),
+                      None)
+        if target is not None and target.get("anchor"):
+            where = (f'<a class="detail" href="#{_esc(target["anchor"])}">message {_esc(ref)} '
+                     f'&#9656;</a>')
+        else:
+            where = f'message {_esc(ref)} <span class="muted">(not listed in this report)</span>'
+        parts.append(f'<div class="bodypeople">About: {where}</div>')
     if msg["text"]:
         parts.append('<div class="sect">Message text</div>'
                      f'<div class="body">{text_html(msg["text"])}</div>')
@@ -1168,7 +1261,7 @@ def _message_detail(msg, conv, prefix="../", contact_links=None, closure=None):
                      + '</div>')
     for n, att in enumerate(atts, 1):
         parts.append(_attachment_detail(att, prefix, n, len(atts), closure))
-    if not atts and not msg["text"] and not msg["parse_error"]:
+    if not atts and not msg["text"] and not msg["parse_error"] and not msg.get("body"):
         parts.append('<div class="muted">This row carries neither text nor a recovered '
                      'attachment.</div>')
 
@@ -1190,8 +1283,11 @@ def _message_detail(msg, conv, prefix="../", contact_links=None, closure=None):
         ("server_message_id", _esc(msg["smid"]), "mono"),
         ("client_message_id", _esc(msg["cmid"]), "mono"),
         ("sender_id", sender, ""),
+        # the permanent user id the name above stands for (names change; this does not)
+        ("sender_id (user id, as stored)", _esc(msg.get("sender_uid")), "mono"),
         ("content_type", _esc(" + ".join(msg["types"])), ""),
-        ("content_type (arroyo, raw)", _esc(" + ".join(msg.get("raw_types") or [])), "mono"),
+        ("content_type (arroyo, raw)", _esc(" + ".join(_raw_type_named(t)
+                                                       for t in msg.get("raw_types") or [])), "mono"),
         ("message_content (parsed)", text_html(msg["raw_text"]) if msg["raw_text"]
          else '<span class="muted">empty</span>', ""),
         ("creation_timestamp (UTC, as stored)", _esc(msg["created_utc"]), "mono"),
@@ -1217,12 +1313,19 @@ def _message_rows(conv, chunk_of):
         files = "".join(_attachment_cell(a) for a in atts)
         content = f'<span class="atts">{files}</span>' if files else ""
         text = msg["text"]
+        body = msg.get("body_named") or msg.get("body") or ""
         if text:
             # the row is one fixed height, so only about this much of a message is ever visible:
             # keep the cell small and leave the full text to the expanded detail (every byte here
             # is multiplied by the message count)
             clipped = text[:200] + " …" if len(text) > 200 else text
             content = f'<span class="msgtext">{text_html(clipped)}</span>' + content
+        if body:
+            # what the row carries, set apart from anything typed (italic, muted): an app event's
+            # description is the whole content; a reply's or a share's goes above its text
+            clipped = body[:200] + " …" if len(body) > 200 else body
+            content = (f'<span class="msgbody{" one" if text else ""}">{text_html(clipped)}'
+                       f'</span>' + content)
         if msg["parse_error"]:
             content += ('<span class="parsefail" title="the message body could not be parsed — '
                         'open the row">&#9888; not parsed</span>')
@@ -1257,7 +1360,8 @@ def _message_rows(conv, chunk_of):
             _esc(msg["read"]),
         ]
         searchable = [msg["sender"], types, msg["smid"], msg["cmid"], msg["created_utc"],
-                      msg["read_utc"], msg["created"], text, msg["raw_text"]]
+                      msg["read_utc"], msg["created"], text, msg["raw_text"], body,
+                      msg.get("body") or "", msg.get("sender_uid") or ""]   # names AND ids
         for att in atts:
             searchable += [att["name"], att["ext"], att["md5"], att["sha256"],
                            att["cache_key"] or ""]
@@ -1336,6 +1440,9 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
     data_dir = os.path.join(pages_dir, "data", key)
     os.makedirs(pages_dir, exist_ok=True)
 
+    for m in conv["messages"]:
+        if m.get("body"):
+            m["body_named"], m["body_people"] = _body_people(m["body"], contact_links)
     details = [(m["anchor"], _message_detail(m, conv, contact_links=contact_links, closure=closure))
                for m in conv["messages"]]
     chunk_of = report_ui.write_details(data_dir, details)
@@ -1662,9 +1769,10 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
     skipped_note = (f' &middot; {skipped} parsed row(s) not listed'
                     + report_ui.info_icon(
                         f"{stats.get('dropped', 0)} row(s) were the duplicates the message/cache "
-                        f"join produces — a media-only content type (\"Video (Unknown Source)\", "
-                        f"\"Sticker\") whose cache claim has no displayable file on disk; the "
-                        f"legacy Communications report drops exactly these. "
+                        f"join produces — a media-only content type (\"Shared content\", "
+                        f"\"Sticker\") whose cache claim has no displayable file on disk, while "
+                        f"another row of the same message is listed. A message with no such other "
+                        f"row is listed, file or no file. "
                         f"{stats.get('skipped_conv', 0)} row(s) had no conversation id of the "
                         f"expected 36-character form and could not be attributed to a "
                         f"conversation.")) if skipped else ""

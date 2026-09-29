@@ -6,6 +6,43 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.8.0-beta.3] — 2026-09-29
+
+### Added
+- **What each chat message is** — `scripts/data/arroyo_content.py`. Every `conversation_message`
+  row gets a *Message Body* read from `message_content`: app events are described from their own
+  fields (calls with their duration, deleted messages and Snaps, saves to the camera roll,
+  screenshots, members added, removed or leaving, groups created or renamed, changes to when
+  messages delete, streaks, the My AI welcome…), a share says what was shared (a Story, a Spotlight
+  Snap, a map pin with its coordinates, a saved Story with who posted it…), and a reply to a Snap or
+  Story says so. The Conversations report shows it in italics, apart from anything typed, and
+  searches it; each user id in it is shown by name, and the expanded message lists every person
+  with their full, permanent user id. The raw `content_type` is shown with its name, and a bot's
+  response and a Tiny Snap's text are read as the message's text.
+- The expanded message shows the **sender's permanent user id** beside the name
+  (`sender_id (user id, as stored)`), and a conversation's messages can be searched by it.
+- A save to the camera roll links to the message whose media was saved ("About: message N ▸").
+
+### Changed
+- `content_type` 3 is labelled **Shared content** (was *Video (Unknown Source)*): it is anything
+  shared into the chat, and its media may be a photo. Every `content_type` is named; an app event
+  with no cached file is a *System message* whatever its type (was 6, 9, 12 and 13 only).
+
+### Fixed
+- **A save to the camera roll was reported as a save in the chat.** `4.4.8.7` (`content_type` 9)
+  records that someone saved a message's media to the device's camera roll; it read "Saved the media
+  of message N in this chat", and only when the target's `is_saved` flag agreed.
+- **A reply to a Snap or Story was presented as a caption.** `4.4.7.11.1` is the reply's text, and
+  the media on that row is the Snap replied to — typically the other person's Story — not something
+  the replier sent.
+- **Shared content and stickers disappeared from the Conversations report** when a message's only
+  row had no *video* file — a shared photo, a map pin (which has no media), a sticker whose file was
+  gone. Such a row is now dropped only beside another row of the same message. The legacy report
+  dropped **every** such row: its test looked for media at the start of a cell that starts with the
+  attachment's anchor.
+- An app event that carries text (a group's old and new name) was shown as the strings glued
+  together.
+
 ## [1.8.0-beta.2] — 2026-09-24
 
 ### Added
