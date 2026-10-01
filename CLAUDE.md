@@ -45,7 +45,10 @@ Memories / My Eyes Only.
   Memories and cache_controller reports, with its `NAV_JS`/`NAV_CSS` also injected into the legacy
   Communications report. **Every cross-report link is emitted through `report_ui.xref`** — the one place
   that can mark a link whose target a partial report does not contain; with no closure it returns the
-  caller's markup untouched, so full reports are unaffected.
+  caller's markup untouched, so full reports are unaffected. It also owns the emoji font
+  (`emoji_font.css`, Noto Color Emoji, linked by every page) that makes an emoji look the same on every
+  workstation: every report font stack **ends** with `EMOJI_FONT_STACK`, and a symbol the reports draw
+  as text belongs in `UI_SYMBOLS` — see [report_ui.md](docs/report_ui.md).
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,

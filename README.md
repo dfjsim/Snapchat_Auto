@@ -198,6 +198,10 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   implemented and in the report popover that explains it; the comparison and the design differences
   are in [docs/related_ileapp.md](docs/related_ileapp.md). That module in turn cites this fork's
   Memories decryption notes.
+- **Noto Color Emoji** — the emoji font the reports embed, so an emoji is drawn the same on every
+  workstation: © 2022 Google Inc., [SIL Open Font License 1.1](scripts/data/fonts/OFL.txt),
+  <https://github.com/googlefonts/noto-emoji>, bundled unmodified; see
+  [scripts/data/fonts/README.md](scripts/data/fonts/README.md). Noto is a trademark of Google Inc.
 - **Licence:** MIT, © 2022 DFIR-HBG. The original [LICENSE](LICENSE) is retained unmodified and
   covers this fork, including all modifications made here.
 - **Bundled dependencies keep their own licences.** The packaged EXE and MSI carry third-party

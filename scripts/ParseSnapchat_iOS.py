@@ -97,13 +97,14 @@ def getHtml(final_df, friends_df, group_df):
     html = """
 <meta charset="utf-8">
 <link href="./css/bootstrap.min.css" rel="stylesheet">
+<link href="./css/emoji_font.css" rel="stylesheet">
 <style>
 th {
     background: #2d2d71;
     color: white;
     text-align: left;
 }
-""" + report_ui.NAV_CSS + """
+""" + report_ui.NAV_CSS + report_ui.LEGACY_FONT_CSS + """
 </style>
     """
     for index, clientConversationID in final_df.groupby('Client Conversation ID'):

@@ -279,3 +279,18 @@ def test_every_android_report_page_has_valid_javascript(run):
             proc = subprocess.run([node, "--check", "-"], input=block, text=True, encoding="utf-8",
                                   capture_output=True)
             assert proc.returncode == 0, f"{page.name}: {proc.stderr}"
+
+
+def test_every_report_page_reaches_the_emoji_font(run):
+    """Index and detail pages alike: a page whose link misses the stylesheet draws its emoji with
+    whatever font the workstation has, and nothing on the page says so."""
+    from scripts import report_ui
+    _base, reports = run
+    pages = sorted(reports.rglob("*.html"))
+    assert any(p.parent.name == "pages" for p in pages)      # the conversation pages, two levels down
+    for page in pages:
+        links = re.findall(r'<link rel="stylesheet" href="([^"]*emoji_font\.css)">',
+                           page.read_text(encoding="utf-8"))
+        assert len(links) == 1, page
+        assert (page.parent / links[0]).resolve() == (reports / report_ui.EMOJI_FONT_CSS).resolve()
+        assert "@font-face" in (page.parent / links[0]).read_text(encoding="utf-8")

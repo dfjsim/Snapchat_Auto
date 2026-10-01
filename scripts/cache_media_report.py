@@ -1549,8 +1549,9 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
                 + (_info(CLIENT_KEY_BASIS) if key_info.get("key") else ""))
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat Library/Caches media</title><style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
+<title>Snapchat Library/Caches media</title>{report_ui.emoji_font_link(rel_prefix)}<style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
+ body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji";
+   margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
  .note{{background:#fff8e0;border:1px solid #e6d48a;color:#6a5300;padding:8px 24px;font-size:12.5px}}
@@ -1872,6 +1873,7 @@ def render(stage, closure=None, prov=None):
     docs = collect_documents(app, stage["ms_fmt"], stage["src_root"], stage["manifest"])
 
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
+    report_ui.write_emoji_font(rdir)
     report, done = generate_report(entries, docs, outdir, stage["tz_label"], "../",
                                    stage["key_info"], stage["stats"],
                                    device_path(app, stage["src_root"], stage["manifest"]),

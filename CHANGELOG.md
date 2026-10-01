@@ -6,6 +6,19 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.8.0-beta.4] — 2026-10-01
+
+### Fixed
+- **An emoji looked different — or was missing — depending on the workstation.** The reports drew
+  emoji with Windows' own font, which is only as current as that copy of Windows: no version draws a
+  flag (🇩🇿 read "DZ" in Chrome and Edge, an England flag was a bare black flag), and a Windows 11
+  font from early 2026 has none of Emoji 17.0, which current iPhones offer — a box, or a sequence
+  drawn in pieces. Every report page now links `Reports/emoji_font.css`, which carries **Noto Color
+  Emoji** 2.057 (Google's, SIL OFL 1.1, `scripts/data/fonts/`); it draws all 3,972 sequences of
+  Unicode 18.0. It comes last in each font stack, after Apple's, so a Mac keeps Apple's emoji, and
+  the reports' own text symbols (▶ ⚠ 🗂 …) stay out of it (`report_ui.UI_SYMBOLS`). The legacy
+  reports get it too. Emoji now look like Android's rather than Windows'.
+
 ## [1.8.0-beta.3] — 2026-09-29
 
 ### Added

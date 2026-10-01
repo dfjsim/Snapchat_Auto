@@ -25,6 +25,8 @@ This module provides the pieces both reports now share:
   so a full report is unaffected.
 * :data:`PAGE_CSS` — the page chrome (header, toolbar, sections, key/value grids, media buttons)
   the Conversations and Contacts reports share.
+* :func:`write_emoji_font` / :func:`emoji_font_link` — the emoji font every page links, so an emoji
+  is drawn the same on every workstation; every font stack ends with :data:`EMOJI_FONT_STACK`.
 
 Why ``data/*.js`` and not ``fetch()``/JSON: the reports are opened from ``file://``, where
 ``fetch``/``XMLHttpRequest`` are blocked by the browser's origin rules. A ``<script src=…>`` is a
@@ -46,7 +48,9 @@ import sys
 import json
 import html
 import uuid
+import base64
 import shutil
+import functools
 import logging
 import calendar
 from datetime import datetime
@@ -77,11 +81,96 @@ def copy_css(dest_dir):
     target = os.path.join(dest_dir, "css")
     try:
         shutil.copytree(source, target, dirs_exist_ok=True)
-        return True
     except OSError as error:
         logger.warning(f"Could not copy the CSS folder from {source} to {target} ({error}) — the "
                        "report is complete but will be unstyled")
         return False
+    write_emoji_font(target)                   # the legacy pages link ./css/emoji_font.css
+    return True
+
+
+# Emoji are drawn by a font the reports carry, not by the workstation's. Windows' own emoji font
+# (Segoe UI Emoji) is only as current as that copy of Windows: against the Unicode 18.0 list, the 2024
+# font misses Emoji 16.0 and 17.0 (a box, or a sequence drawn in pieces), the early-2026 one still
+# misses Emoji 17.0 — which current iPhones offer — and no version has flags (a country flag reads
+# "DZ"). The same report read differently on two workstations. Noto Color Emoji, Google's (the Android
+# one, data/fonts/README.md), draws every one of the 3,972 sequences and is under the OFL.
+#
+# It comes LAST in each font stack, after "Apple Color Emoji": text keeps the system fonts, a Mac or an
+# iPhone keeps Apple's emoji — the ones the Snapchat app shows — and every other system draws Noto's.
+# Nothing emoji-capable may come before it, or that font would win: the legacy reports' Bootstrap stack
+# names "Segoe UI Emoji", so they restate it (LEGACY_FONT_CSS).
+#
+# Its unicode-range leaves out the symbols the reports themselves draw as text (UI_SYMBOLS), which Noto
+# would turn into colour emoji. A device emoji built on one of them (⚠️) is drawn by the system's font.
+#
+# One stylesheet beside selection.js (and one in each legacy report's css/), the font inline as a
+# data: URL. A page opened from file:// may not be allowed to load a font file from a folder above it
+# (Firefox's rule), and the detail pages sit two levels down; a stylesheet loads from anywhere, and a
+# data: URL is never refused. Measured in Edge, it adds about 20 ms to a page.
+EMOJI_FONT_FAMILY = "Snapchat Auto Emoji"
+EMOJI_FONT_STACK = f'"Apple Color Emoji","{EMOJI_FONT_FAMILY}"'   # what ends every report font stack
+EMOJI_FONT_CSS = "emoji_font.css"
+# ©, the sort and link arrows ↔ ↕ ↗, ▶, ⚠, ✔ and the 🗂 🗃 🗄 link icons
+UI_SYMBOLS = "©↔↕↗▶⚠✔🗂🗃🗄"
+_EMOJI_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fonts",
+                                "NotoColorEmoji.woff2")
+
+
+def _range_without(excluded):
+    """A CSS ``unicode-range`` of every code point except those in *excluded*."""
+    parts, start = [], 0
+    for cp in sorted(set(map(ord, excluded))):
+        if cp > start:
+            parts.append(f"U+{start:X}" if cp - 1 == start else f"U+{start:X}-{cp - 1:X}")
+        start = cp + 1
+    parts.append(f"U+{start:X}-10FFFF")
+    return ",".join(parts)
+
+
+EMOJI_FONT_RANGE = _range_without(UI_SYMBOLS)
+
+
+@functools.lru_cache(maxsize=None)
+def emoji_font_css():
+    """The emoji font's ``@font-face`` rule, with the font inline. "" when the font is not bundled."""
+    try:
+        with open(_EMOJI_FONT_FILE, "rb") as fh:
+            font = base64.b64encode(fh.read()).decode("ascii")
+    except OSError as error:
+        logger.warning(f"The emoji font is missing ({error}) — the reports' emoji will be drawn by each "
+                       "workstation's own font, and on Windows a country flag as two letters")
+        return ""
+    return ("/* The emoji font of these reports: Noto Color Emoji 2.057, unmodified. Copyright 2022 "
+            "Google Inc.,\n   SIL Open Font License 1.1, http://scripts.sil.org/OFL. Noto is a "
+            "trademark of Google Inc. */\n"
+            f'@font-face{{font-family:"{EMOJI_FONT_FAMILY}";unicode-range:{EMOJI_FONT_RANGE};'
+            f'src:url(data:font/woff2;base64,{font}) format("woff2");font-display:swap}}\n')
+
+
+def write_emoji_font(report_dir):
+    """Write ``<report_dir>/emoji_font.css``, which every page of the reports links."""
+    css = emoji_font_css()
+    if not css:
+        return
+    try:
+        os.makedirs(report_dir or ".", exist_ok=True)
+        with open(os.path.join(report_dir or ".", EMOJI_FONT_CSS), "w", encoding="utf-8") as fh:
+            fh.write(css)
+    except OSError as error:
+        logger.warning(f"Could not write {EMOJI_FONT_CSS} in {report_dir} ({error}) — the reports' "
+                       "emoji will be drawn by each workstation's own font")
+
+
+def emoji_font_link(prefix):
+    """The ``<link>`` to :data:`EMOJI_FONT_CSS` for a page *prefix* (``../``, ``../../``) below it."""
+    return f'<link rel="stylesheet" href="{prefix}{EMOJI_FONT_CSS}">'
+
+
+# The legacy reports' Bootstrap stack, with the emoji font moved ahead of "Segoe UI Emoji".
+LEGACY_FONT_CSS = ('\nbody{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,'
+                   f'"Helvetica Neue",Arial,"Noto Sans",sans-serif,{EMOJI_FONT_STACK},'
+                   '"Segoe UI Emoji","Segoe UI Symbol","Noto Color Emoji"}\n')
 
 
 # --------------------------------------------------------------------------- run identity
@@ -971,7 +1060,8 @@ def write_selection_stub(report_dir, run_id_value):
 # keep their own (identical-looking) copies inside their own CSS; the Conversations and Contacts
 # reports use this one so the two new reports cannot drift apart.
 PAGE_CSS = """
- body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji";
+   margin:0;background:#f4f4f8;color:#1b1b1f}
  header{background:#2d2d71;color:#fff;padding:16px 24px} header h1{margin:0;font-size:20px}
  header a{color:#cfd3ff} .sum{opacity:.85;font-size:13px;margin-top:4px} .sum b{color:#fff}
  .note{background:#fff8e0;border:1px solid #e6d48a;color:#6a5300;padding:8px 24px;font-size:12.5px}
@@ -1963,8 +2053,8 @@ def embedded_search_terms(meta, times, structural=()):
 # scripts/data/device_fs.py and shown the same way under every source path in every report.
 
 DEVICE_FS_CSS = """
- .devfs{color:#5a5a6e;font-size:10.5px;margin:1px 0 4px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;
-   line-height:1.5}
+ .devfs{color:#5a5a6e;font-size:10.5px;margin:1px 0 4px;line-height:1.5;
+   font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji"}
  .devfs b{color:#3a3a5a;font-weight:600} .devfs .muted{color:#999}
  .devfs .ts{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#1b1b1f}
  .devfs .src{color:#8a8aa0;margin-left:4px}

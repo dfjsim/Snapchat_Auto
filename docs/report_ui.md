@@ -19,6 +19,7 @@ Now:
 Reports/
   run_id.txt                       identifies this set of reports
   selection.js                     the examiner's row selections (see below)
+  emoji_font.css                   the emoji font every page links (see "Emoji font")
   CacheController/
     CacheController_report.html    ~20 KB, whatever the number of entries
     data/index.js                  one compact array per row (all rows)
@@ -259,6 +260,60 @@ overflow, which is exactly what a column header does (`.vhdr .vc` clips so long 
 ellipsize) and what a virtual row does — the popover came out cut off, or invisible. A fixed element
 is not clipped by an overflow ancestor. It is closed on any click, and on scroll or resize, since a
 fixed popover would otherwise stay put while the page moves under it.
+
+## Emoji font (`emoji_font.css`)
+
+The reports draw emoji with a font they carry — **Noto Color Emoji**, Google's, the one Android uses
+(`scripts/data/fonts/NotoColorEmoji.woff2`; source, version, hashes and licence in the `README.md`
+beside it) — not with whatever emoji font the examiner's workstation has.
+
+Windows' own emoji font, Segoe UI Emoji, is only as current as that copy of Windows. Measured against
+the Unicode 18.0 list (3,972 RGI sequences, each checked for being drawn as one glyph, and the
+failures confirmed in Edge):
+
+| Font | Not drawn as one emoji |
+|---|---|
+| Segoe UI Emoji 1.51 (Windows 11 24H2 as released, 2024) | flags, Emoji 18.0, all of Emoji 17.0, 7 of Emoji 16.0 |
+| Segoe UI Emoji 1.60 (early 2026) | flags, Emoji 18.0, all of Emoji 17.0 (67 a box, 96 in pieces) |
+| Segoe UI Emoji 1.70 (September 2026) | flags, Emoji 18.0 |
+| Noto Color Emoji 2.057 (September 2026) | nothing |
+
+No version of Windows draws a flag: Segoe UI Emoji maps the regional indicators to letters, so a
+country flag — a pair of them, e.g. U+1F1E9 U+1F1FF for Algeria — reads "DZ" in Chrome and Edge, and
+an England / Scotland / Wales flag (U+1F3F4 + tag letters + U+E007F) is a bare black flag; Chromium
+does not plan to add its own (crbug.com/1209677). Emoji 17.0 is on current iPhones, so before this a
+report read differently depending on which workstation opened it, and a sequence drawn "in pieces"
+(*ballet dancer* as a person beside a pair of ballet shoes, a skin tone as a coloured square) is easy
+to misread. Segoe UI Emoji's family sequences are drawn as one glyph in the browser although a plain
+HarfBuzz shaping test reports them as decomposed; confirm such a result in a browser before believing
+it. Older copies of the font are kept in `C:\Windows\WinSxS\…segoeui…\seguiemj.ttf`.
+
+Four rules make it work:
+
+* **One stylesheet, the font inline.** `write_emoji_font` puts `emoji_font.css` beside `selection.js`
+  and every page links it (`emoji_font_link`), the font in it as a `data:` URL. A page opened from
+  `file://` may be refused a font *file* from a folder above it (Firefox's rule), and the detail pages
+  sit two levels down; a stylesheet loads from anywhere and a `data:` URL is never refused. The
+  stylesheet is 2.7 MB; measured in Edge it adds about 20 ms to a page. The legacy reports get a copy
+  in their own `css/` folder through `copy_css`.
+* **It ends every font stack, after `"Apple Color Emoji"`** (`EMOJI_FONT_STACK`). Text keeps the
+  system fonts (they come first and have no emoji), a Mac or an iPhone reaches Apple's emoji — the
+  ones the app shows — and every other system reaches Noto's. Nothing emoji-capable may come before
+  it: `"Segoe UI Emoji"`, `"Segoe UI Symbol"` or an installed `"Noto Color Emoji"` would win and the
+  report would again depend on the workstation. Bootstrap's stack names all three, so the legacy
+  reports restate it with the bundled font ahead of them (`LEGACY_FONT_CSS`).
+* **The reports' own text symbols stay out of it.** `©`, `↔ ↕ ↗`, `▶`, `⚠`, `✔` and the `🗂 🗃 🗄`
+  link icons are drawn as text; in Noto they turned into colour emoji. `unicode-range` covers every
+  code point except those (`UI_SYMBOLS`). A device emoji built on one of them (`⚠️`) is therefore
+  drawn by the system's emoji font — the one place two styles can still meet. A new symbol used as a
+  text icon must join `UI_SYMBOLS`; the test below finds one that has not.
+* **It is drawn whole, not mixed.** A font that only filled the gaps (after the system's) does not
+  work: a sequence the system draws in pieces never reaches a fallback, because each piece exists,
+  and one message mixing two emoji styles is harder to read than either.
+
+COLRv1 needs Chrome / Edge 98 or Firefox 107 (2022); Safari has no COLRv1, but on a Mac Apple's font
+comes first. `tests/test_emoji_font.py` pins the rules; `test_every_report_page_reaches_the_emoji_font`
+checks that each page of the Android pipeline run resolves the link.
 
 ## Media inside an expanded row
 

@@ -640,12 +640,14 @@ def generateReport(df_merge):
     html = """
     <meta charset="utf-8">
     <link href="./css/bootstrap.min.css" rel="stylesheet">
+    <link href="./css/emoji_font.css" rel="stylesheet">
     <style>
     th {
         background: #2d2d71;
         color: white;
         text-align: left;
     }
+    """ + report_ui.LEGACY_FONT_CSS + """
     </style>
         """
     html = html + template % df_report.to_html(classes=["table table-bordered table-striped table-hover table-xl "

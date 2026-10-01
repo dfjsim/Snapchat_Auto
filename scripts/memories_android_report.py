@@ -914,6 +914,7 @@ def generate_report(memories, outdir, tz_label, run_id, timefmt, epochfmt, src_r
                      '<table class="sub"><tr><th>user_id</th><th>hashed_passcode</th>'
                      f'<th>master_key</th><th>master_key_iv</th></tr>{cells}</table></details>')
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
+           f'{report_ui.emoji_font_link("../")}'
            f'<style>{report_ui.PAGE_CSS}{_CSS}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}{report_ui.DEVICE_FS_CSS}'
            f'{report_ui.EMBEDDED_CSS}</style>'
@@ -1001,6 +1002,7 @@ def main(layout, outdir, tz="local", padding="both", tile_server="", report_dir=
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     run_id = report_ui.run_id(rdir)
     report_ui.write_selection_stub(rdir, run_id)
+    report_ui.write_emoji_font(rdir)
     os.makedirs(outdir, exist_ok=True)
     published = collect_media(memories, layout.app, outdir, padding=padding,
                               file_manager=layout.file_manager, meo_rows=extra.get("meo") or [])

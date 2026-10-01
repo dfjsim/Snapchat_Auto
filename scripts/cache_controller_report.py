@@ -1832,8 +1832,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>Snapchat cache_controller.db</title><style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}}
+<title>Snapchat cache_controller.db</title>{report_ui.emoji_font_link(rel_prefix)}<style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
+ body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji";
+   margin:0;background:#f4f4f8;color:#1b1b1f}}
  header{{background:#2d2d71;color:#fff;padding:16px 24px}} header h1{{margin:0;font-size:20px}}
  .sum{{opacity:.85;font-size:13px;margin-top:4px}} .sum b{{color:#fff}}
  .note{{background:#fff8e0;border:1px solid #e6d48a;color:#6a5300;padding:8px 24px;font-size:12.5px}}
@@ -2083,6 +2084,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     cache_media = load_cache_media(ldir)
     # the shared, examiner-owned selection file every report of this run loads
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
+    report_ui.write_emoji_font(rdir)
     # links to the sibling reports are relative to CacheController_report.html (…/Reports/CacheController/)
     rel_prefix = "../"
 

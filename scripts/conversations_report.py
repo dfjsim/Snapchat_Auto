@@ -1032,6 +1032,7 @@ def _head(title, rel_prefix, run_id, sel_kind, asset_prefix, sel_prefix="", repo
     every full report and none of them has an element to style with it.
     """
     return (f'<!doctype html><html><head><meta charset="utf-8"><title>{_esc(title)}</title>'
+            f'{report_ui.emoji_font_link(rel_prefix)}'
             f'<link rel="stylesheet" href="{asset_prefix}assets/ui.css">'
             + (f"<style>{partial_css}</style>" if partial_css else "") +
             f'<script>window.SCAUTO_RUN={json.dumps(run_id)};'
@@ -1991,6 +1992,7 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     run_id = report_ui.run_id(rdir)
     report_ui.write_selection_stub(rdir, run_id)
+    report_ui.write_emoji_font(rdir)
     timefmt, tz_label = make_time_formatter(tz)
 
     # the same contact model the Contacts report builds, so a participant here and a row there are

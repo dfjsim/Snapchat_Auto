@@ -953,7 +953,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
    letter-spacing:.04em;padding:1px 4px;margin-left:5px;text-transform:uppercase}
  .ownerdot{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0;border-radius:3px;
    font-size:9px;font-weight:700;padding:0 4px;margin-left:5px;text-transform:uppercase;
-   font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+   font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji"}
  .foot{padding:14px 24px;color:#777;font-size:11.5px}
  details.others{margin:10px 24px 18px;border:1px solid #d9d9e6;border-radius:6px;background:#fafaff}
  details.others>summary{cursor:pointer;padding:8px 12px;font-size:12.5px;color:#2d2d71}
@@ -974,7 +974,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
                    "extraction.")
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
-           f'<title>Snapchat contacts</title>'
+           f'<title>Snapchat contacts</title>{report_ui.emoji_font_link(rel_prefix)}'
            f'<style>{report_ui.PAGE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}{report_ui.HINT_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="ct";</script>'
@@ -1109,6 +1109,7 @@ def index(friends_df, outdir, owner_user_id="", owner_username="", friends_sourc
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     run_id = report_ui.run_id(rdir)
     report_ui.write_selection_stub(rdir, run_id)
+    report_ui.write_emoji_font(rdir)
     identifiers = load_identifiers(primary) if identifiers is None else identifiers
     contacts = apply_identifiers(
         normalize_contacts(friends_df, owner_user_id, owner_username), identifiers)

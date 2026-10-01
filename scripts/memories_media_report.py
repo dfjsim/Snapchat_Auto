@@ -3047,7 +3047,8 @@ MEM_ROW_H = 130
 
 # Styling shared by the detail sub-pages (single-braced: inserted as a value into the f-string).
 _BASE_CSS = """
- body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f4f4f8;color:#1b1b1f}
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji";
+   margin:0;background:#f4f4f8;color:#1b1b1f}
  header{background:#2d2d71;color:#fff;padding:16px 24px}
  header h1{margin:0;font-size:19px} .sum{opacity:.85;font-size:13px;margin-top:4px}
  a.back{display:inline-block;margin:14px 24px 0;color:#2d2d71;font-weight:600;text-decoration:none;font-size:13px}
@@ -3106,7 +3107,8 @@ _BASE_CSS = """
  .mem .snapid{font-family:ui-monospace,Consolas,monospace;font-size:13.5px;font-weight:700;color:#1b1b1f;overflow-wrap:anywhere}
  .mem .snaplab{color:#666;font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;margin-right:8px}
  /* the device mtime under each source path */
- table.files td.path .mt{color:#8a8aa0;font-size:10px;margin:1px 0 4px;font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+ table.files td.path .mt{color:#8a8aa0;font-size:10px;margin:1px 0 4px;
+   font-family:-apple-system,Segoe UI,Roboto,sans-serif,"Apple Color Emoji","Snapchat Auto Emoji"}
  .tswrap{overflow-x:auto;margin-top:4px}
  table.ts{border-collapse:collapse;font-size:11.5px;width:auto;min-width:100%}
  table.ts th{background:#efeff7;color:#2d2d71;text-align:left;padding:3px 8px;font-weight:600;white-space:nowrap;vertical-align:bottom}
@@ -3586,7 +3588,7 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     sources_js = report_ui.sources_script(os.path.dirname(os.path.dirname(os.path.abspath(pages_dir))))
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
-           f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>'
+           f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>{report_ui.emoji_font_link("../../")}'
            f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
            f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
@@ -4134,6 +4136,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 """
 
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
+           f'{report_ui.emoji_font_link("../")}'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
            f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
@@ -4506,6 +4509,7 @@ def render(stage, closure=None, prov=None):
     reports_root = os.path.dirname(os.path.abspath(outdir))
     run = report_ui.run_id(reports_root)
     report_ui.write_selection_stub(reports_root, run)       # shared by every report of the run
+    report_ui.write_emoji_font(reports_root)
     report, linked, located = generate_report(memories, outdir, stage["keychain_available"],
                                               userids=stage["userids"], tz_label=stage["tz_label"],
                                               src_root=stage["src_root"],
