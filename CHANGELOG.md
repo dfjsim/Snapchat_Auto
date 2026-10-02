@@ -52,11 +52,14 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   pace, Pause and Stop while it runs (`scripts/cloud_gui.py`).
   Method after DFIR-HBG's Snapchat_DownloadMemories_iOS (overlay retrieval there by John Hyla); that
   repository has no licence, so none of its code is used.
-- **Proven by content** — a cached file byte-identical to a Memory's copy retrieved from the servers
-  (decrypted, or as received) links to that Memory in the cache_controller and Library/Caches reports,
-  marked ☁ and showing the retrieval and its authority. It is how a file no identifier connects to its
-  Memory — the snap editor's working copy of a snap later saved to Memories — is proven to be its media.
-  Every recorded identifier still wins over it.
+- **Proven by content** — a cached file byte-identical to a Memory's media links to that Memory in the
+  cache_controller and Library/Caches reports: first to the media as this run **recovered it from the
+  device** (marked ≡ — no retrieval needed), then to a copy retrieved from the servers (decrypted, or as
+  received; marked ☁, with the retrieval and its authority). It is how a file no identifier connects to
+  its Memory — the snap editor's working copy of a snap later saved to Memories — is proven to be its
+  media; on a test device the working copies that are a Memory's media now link without a retrieval.
+  The device's copies are never compared with a file some Memory's media was recovered from, and every
+  recorded identifier still wins. The Memory's page names those files beside the media they match.
 - **Possible Memory — not proven** — `scripts/memory_leads.py`. A cached media file nothing connects to
   a Memory (a snap editor's working copy, a file no claim names, a Memory-shaped claim whose row is gone,
   or an unrecognised one the app claimed as Memories media) lists the Memories of the same kind whose
@@ -97,6 +100,16 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both
   readings from staged copies through `sqlite_open`, so a cache file named through a URL the `-wal`
   has since replaced still links to its Memory.
+- **A Memory's page named only the first cache file its media came from.** The file table shows one row
+  per distinct content and described only the first record of it, so the same bytes recovered again —
+  a thumbnail from SCContent and from a caching-media pack, a pack from two folders, a file under two
+  members of a group — lost every other source: the Library/Caches report linked a pack (*2 copies*)
+  to the Memory while its page named none. Each row now lists every source, with its link and paths
+  (`memories_media_report._media_sources`).
+- **Library/Caches files linked to a Memory were not listed on the Memory's page** unless they were a
+  pack it had decrypted itself. That report renders after the Memories report, so it now writes its
+  Memory links to `CacheMedia/data/memory_links.js` and the page lists every one — pack, CDN URL key,
+  identical content — with how it was linked (`scripts/memory_backlinks.py`).
 
 ## [1.8.0-beta.4] — 2026-10-01
 

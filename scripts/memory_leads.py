@@ -11,7 +11,8 @@ So this lists such coincidences as leads, ranked, with every difference shown, a
 Memories fell inside the window — a lead among forty is not a lead among one. It is never a link: it
 is never drawn as one, never counted as one, never followed by a partial report. The way to prove or
 rule out a lead is the retrieval from Snapchat's servers, whose decrypted copy either is byte-identical
-to the file or is not (``cloud_memories.find_identical``).
+to the file or is not (``cloud_memories.find_identical``). When the Memory's media is on the device, that
+comparison has already been made with the device's own copy — and a match is a link, not a lead.
 
 ``ZDURATION`` is not used: it has been seen to differ from the media's real length.
 
@@ -40,9 +41,10 @@ LEAD_BASIS = (
     "ZGALLERYSNAP creation or capture time, or its album entry's creation), and the file is the same "
     "kind of media (video or image) as the Memory. Every difference is shown, with how many Memories "
     "fell inside the window: a coincidence among many Memories means little. ZDURATION is not used — "
-    "it can differ from the media's real length. To prove or rule out a lead, retrieve that Memory "
-    "from Snapchat's servers (copy its snap id below): when the decrypted copy is byte-identical to "
-    "this file, the file becomes linked to it, proven by content.")
+    "it can differ from the media's real length. Where this run recovered a Memory's media from the "
+    "device, it has already been compared with this file, and it is not identical. To prove or rule "
+    "out a lead, retrieve that Memory from Snapchat's servers (copy its snap id below): when the "
+    "decrypted copy is byte-identical to this file, the file becomes linked to it, proven by content.")
 
 
 def _window_text(seconds):
@@ -116,9 +118,10 @@ MEMORY_BASIS = (
     "time recorded for this Memory, the file is the same kind of media, and nothing else — no Memory "
     "and no chat — accounts for the file. Each file says how many Memories fell inside its window and "
     "where this one ranks among them: a coincidence among many Memories means little. ZDURATION is "
-    "not used — it can differ from the media's real length. To prove or rule out a lead, retrieve "
-    "this Memory from Snapchat's servers: when the decrypted copy is byte-identical to the file, the "
-    "file becomes linked to this Memory, proven by content.")
+    "not used — it can differ from the media's real length. If this run recovered this Memory's media "
+    "from the device, it has already been compared with these files and is not identical to them. To "
+    "prove or rule out a lead, retrieve this Memory from Snapchat's servers: when the decrypted copy "
+    "is byte-identical to the file, the file becomes linked to this Memory, proven by content.")
 
 
 def memory_basis(window_s=LEAD_WINDOW_S):

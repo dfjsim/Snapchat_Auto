@@ -508,46 +508,81 @@ def attach(memories, run_folder, media_dir):
     return attached
 
 
-def find_identical(memories, scfull, scparts, resolve, extra_files=()):
-    """Compare every retrieved file with the cached files on the device; record what is identical.
+#: The order a file's proofs are listed and chosen in: the device's own copy of a Memory's media is
+#: device evidence, a copy from Snapchat's servers is not.
+PROOF_ORDER = {"device": 0, "decrypted": 1, "encrypted": 2}
 
-    ``resolve(cache_key)`` returns ``(bytes, …)`` as ``_resolve_sccontent`` does. The decrypted bytes
-    are compared with plaintext cache files (whole, or rebuilt from their byte-range parts) and the
-    bytes as received with the raw files — sizes first, so only a file of the same size is hashed.
-    ``extra_files`` adds other files to compare against (``[(label, path)]``, e.g. Library/Caches).
-    Returns ``{cache_key or label: [record]}``.
+
+def find_identical(memories, scfull, scparts, resolve, extra_files=(), size_of=None):
+    """Compare the cached files on the device with every Memory media whose bytes are known; record
+    each cache file that is byte-identical to one.
+
+    Two references: the media **this run recovered from the device** for each Memory (``media_files``
+    — decrypted with the Memory's own key, or stored plain), and what was **retrieved from Snapchat's
+    servers** (``cloud_files``: decrypted, and as received). Either identifies a cache file that no
+    identifier connects to the Memory — the snap editor's working copy of a snap later saved is
+    byte-identical to its Memory's media — and the device's own copy needs no retrieval at all. The
+    device's copies are never compared with a cache file some Memory's media was recovered from: that
+    file is linked by its identifiers already, and identical media puts Memories in one group anyway.
+
+    ``resolve(cache_key)`` returns ``(bytes, …)`` as ``_resolve_sccontent`` does; ``size_of(cache_key)``,
+    when given, says how many bytes it would return, so a file rebuilt from byte-range parts is only
+    read when its size could match. Sizes first throughout: only a file of a size some reference has is
+    hashed. ``extra_files`` adds other files to compare against (``[(label, path)]``). Returns
+    ``{cache_key or label: [record]}``, each list in :data:`PROOF_ORDER`.
     """
     targets = {}
+    own = {str(f.get("cache_key") or "").lower() for m in memories.values()
+           for f in m.get("media_files") or [] if f.get("cache_key")}
     for m in memories.values():
+        for f in m.get("media_files") or []:
+            if f.get("generated") or not f.get("bytes") or not f.get("hashes"):
+                continue
+            if f["hashes"][0][2]:
+                targets.setdefault(("device", f["bytes"]), []).append(
+                    (m, f, f["hashes"][0][2], own))
         for f in m.get("cloud_files") or []:
             if f.get("bytes"):
-                targets.setdefault(("decrypted", f["bytes"]), []).append((m, f, f["hashes"][0][2]))
+                targets.setdefault(("decrypted", f["bytes"]), []).append(
+                    (m, f, f["hashes"][0][2], set()))
             enc = f.get("encrypted") or {}
             if enc.get("bytes"):
-                targets.setdefault(("encrypted", enc["bytes"]), []).append((m, f, enc.get("sha256")))
+                targets.setdefault(("encrypted", enc["bytes"]), []).append(
+                    (m, f, enc.get("sha256"), set()))
     if not targets:
         return {}
     sizes = {size for _what, size in targets}
     found = {}
 
     def check(key, data_or_path, size):
-        hits = [(what, m, f, sha) for (what, sz), lst in targets.items() if sz == size
-                for m, f, sha in lst]
+        hits = [(what, m, f, sha, own) for (what, sz), lst in targets.items() if sz == size
+                for m, f, sha, own in lst if str(key).lower() not in own]
         if not hits:
             return
         if isinstance(data_or_path, str):
             digest = _sha256_file(data_or_path)
         else:
             digest = hashlib.sha256(data_or_path).hexdigest()
-        for what, m, f, sha in hits:
-            if sha and digest == sha:
+        for what, m, f, sha, _own in hits:
+            if not sha or digest != sha:
+                continue
+            recs = found.setdefault(key, [])
+            if any(r["snap_id"] == m["snap_id"] and r["what"] == what for r in recs):
+                continue                         # the same bytes recovered twice for one Memory
+            if what == "device":
+                rec = {"snap_id": m["snap_id"], "role": f.get("role"), "what": what, "sha256": sha,
+                       "bytes": size, "source": f.get("source", ""),
+                       "from": f.get("cache_key") or "/".join(
+                           x for x in (f.get("folder"), f.get("item")) if x)}
+            else:
                 rec = {"snap_id": m["snap_id"], "role": f["role"], "what": what, "sha256": sha,
                        "bytes": size, "retrieved_utc": f.get("retrieved_utc"),
                        "session": f.get("session"),
                        "authority_note": (f.get("authority") or {}).get("note", "")}
-                found.setdefault(key, []).append(rec)
-                f["identical_cached"].append({"cache_key": key, "what": what})
+            recs.append(rec)
+            f.setdefault("identical_cached", []).append({"cache_key": key, "what": what})
 
+    full_keys = {str(k).lower() for k in scfull}
     for key, paths in scfull.items():
         for path in paths[:1]:
             try:
@@ -556,7 +591,13 @@ def find_identical(memories, scfull, scparts, resolve, extra_files=()):
                 continue
             if size in sizes:
                 check(key, path, size)
-    for key in {k for k in scparts}:
+    for key in {k for k in scparts if str(k).lower() not in full_keys}:
+        if size_of is not None:
+            try:
+                if size_of(key) not in sizes:
+                    continue
+            except Exception:                               # noqa: BLE001
+                continue
         try:
             data = resolve(key)[0]
         except Exception:                                   # noqa: BLE001
@@ -570,6 +611,8 @@ def find_identical(memories, scfull, scparts, resolve, extra_files=()):
             continue
         if size in sizes:
             check(label, path, size)
+    for recs in found.values():
+        recs.sort(key=lambda r: PROOF_ORDER.get(r["what"], 9))
     return found
 
 
@@ -583,7 +626,11 @@ def _sha256_file(path):
 
 def write_manifests(memories, outdir, identical=None):
     """``cloud_media.json`` (what the reports and index.html say about retrieved media) and
-    ``media_by_content.json`` (the cache files proven identical, for the cache reports)."""
+    ``media_by_content.json`` (the cache files proven identical, for the cache reports).
+
+    ``media_by_content.json`` carries ``by_cache_key`` (:func:`find_identical`'s result) and
+    ``by_sha256``: the SHA-256 of every Memory media whose bytes are known — recovered from the device
+    and retrieved from the servers — for a report that hashes its own files (Library/Caches)."""
     retrieved = {sid: [{k: f.get(k) for k in ("role", "out", "retrieved_utc", "url_column",
                                                "http_status", "session", "authority", "decrypt")}
                        for f in m["cloud_files"]]
@@ -598,6 +645,15 @@ def write_manifests(memories, outdir, identical=None):
     # by_sha256 lets a report that hashes its own files (Library/Caches) find them without a cache key
     by_sha256 = {}
     for sid, m in memories.items():
+        for f in m.get("media_files") or []:
+            sha = (f.get("hashes") or [("", "", "")])[0][2]
+            if sha and not f.get("generated") and f.get("bytes"):
+                rec = {"snap_id": sid, "role": f.get("role"), "what": "device",
+                       "source": f.get("source", ""),
+                       "from": f.get("cache_key") or "/".join(
+                           x for x in (f.get("folder"), f.get("item")) if x)}
+                if not any(r["snap_id"] == sid for r in by_sha256.get(sha, ())):
+                    by_sha256.setdefault(sha, []).append(rec)
         for f in m.get("cloud_files") or []:
             common = {"snap_id": sid, "role": f.get("role"), "retrieved_utc": f.get("retrieved_utc"),
                       "session": f.get("session"),

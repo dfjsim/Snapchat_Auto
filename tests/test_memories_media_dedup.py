@@ -433,3 +433,27 @@ def test_a_memory_holding_the_same_content_twice_is_named_once():
     refs = memories_report._media_refs([member])
 
     assert refs["d" * 32] == [("SNAP-1", "full")]
+
+
+def test_every_cache_file_the_same_bytes_came_from_is_named():
+    """One row per distinct content, but not one *source*: the same bytes recovered from an SCContent
+    file and from a caching-media pack used to show only the first, so the Library/Caches report
+    linked a pack to the Memory while its page named none."""
+    one = _with_file("SNAP-1", in_cc=True, src=["/x/SCContent/" + CACHE_KEY])
+    one["media_files"].append(dict(one["media_files"][0], source="caching-media", cache_key="",
+                                   in_cc=False, folder="ab", item="c" * 64,
+                                   src=["/x/caching-media/ab/" + "c" * 64 + "-0.pack"]))
+    out = _group_detail([one])
+
+    assert out.count("<tr") == 2                                   # still one row for the content
+    assert "and caching-media" in out and "🗂 Library/Caches" in out
+    assert "c" * 64 + "-0.pack" in out                             # and its path is listed too
+
+
+def test_the_same_bytes_found_elsewhere_on_the_device_are_named():
+    one = _with_file("SNAP-1", identical_cached=[{"cache_key": "9" * 32, "what": "device"},
+                                                 {"cache_key": "8" * 32, "what": "decrypted"}])
+    out = _group_detail([one])
+
+    assert "the same bytes, linked by content" in out and "ck-" + "9" * 32 in out
+    assert "8" * 32 not in out                       # a server-copy match is the servers block's

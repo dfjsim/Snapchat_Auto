@@ -330,8 +330,10 @@ how it was read.
 
 The record dates an editing session and ties it to the file; it does not say what became of the snap.
 A working copy saved to Memories is byte-identical to that Memory's media once decrypted (seen on a test
-device), but nothing recorded on that device connects the two — which is what the cloud retrieval's
-content proof and the unproven leads are for.
+device), but nothing recorded on that device connects the two. The bytes do: when the Memory's media is
+on the device too, the file links to it *by content* (≡, rule 5 in
+[cross_report_linking.md](cross_report_linking.md)); when it is not, the retrieval from Snapchat's
+servers can supply the reference (☁), and until then the file is a lead.
 
 ## Possible Memory — leads, never links
 

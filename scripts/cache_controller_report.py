@@ -443,7 +443,8 @@ def load_memory_media(report_dir):
 
 def load_memory_content(report_dir):
     """The Memories report's ``media_by_content.json``: the cache files on the device proven
-    byte-identical to media retrieved from Snapchat's servers. ``{}`` when there is none."""
+    byte-identical to a Memory's media — recovered from the device, or retrieved from Snapchat's
+    servers (cloud_memories.find_identical). ``{}`` when there is none."""
     cand = os.path.join(report_dir or "", "Memories", "media_by_content.json")
     if os.path.isfile(cand):
         try:
@@ -459,6 +460,36 @@ CONTENT_BASIS = (
     "{role} retrieved from Snapchat's servers on {when} (UTC){what}, at the examiner's request under: "
     "{note}. The server copy is not device evidence; it is the reference that identifies this file, "
     "which no identifier on the device connects to the Memory.")
+
+DEVICE_CONTENT_BASIS = (
+    "Proven by content: this file is byte-identical (SHA-256 {sha}) to Memory {sid}'s {role} as this "
+    "run recovered it from the device — {source}. No identifier on the device connects this file to "
+    "the Memory; the bytes do, and both copies are device evidence. A file like this is typically the "
+    "snap editor's working copy of a snap that was then saved to Memories.")
+
+
+def content_basis(rec, sid=None):
+    """The basis of a link proven by content, for a record of cloud_memories.find_identical."""
+    sid = sid or rec.get("snap_id", "")
+    if rec.get("what") == "device":
+        src, ref = rec.get("source") or "", rec.get("from") or ""
+        if src.startswith("caching-media"):
+            source = f"from the caching-media pack {ref}, decrypted with the Memory's own key"
+        elif ref:
+            source = f"from its {src or 'SCContent'} cache file {ref}"
+        else:
+            source = f"from {src or 'its cache'}"
+        return DEVICE_CONTENT_BASIS.format(sha=rec.get("sha256", ""), sid=sid,
+                                           role=rec.get("role") or "media", source=source)
+    return CONTENT_BASIS.format(
+        sha=rec.get("sha256", ""), sid=sid, role=rec.get("role") or "media",
+        when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
+        what=" as received, before decryption" if rec.get("what") == "encrypted"
+        else ", decrypted with that Memory's own key")
+
+
+#: How a Memory chip says the link was proven by content: ≡ the device's own copy, ☁ a server copy.
+CONTENT_MARKS = {"device": " ≡", "cloud": " ☁"}
 
 
 def load_memory_pages(report_dir):
@@ -1015,15 +1046,12 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
         if not memory:                                         # 4. a MemData id the Memory records
             memory, basis = _memdata_link(clist, memdata_ids)
         proofs = (memory_content or {}).get(key.lower()) or []
-        if not memory and proofs:                              # 5. byte-identical to a server copy
-            rec = proofs[0]
+        if not memory and proofs:                              # 5. byte-identical to its media
+            rec = proofs[0]                                    # the device's own copy first
             canonical, user_hash = snap_ids.get(str(rec["snap_id"]).upper(), (rec["snap_id"], ""))
-            memory = {"snap_id": canonical, "user_hash": user_hash, "by_content": True}
-            basis = CONTENT_BASIS.format(
-                sha=rec.get("sha256", ""), sid=canonical, role=rec.get("role", "media"),
-                when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
-                what=" as received, before decryption" if rec.get("what") == "encrypted" else
-                     ", decrypted with that Memory's own key")
+            memory = {"snap_id": canonical, "user_hash": user_hash,
+                      "by_content": "device" if rec.get("what") == "device" else "cloud"}
+            basis = content_basis(rec, canonical)
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
@@ -1463,7 +1491,7 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
             f'title="open this Memory\'s row in the Memories index" '
             f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
             f'🧠 Memory {_esc(sid[:8])}…'
-            + (' ☁' if entry["memory"].get("by_content") else '') + '</a>',
+            + CONTENT_MARKS.get(entry["memory"].get("by_content"), '') + '</a>',
             [("mem", f"mem-{sid}")], closure=closure, brief=compact)
             + why(entry.get("memory_basis")))
         if page:
@@ -1697,12 +1725,23 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     leads = _leads_html(e, rel_prefix, closure)
     if leads:
         parts.append(leads)
-    if e.get("content_proof"):
+    device = [r for r in e.get("content_proof") or () if r.get("what") == "device"]
+    cloud = [r for r in e.get("content_proof") or () if r.get("what") != "device"]
+    if device:
+        rows = "".join(
+            f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
+            f"<td>{_esc(r.get('source'))}</td><td class='mono'>{_esc(r.get('from'))}</td></tr>"
+            for r in device)
+        parts.append("<div class='sect'>≡ Identical to a Memory&#39;s media recovered on this device"
+                     + _info(content_basis(device[0])) + "</div>"
+                     "<table class='sub'><tr><th>Memory</th><th>role</th><th>recovered from</th>"
+                     "<th>cache file / pack</th></tr>" + rows + "</table>")
+    if cloud:
         rows = "".join(
             f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
             f"<td>{'as received' if r.get('what') == 'encrypted' else 'decrypted'}</td>"
             f"<td>{_esc(r.get('retrieved_utc'))}</td><td>{_esc(r.get('authority_note'))}</td></tr>"
-            for r in e["content_proof"])
+            for r in cloud)
         parts.append("<div class='sect'>☁ Identical to media retrieved from Snapchat&#39;s servers"
                      + _info(CONTENT_BASIS.format(sha="…", sid="…", role="media", when="…", what="",
                                                   note="the authority recorded")) + "</div>"

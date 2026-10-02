@@ -23,7 +23,9 @@ Memories / My Eyes Only.
   `com.snap.file_manager_*_SCContent_*` folders — i.e. exactly what that database indexes.
 - iOS `Library/Caches` report: `scripts/cache_media_report.py` (everything under `Library/Caches`
   that `cache_controller.db` does **not** index: story renders, URL-keyed PINCache stores, saved
-  chat media, and the cached documents). Disjoint from the cache_controller report by design.
+  chat media, and the cached documents). Disjoint from the cache_controller report by design. It renders
+  after the Memories report, so what it links to a Memory reaches the Memory's page as a data file
+  (`scripts/memory_backlinks.py`), as the cache_controller report's leads do (`scripts/memory_leads.py`).
 - Android: `scripts/ParseSnapchat_Android.py` — the Android run. The chat database (`arroyo.db`) and
   the cached-file index (`cache_controller.db` + `com.snap.file_manager_*_SCContent_*`) are the **same
   databases as on iOS**, so the chat parsing is `ParseSnapchat_iOS`'s functions called unchanged and

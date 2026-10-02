@@ -370,7 +370,8 @@ Two files written for the whole folder are written from what it holds, not copie
 conversation pages the extract has, and its rows are the extract's own `data/index.js` files, so it
 cannot find an unselected row. The cache_controller report's `data/memory_leads.js` (the leads the
 Memory pages show, `memory_leads.write_script`) is written from the included cache rows and names only
-the Memories the extract holds.
+the Memories the extract holds. So does the Library/Caches report's `data/memory_links.js` (the rows
+each Memory page lists as linked to it, `memory_backlinks.write_script`).
 
 ---
 

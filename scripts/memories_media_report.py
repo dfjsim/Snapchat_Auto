@@ -70,6 +70,7 @@ from scripts import offline_maps
 from scripts import gallery_search
 from scripts import cloud_memories
 from scripts import memory_leads
+from scripts import memory_backlinks
 
 logger = logging.getLogger(__name__)
 
@@ -1350,6 +1351,20 @@ def _resolve_sccontent(cache_key, full, parts):
     if ordered:
         return _read_concat(paths), [], paths, _part_coverage(ordered)
     return None, [], [], None
+
+
+def _sccontent_size(cache_key, full, parts):
+    """How many bytes ``_resolve_sccontent`` would return for a cache key, from ``stat`` alone."""
+    fulls = full.get(cache_key, [])
+    if fulls:
+        return os.path.getsize(fulls[0])
+    seen_off, total = set(), 0
+    for off, p in sorted(parts.get(cache_key.lower(), [])):
+        if off in seen_off:
+            continue
+        seen_off.add(off)
+        total += os.path.getsize(p)
+    return total
 
 
 def _sccontent_head(cache_key, full, parts, n=16):
@@ -3079,6 +3094,30 @@ def _dedup_media(members):
     return files
 
 
+def _source_id(f):
+    """Which cache file a media record was recovered from: its source, cache key and pack."""
+    return (f.get("source"), str(f.get("cache_key") or "").lower(), f.get("folder") or "",
+            f.get("item") or "")
+
+
+def _media_sources(members):
+    """``{content key: [record, ...]}`` — every cache file each distinct content was recovered from.
+
+    The file table shows one row per distinct content, and the row used to describe only the first
+    record that produced it. The same bytes are routinely recovered twice — a thumbnail from its
+    SCContent file and again from a caching-media pack, a pack from two folders — and every record
+    after the first vanished from the page: the Library/Caches report linked those packs to this
+    Memory while the Memory's page named none of them. One record per distinct source, in walk order.
+    """
+    out = {}
+    for m in members:
+        for f in m["media_files"]:
+            lst = out.setdefault(_media_key(f), [])
+            if not any(_source_id(o) == _source_id(f) for o in lst):
+                lst.append(f)
+    return out
+
+
 def _media_refs(members):
     """``{content key: [(snap id, role), ...]}`` — which of these Memories recovered each file.
 
@@ -3281,6 +3320,8 @@ _BASE_CSS = """
  .cloudoffer button{font-size:12px;padding:3px 9px;border:1px solid #5b9bc8;border-radius:5px;background:#e3f1fb;
    color:#0d4a75;font-weight:700;cursor:pointer;margin-left:4px}
  tr.partialrow td{background:#fff8f8}
+ /* another cache file the same bytes were recovered from (see _media_sources) */
+ .alsosrc{margin-top:5px;padding-top:4px;border-top:1px dashed #e0e0e8}
  .hint{position:relative;display:inline-block}
  .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
    background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}
@@ -3411,6 +3452,15 @@ SHARED_MEDIA_BASIS = (
     "media and another's thumbnail. Each Memory's own source paths and cache keys stay in its "
     "media_by_cache_key.json records; nothing about provenance is merged, only the copy on disk.")
 
+
+IDENTICAL_ON_DEVICE_BASIS = (
+    "Proven by content: these cache files are byte-identical (SHA-256) to this media as this run "
+    "recovered it, and no identifier on the device connects them to this Memory — the cache reports "
+    "link them to it on the bytes alone. Typically the snap editor's working copy of a snap that was "
+    "then saved to Memories. The comparison is made against every SCContent file, whole or rebuilt "
+    "from its byte-range parts; the Library/Caches report makes the same comparison with its own "
+    "files. A file some Memory's media was recovered from is not compared: its identifiers link it "
+    "already.")
 
 PACK_IN_CACHEMEDIA_BASIS = (
     "caching-media packs are NOT indexed by cache_controller.db, so the cache_controller report "
@@ -3661,9 +3711,41 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                                             f"mem-{member['snap_id']}", "cm")
 
     refs = _media_refs(members)
+    sources = _media_sources(members)
+
+    def source_html(f):
+        cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
+        if f.get("in_cc") and f.get("cache_key"):
+            cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cache' "
+                f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
+                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
+                [("cc", f"ck-{f['cache_key']}")], closure=closure)
+        elif f.get("source") == "caching-media" and f.get("item"):
+            # cache_controller.db does not index these, so the only report that inventories the
+            # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
+            # several rows there — so the link filters that report to this pack's item hash and
+            # opens every chunk, rather than pointing at one of them.
+            # The chunks are several rows over there and this link addresses them by the pack's item
+            # hash, not by a row id — so the rows it reaches come from the edge the Library/Caches
+            # report derived, which is known before any page is written (Closure.reaches).
+            cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cachemedia' "
+                f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
+                f"{report_ui.find_fragment([f['item']])}\" "
+                f"title=\"open the Library/Caches report filtered to this pack's "
+                f"chunk file(s), all expanded\">🗂 Library/Caches</a>",
+                pack_targets, closure=closure) + _info(PACK_IN_CACHEMEDIA_BASIS)
+        if f.get("cross_scope"):
+            cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
+                     + _info(_cross_scope_note(f)))
+        return cell
+
     frows = []
     for f in sorted(files, key=lambda f: (f["source"], -f["bytes"])):
         srcs = _render_src_paths(f, src_root, manifest)
+        # the same bytes recovered from other cache files too: each is named, with its own paths
+        others = [o for o in sources.get(_media_key(f)) or [] if _source_id(o) != _source_id(f)]
         role_cell = html.escape(f["role"])
         # Which of the memories shown recovered this file. Silent on a single-memory page — there is
         # only one answer — but on a group page it is the only thing that says whether a file came
@@ -3686,31 +3768,29 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                           f"<span class='hl'>SHA-256</span>{tag} {sha256}")
         hashes = "<div class='hgap'></div>".join(blocks)
         dim = f.get("dim") or f.get("snap_dim") or ""
-        source_cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
-        if f.get("in_cc") and f.get("cache_key"):
-            source_cell += " " + report_ui.xref(
-                f"<a class='cclink' target='scauto_cache' "
-                f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
-                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
-                [("cc", f"ck-{f['cache_key']}")], closure=closure)
-        elif f.get("source") == "caching-media" and f.get("item"):
-            # cache_controller.db does not index these, so the only report that inventories the
-            # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
-            # several rows there — so the link filters that report to this pack's item hash and
-            # opens every chunk, rather than pointing at one of them.
-            # The chunks are several rows over there and this link addresses them by the pack's item
-            # hash, not by a row id — so the rows it reaches come from the edge the Library/Caches
-            # report derived, which is known before any page is written (Closure.reaches).
-            source_cell += " " + report_ui.xref(
-                f"<a class='cclink' target='scauto_cachemedia' "
-                f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
-                f"{report_ui.find_fragment([f['item']])}\" "
-                f"title=\"open the Library/Caches report filtered to this pack's "
-                f"chunk file(s), all expanded\">🗂 Library/Caches</a>",
-                pack_targets, closure=closure) + _info(PACK_IN_CACHEMEDIA_BASIS)
-        if f.get("cross_scope"):
-            source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
-                            + _info(_cross_scope_note(f)))
+        source_cell = source_html(f)
+        if others:
+            source_cell += "".join(f"<div class='alsosrc'>and {source_html(o)}</div>" for o in others)
+            srcs += "".join(f"<div class='alsosrc'>{_render_src_paths(o, src_root, manifest)}</div>"
+                            for o in others)
+        # cache files with these same bytes that nothing but the bytes connects to this Memory
+        same = []
+        for mm in members:
+            for o in mm["media_files"]:
+                if _media_key(o) != _media_key(f):
+                    continue
+                for hit in o.get("identical_cached") or ():
+                    if hit.get("what") == "device" and hit["cache_key"] not in same:
+                        same.append(hit["cache_key"])
+        if same:
+            source_cell += (
+                "<div class='alsosrc'>≡ the same bytes, linked by content"
+                + _info(IDENTICAL_ON_DEVICE_BASIS) + ": " + ", ".join(
+                    report_ui.xref(
+                        f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                        f"CacheController_report.html#ck-{html.escape(key)}\">🗄 "
+                        f"{html.escape(key)}</a>", [("cc", f"ck-{key}")], closure=closure)
+                    for key in same) + "</div>")
         frows.append(
             f"<tr{' class=partialrow' if f.get('complete') is False else ''}>"
             f"<td>{role_cell}</td><td>{source_cell}</td>"
@@ -3743,10 +3823,18 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
           <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
           <div class="sect">Media files</div>{files_table}
+          {_backlinks_placeholder(members)}
           {_leads_placeholder(members, closure)}
           {_cloud_html(members, media_prefix, cc_prefix, closure)}
         </div>
       </div>"""
+
+
+def _backlinks_placeholder(members):
+    """Where the Library/Caches files linked to these Memories are listed — filled by
+    memory_backlinks.PAGE_JS from what that report, rendered after this page, wrote."""
+    sids = " ".join(html.escape(m["snap_id"]) for m in members)
+    return f'<div id="memcm" data-snaps="{sids}"></div>'
 
 
 def _leads_placeholder(members, closure):
@@ -3867,11 +3955,14 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
-           f'{banner}{back}{selbar}{body}<script>{memory_leads.LOADER_JS}</script>'
+           f'{banner}{back}{selbar}{body}'
+           f'<script>{memory_leads.LOADER_JS}{memory_backlinks.LOADER_JS}</script>'
            f'<script src="../../CacheController/data/{memory_leads.SCRIPT_NAME}"></script>'
+           f'<script src="../../CacheMedia/data/{memory_backlinks.SCRIPT_NAME}"></script>'
            f'<script>{_HINT_JS}{report_ui.NAV_JS}'
            f'{report_ui.SELECT_TOOLBAR_JS}{report_ui.CLIPBOARD_JS}{memory_leads.MEMORY_JS}'
-           f'scLeadsPage("../../");'
+           f'{memory_backlinks.PAGE_JS}'
+           f'scCacheMediaPage("../../");scLeadsPage("../../");'
            f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
            f'scConsumeHash();</script></body></html>')
     os.makedirs(pages_dir, exist_ok=True)
@@ -4755,15 +4846,22 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
         m["cloud"] = cloud_memories.candidate(m)
     if cloud is not None and run_folder:
         cloud_memories.cloud_phase(all_memories, run_folder, cloud, decrypt_sccontent)
-    identical = {}
     if run_folder and cloud_memories.attach(all_memories, run_folder, media_dir):
         for m in all_memories.values():
             m["cloud"] = cloud_memories.candidate(m)
-        identical = cloud_memories.find_identical(
-            all_memories, scfull, scparts, lambda key: _resolve_sccontent(key, scfull, scparts))
-        if identical:
-            logger.info(f"Snapchat's servers: {len(identical)} cache file(s) on the device are "
-                        f"byte-identical to retrieved media")
+    # Proven by content: a cache file no identifier connects to a Memory, byte-identical to media
+    # this run recovered for it from the device — or to a copy retrieved from Snapchat's servers.
+    identical = cloud_memories.find_identical(
+        all_memories, scfull, scparts, lambda key: _resolve_sccontent(key, scfull, scparts),
+        size_of=lambda key: _sccontent_size(key, scfull, scparts))
+    if identical:
+        by_what = {}
+        for recs in identical.values():
+            by_what[recs[0]["what"]] = by_what.get(recs[0]["what"], 0) + 1
+        logger.info(f"Proven by content: {len(identical)} cache file(s) byte-identical to a Memory's "
+                    f"media — {by_what.get('device', 0)} to what this run recovered from the device, "
+                    f"{len(identical) - by_what.get('device', 0)} to a copy retrieved from Snapchat's "
+                    f"servers")
 
     # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
     # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds

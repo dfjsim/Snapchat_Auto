@@ -126,12 +126,18 @@ Tried in priority order; the first that matches wins, and the icon records which
    of them. Like rule 3, a recorded identifier — never a time or content match. The key shapes this
    applies to (e.g. `<UUID>~1`) name no Memory by themselves, so they stay out of the shape list
    below.
-5. **Proven by content (last).** The file is byte-identical (SHA-256) to a Memory's media retrieved
-   from Snapchat's servers ([cloud_download.md](cloud_download.md)) — decrypted with the Memory's key, or
-   as received. `Memories/media_by_content.json` carries the matches (`by_cache_key` for this report,
-   `by_sha256` for the Library/Caches one); the chip gains ☁ and the row's detail lists the retrieval it
-   rests on and the authority it was made under. The only link here that no identifier on the device
-   supports, so any of rules 1-4 wins over it.
+5. **Proven by content (last).** The file is byte-identical (SHA-256) to a Memory's media — first as
+   this run **recovered it from the device** (decrypted with the Memory's own key, or stored plain), then
+   as it was **retrieved from Snapchat's servers** ([cloud_download.md](cloud_download.md)), decrypted or
+   as received. `cloud_memories.find_identical` makes the comparison (sizes first, then SHA-256) and
+   never compares the device's copies with a file some Memory's media was recovered from: identifiers
+   link that one already. `Memories/media_by_content.json` carries the matches (`by_cache_key` for this
+   report, `by_sha256` for the Library/Caches one); the chip gains ≡ (the device's copy) or ☁ (a server
+   copy), and the row's detail says which copy and where it came from — for a server copy, the
+   retrieval and its authority. The only link here that no identifier on the device supports, so any of
+   rules 1-4 wins over it. The snap editor's working copy of a snap later saved to Memories is the case
+   it was built for: on a test device the working copies that are a Memory's media link this way
+   without any retrieval.
 
 ### Which `EXTERNAL_KEY` shapes name a Memory
 

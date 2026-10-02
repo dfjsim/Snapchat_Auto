@@ -89,3 +89,37 @@ def test_a_library_caches_file_is_found_by_its_hash():
     assert [(link["kind"], link["snap_id"]) for link in links] == [("memory", SNAP)]
     assert "Proven by content" in links[0]["basis"]
     assert cmr.attribute(entry, {}, {}, {}, {"url_keys": {}}, {}, {}, {}) == []
+
+
+# ------------------------------------------------------- the device's own copy of the media
+
+DEVICE = {"snap_id": SNAP, "role": "full", "what": "device", "sha256": "cd" * 32, "bytes": 10,
+          "source": "SCContent", "from": "9" * 32}
+
+
+def test_the_devices_own_copy_proves_it_first(tmp_path):
+    by_key = _entries(tmp_path, {KEY_EDITOR: [DEVICE, PROOF]})
+    editor = by_key[KEY_EDITOR]
+    assert editor["memory"]["snap_id"] == SNAP and editor["memory"]["by_content"] == "device"
+    basis = editor["memory_basis"]
+    assert "recovered it from the device" in basis and "9" * 32 in basis
+    assert "Search warrant" not in basis                  # the server copy is not what proved it
+    chip = cc._links_html(editor, "../", compact=True)
+    assert "≡" in chip and "☁" not in chip
+    detail = cc._detail_html(editor, "../", "", {})
+    assert "recovered on this device" in detail and "retrieved from Snapchat" in detail
+
+
+def test_a_pack_source_is_named_in_the_basis():
+    rec = dict(DEVICE, source="caching-media", **{"from": "ab/" + "c" * 64})
+    assert "caching-media pack ab/" in cc.content_basis(rec)
+
+
+def test_a_library_caches_file_identical_to_device_media():
+    entry = {"name": "x.mp4", "rel": "x.mp4", "sha256": "cd" * 32, "bytes": 10}
+    links = cmr.attribute(entry, {}, {}, {}, {"url_keys": {}}, {}, {}, {},
+                          content={"cd" * 32: [{k: v for k, v in DEVICE.items() if k != "sha256"}]})
+    assert [(link["kind"], link["how"], link["by_content"]) for link in links] == [
+        ("memory", "device", "device")]
+    assert "cd" * 32 in links[0]["basis"]                 # the digest it matched on, not a blank
+    assert "≡" in cmr._links_cell(dict(entry, links=links, copies=[{}]), "../")

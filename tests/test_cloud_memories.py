@@ -5,6 +5,7 @@ Every input is synthetic; nothing is requested from anywhere (the fetcher is scr
 """
 import datetime
 import hashlib
+import json
 import os
 import random
 
@@ -208,3 +209,51 @@ def test_the_detail_block(tmp_path):
     cm.attach({"A": m}, run, str(tmp_path / "media"))
     block = mr._cloud_html([m], "../", "../../", None)
     assert "NOT device evidence" in block and "Consent of the account holder" in block
+
+
+# ------------------------------------------------- proven by the device's own copy of the media
+
+def _device_media(path, data, key, **extra):
+    path.write_bytes(data)
+    return dict({"role": "full", "source": "SCContent", "cache_key": key, "bytes": len(data),
+                 "hashes": [("no padding", hashlib.md5(data).hexdigest(),
+                             hashlib.sha256(data).hexdigest())], "ext": "mp4"}, **extra)
+
+
+def test_a_cache_file_identical_to_media_recovered_on_the_device(tmp_path):
+    plain = b"\x00\x00\x00\x18ftypmp42" + b"\x05" * 2000
+    src, copy, other = tmp_path / ("1" * 32), tmp_path / ("2" * 32), tmp_path / ("3" * 32)
+    m = _memory("A", files=[_device_media(tmp_path / "out.mp4", plain, "1" * 32)])
+    src.write_bytes(plain)                       # the file the media was recovered from: not compared
+    copy.write_bytes(plain)                      # the editor's working copy: proven
+    other.write_bytes(b"\x06" * len(plain))      # same size, other bytes: nothing
+    sizes = {"4" * 32: len(plain)}
+    resolved = []
+
+    def resolve(key):
+        resolved.append(key)
+        return (plain,)
+    found = cm.find_identical({"A": m}, {"1" * 32: [str(src)], "2" * 32: [str(copy)],
+                                         "3" * 32: [str(other)]},
+                              {"4" * 32: [(0, "x")], "5" * 32: [(0, "y")]}, resolve,
+                              size_of=lambda key: sizes.get(key, 1))
+    assert sorted(found) == ["2" * 32, "4" * 32]
+    rec = found["2" * 32][0]
+    assert (rec["what"], rec["snap_id"], rec["from"]) == ("device", "A", "1" * 32)
+    assert resolved == ["4" * 32]                # a part set of another size was never read
+    assert m["media_files"][0]["identical_cached"][0] == {"cache_key": "2" * 32, "what": "device"}
+    cm.write_manifests({"A": m}, str(tmp_path), found)
+    manifest = json.loads((tmp_path / "media_by_content.json").read_text())
+    assert manifest["by_sha256"][hashlib.sha256(plain).hexdigest()][0]["what"] == "device"
+    assert not (tmp_path / "cloud_media.json").exists()
+
+
+def test_the_devices_copy_is_listed_before_a_server_copy(tmp_path):
+    plain = b"\x00\x00\x00\x18ftypmp42" + b"\x07" * 3000
+    m = _memory("A", files=[_device_media(tmp_path / "out.mp4", plain, "1" * 32)])
+    run = _retrieve(tmp_path, {"A": m}, plain)
+    cm.attach({"A": m}, run, str(tmp_path / "media"))
+    copy = tmp_path / ("2" * 32)
+    copy.write_bytes(plain)
+    found = cm.find_identical({"A": m}, {"2" * 32: [str(copy)]}, {}, lambda key: (None,))
+    assert [r["what"] for r in found["2" * 32]] == ["device", "decrypted"]

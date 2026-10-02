@@ -388,6 +388,21 @@ copies its snap id — the page cannot start a retrieval itself. Media retrieved
 device byte-identical to it; it never joins `media_files`, so groups, hashes and the media states are
 the device's alone. See [cloud_download.md](cloud_download.md).
 
+### Every cache file a Memory's media came from, and every file linked to it
+
+The file table has one row per distinct content, but a row names **every** cache file those bytes were
+recovered from (`_media_sources`): *SCContent … and caching-media …*, each with its link and its paths.
+It used to describe only the first record, so a thumbnail recovered from SCContent and again from a
+caching-media pack showed no pack at all — while the Library/Caches report linked that pack to the
+Memory. Under the sources, *≡ the same bytes, linked by content* names the cache files that nothing but
+the bytes connects to this Memory: byte-identical to its media as recovered from the device
+(`cloud_memories.find_identical`; rule 5 of [cross_report_linking.md](cross_report_linking.md)).
+
+Below the table, *Library/Caches — files linked to this Memory* lists every row that report links here
+and how — a pack decrypted with this Memory's key, a file keyed by its CDN URL, or one byte-identical
+to its media. That report renders after this one, so the list comes from its
+`CacheMedia/data/memory_links.js`, loaded at view time (`scripts/memory_backlinks.py`).
+
 ### Possible cached file — the cache_controller report's leads, from this side
 
 A cached media file nothing on the device connects to anything may still be a Memory's media — the snap

@@ -49,6 +49,7 @@ from urllib.parse import unquote, urlparse
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
+from scripts import memory_backlinks
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -62,7 +63,8 @@ from scripts.memories_media_report import (
 )
 from scripts.cache_controller_report import (
     find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
-    load_memory_pages, load_memory_packs, load_memory_content, CONTENT_BASIS, POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
+    load_memory_pages, load_memory_packs, load_memory_content, content_basis, CONTENT_MARKS,
+    POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
 )
 
 try:
@@ -900,7 +902,7 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
     for item_key, media in _pack_keys(entry, packs or {}):
         for rec in media[:2]:
             links.append({
-                "kind": "memory", "snap_id": rec["snap_id"],
+                "kind": "memory", "snap_id": rec["snap_id"], "how": "pack",
                 "page": memory_pages.get(rec["snap_id"]),
                 "media_path": rec.get("path", ""), "media_ext": rec.get("ext", ""),
                 "media_role": rec.get("role", ""), "media_bytes": rec.get("bytes", 0),
@@ -977,25 +979,24 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
             if hit:
                 canonical, user_hash, field = hit
                 links.append({
-                    "kind": "memory", "snap_id": canonical,
+                    "kind": "memory", "snap_id": canonical, "how": "url",
                     "page": memory_pages.get(canonical),
                     "basis": (f"This file is keyed by the CDN URL {entry['url']}. SHA-256 of its "
                               f"media token \"{token}\" (first 16 bytes) is {digest}, which equals "
                               f"the cache key of a Memory's {field}."),
                 })
 
-    # 5. byte-identical to media retrieved from Snapchat's servers (cloud_memories.write_manifests)
+    # 5. byte-identical to a Memory's media: as this run recovered it from the device, else as it
+    #    was retrieved from Snapchat's servers (cloud_memories.write_manifests, device records first)
     if not any(link["kind"] == "memory" for link in links):
         for digest in (entry.get("sha256"), entry.get("raw_sha256")):
             for rec in ((content or {}).get(digest) or [])[:1] if digest else []:
                 links.append({
                     "kind": "memory", "snap_id": rec["snap_id"],
                     "page": memory_pages.get(rec["snap_id"]),
-                    "basis": CONTENT_BASIS.format(
-                        sha=digest, sid=rec["snap_id"], role=rec.get("role", "media"),
-                        when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
-                        what=" as received, before decryption" if rec.get("what") == "encrypted"
-                        else ", decrypted with that Memory's own key"),
+                    "by_content": "device" if rec.get("what") == "device" else "cloud",
+                    "how": "device" if rec.get("what") == "device" else "cloud",
+                    "basis": content_basis(dict(rec, sha256=digest)),
                 })
             if any(link["kind"] == "memory" for link in links):
                 break
@@ -1335,7 +1336,7 @@ def _links_cell(entry, rel_prefix, compact=True, closure=None):
             chips.append(report_ui.xref(
                 f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories" '
                 f'title="open this Memory\'s row in the Memories index">'
-                f'Memory {_esc(sid[:8])}…</a>',
+                f'Memory {_esc(sid[:8])}…{CONTENT_MARKS.get(link.get("by_content"), "")}</a>',
                 [("mem", f"mem-{sid}")], closure=closure, brief=compact) + why(link["basis"]))
             # ...and the Memory's own detail page, as the cache_controller report does: the index
             # row is a summary, the detail page is where that Memory's media and metadata are.
@@ -1897,6 +1898,11 @@ def render(stage, closure=None, prov=None):
                                    device_path(app, stage["src_root"], stage["manifest"]),
                                    report_ui.run_id(rdir), closure=closure, prov=prov)
     _write_manifest(entries, outdir)
+    # what this report linked to each Memory, for the Memory's own page (scripts/memory_backlinks.py);
+    # a partial extract's names only the Memories it holds
+    memory_backlinks.write_script(os.path.join(outdir, "data"), entries, report_ui.run_id(rdir),
+                                  keep=None if closure is None else
+                                  (lambda sid: closure.has("mem", f"mem-{sid}")))
     logger.info(f"Cached media report: {os.path.abspath(report)}")
     if closure is not None:
         logger.info(f"  {len(entries)} of {len(stage.model)} distinct file(s) in this extract")

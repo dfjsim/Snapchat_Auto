@@ -123,7 +123,9 @@ to its Memory — a snap editor's working copy, say — is proven to be that Mem
 equals the decrypted server copy's. `cloud_memories.find_identical` compares sizes first and hashes only
 same-size files: decrypted bytes against plaintext SCContent files (whole, or rebuilt from their
 byte-range parts), and the bytes as received against the raw files. Matches go into
-`Memories/media_by_content.json`, which the cache reports read to show the link from their side.
+`Memories/media_by_content.json`, which the cache reports read to show the link from their side. The
+same comparison is made with the media this run recovered from the device, and that one comes first:
+when the Memory's media is on the device, no retrieval is needed to prove the link (≡ rather than ☁).
 
 ## Running it
 
