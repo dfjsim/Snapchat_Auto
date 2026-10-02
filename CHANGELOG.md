@@ -16,6 +16,17 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   identifier occurs — file, offset, table, column, row — and never the content, in the log and in
   `trace_ids_<stamp>.json`. For asking whether the device recorded a connection no report makes yet,
   on the machine that holds the case. See [docs/trace_ids.md](docs/trace_ids.md).
+- **The MemData identifiers are read** — `memories_media_report.decode_memdata`.
+  `ZGALLERYSNAP.ZMEMDATAIDS` and `ZGALLERYENTRY.ZMEMDATAID` (newer app versions) showed as
+  `<blob N bytes>`; they are NSKeyedArchiver records of a uuid, a creation time and an entry type, and
+  the Memory page now shows them as such. The uuids are searchable and the creation times join the
+  Memory's timestamps.
+
+### Fixed
+- **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
+  database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both
+  readings from staged copies through `sqlite_open`, so a cache file named through a URL the `-wal`
+  has since replaced still links to its Memory.
 
 ## [1.8.0-beta.4] — 2026-10-01
 

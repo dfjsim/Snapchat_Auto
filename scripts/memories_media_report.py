@@ -37,8 +37,10 @@ import shutil
 import hashlib
 import sqlite3
 import logging
+import plistlib
 import subprocess
 import contextlib
+import uuid as uuid_mod
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
@@ -558,6 +560,109 @@ def _fmt_other(v):
     return v
 
 
+def _other_value(col, v, timefmt):
+    """:func:`_fmt_other`, except that a MemData archive (ZMEMDATAIDS / ZMEMDATAID) is read."""
+    if col in MEMDATA_COLUMNS:
+        records = decode_memdata(v)
+        if records is not None:
+            return memdata_text(records, timefmt)
+    return _fmt_other(v)
+
+
+#: The record a ZMEMDATAIDS / ZMEMDATAID archive is made of, and the container ZMEMDATAIDS holds them in.
+MEMDATA_RECORD = "SOJUGalleryServletMemDataId"
+MEMDATA_CONTAINER = "SOJUGalleryServletMemDataIds"
+#: Where those archives are stored.
+MEMDATA_COLUMNS = {"ZMEMDATAIDS": "ZGALLERYSNAP.ZMEMDATAIDS", "ZMEMDATAID": "ZGALLERYENTRY.ZMEMDATAID"}
+#: What each slot of the container is called in the report.
+MEMDATA_SLOTS = (("snapMemDataId", "snap"), ("entryMemDataId", "entry"))
+
+
+def decode_memdata(blob):
+    """The MemData identifiers in a ``ZGALLERYSNAP.ZMEMDATAIDS`` or ``ZGALLERYENTRY.ZMEMDATAID`` blob.
+
+    Both are NSKeyedArchiver plists. ZMEMDATAIDS's root object (``SOJUGalleryServletMemDataIds``)
+    holds up to two records, under ``snapMemDataId`` and ``entryMemDataId``; ZMEMDATAID's root *is*
+    one record (``SOJUGalleryServletMemDataId``). A record is a ``uuid``, a ``creationTimeMs`` (Unix
+    milliseconds) and an ``entryType`` (an integer, shown as stored).
+
+    Returns ``[{"slot", "uuid", "created_ms", "entry_type"}]`` — ``slot`` being the key the record
+    sat under, empty for a bare record — or None when the blob is not such an archive or any uuid in
+    it does not parse: the caller then shows the blob's size, as for any other blob. The uuid is
+    upper-cased, the case every other identifier in these reports is matched in.
+    """
+    if not isinstance(blob, (bytes, bytearray)) or bytes(blob[:8]) != b"bplist00":
+        return None
+    try:
+        archive = plistlib.loads(bytes(blob))
+        objects = archive["$objects"]
+        root = objects[archive["$top"]["root"].data]
+    except Exception:                                      # noqa: BLE001 - not an archive
+        return None
+
+    def deref(ref):
+        return objects[ref.data] if isinstance(ref, plistlib.UID) else ref
+
+    def class_of(obj):
+        try:
+            return deref(obj["$class"])["$classname"]
+        except Exception:                                  # noqa: BLE001
+            return None
+
+    def record(obj, slot):
+        if not isinstance(obj, dict) or class_of(obj) != MEMDATA_RECORD:
+            raise ValueError("not a MemData record")
+        raw = deref(obj.get("uuid"))
+        if isinstance(raw, dict) and isinstance(raw.get("NS.uuidbytes"), bytes):
+            raw = raw["NS.uuidbytes"]                      # an NSUUID rather than a string
+        ident = (uuid_mod.UUID(bytes=raw) if isinstance(raw, bytes) and len(raw) == 16
+                 else uuid_mod.UUID(str(raw)))
+        created, kind = deref(obj.get("creationTimeMs")), deref(obj.get("entryType"))
+        return {"slot": slot, "uuid": str(ident).upper(),
+                "created_ms": created if isinstance(created, int) and created > 0 else None,
+                "entry_type": kind if isinstance(kind, int) else None}
+
+    try:
+        name = class_of(root)
+        if name == MEMDATA_RECORD:
+            return [record(root, "")]
+        if name == MEMDATA_CONTAINER:
+            out = []
+            for slot, _label in MEMDATA_SLOTS:
+                target = deref(root.get(slot)) if slot in root else None
+                if target is not None and target != "$null":
+                    out.append(record(target, slot))
+            return out
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return None
+
+
+def _memdata_records(blob, col, timefmt):
+    """:func:`decode_memdata`'s records, each with the column it came from and its time shown."""
+    out = []
+    for rec in decode_memdata(blob) or []:
+        rec = dict(rec, field=MEMDATA_COLUMNS[col])
+        rec["created"] = (timefmt(rec["created_ms"] / 1000 - 978307200)
+                          if rec["created_ms"] else "")
+        out.append(rec)
+    return out
+
+
+def memdata_text(records, timefmt):
+    """``snap <uuid> · created <time> · entry type <n>`` per record, for a value cell."""
+    labels = dict(MEMDATA_SLOTS)
+    parts = []
+    for rec in records:
+        bits = [f"{labels.get(rec['slot'], rec['slot'])} {rec['uuid']}".strip()]
+        if rec["created_ms"]:
+            bits.append(f"created {timefmt(rec['created_ms'] / 1000 - 978307200)}")
+        if rec["entry_type"] is not None:
+            bits.append(f"entry type {rec['entry_type']}")
+        parts.append(" · ".join(bits))
+    return "; ".join(parts) or "(no identifier recorded)"
+
+
 MEDIA_OBJECT_KEY_BASIS = (
     "Moving a Memory into My Eyes Only does not re-encrypt the media that is already cached on the "
     "device. The app writes a NEW ZGALLERYSNAP row for the moved Memory whose own key "
@@ -646,6 +751,7 @@ def _bare_memory(snap_id, profile):
         "media_files": [],
         "wal": sqlite_open.BOTH,
         "prior_rows": [],
+        "memdata": [],
     }
 
 
@@ -747,7 +853,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     # entry values are kept in their own dicts and rendered in their own report sections. The
     # label lists (SNAP_OTHER_LABELS / ENTRY_OTHER_LABELS) also gate which columns appear, so
     # schemas from different app versions only surface the fields we've curated.
-    entry_times, entry_other = {}, {}
+    entry_times, entry_other, entry_memdata = {}, {}, {}
     etcols, entry_other_cols = [], []
     try:
         ecols = [r[1] for r in cur.execute("PRAGMA table_info(ZGALLERYENTRY)")]
@@ -764,7 +870,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # keep every column (None when empty) so the rendered tables share one column set
             entry_times[pk] = {c: (timefmt(er[c]) if isinstance(er.get(c), (int, float)) and er.get(c)
                                    else None) for c in etcols}
-            entry_other[pk] = {c: _fmt_other(er.get(c)) for c in entry_other_cols}
+            entry_other[pk] = {c: _other_value(c, er.get(c), timefmt) for c in entry_other_cols}
+            entry_memdata[pk] = _memdata_records(er.get("ZMEMDATAID"), "ZMEMDATAID", timefmt)
     except sqlite3.DatabaseError as error:
         logger.debug(f"ZGALLERYENTRY read failed: {error}")
     empty_entry_times = {c: None for c in etcols}
@@ -806,7 +913,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             "has_location": bool(r.get("ZHASLOCATION")),
             "times": times,
             "entry_times": entry_times.get(entry_pk, empty_entry_times),
-            "snap_other": {c: _fmt_other(r.get(c)) for c in snap_other_cols},
+            "snap_other": {c: _other_value(c, r.get(c), timefmt) for c in snap_other_cols},
             "entry_other": entry_other.get(entry_pk, empty_entry_other),
             "urls": {c: r.get(c) for c in url_cols if r.get(c)},
             "ids": {c: _clean_text(r.get(c)) for c in id_cols if r.get(c)},
@@ -829,6 +936,9 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # since deleted it, i.e. a Memory the app no longer lists
             "wal": mark,
             "prior_rows": [],
+            # the MemData identifiers this row and its entry record about themselves
+            "memdata": (_memdata_records(r.get("ZMEMDATAIDS"), "ZMEMDATAIDS", timefmt)
+                        + entry_memdata.get(entry_pk, [])),
         }
         if has_zenc and r.get("ZENCRYPTION"):
             try:
@@ -2519,6 +2629,12 @@ def _memory_times(m):
     for col, value in (m.get("entry_times") or {}).items():
         if value:
             out.append((ENTRY_TIME_LABELS.get(col, col), value, f"scdb-27 › ZGALLERYENTRY.{col}"))
+    slots = dict(MEMDATA_SLOTS)
+    for rec in m.get("memdata") or []:
+        if rec.get("created"):
+            slot = f"{rec['slot']}." if rec["slot"] else ""
+            out.append((f"MemData id created ({slots.get(rec['slot'], 'record')})", rec["created"],
+                        f"scdb-27 › {rec['field']} › {slot}creationTimeMs"))
     if (m.get("search") or {}).get("date"):
         # a calendar date the app wrote into its search index — local, and with no zone stated,
         # so it is a string here, never an instant
@@ -3960,6 +4076,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # may survive only as a recovered key row — is findable from either end
             searchable = ([zsnap, str(zentry), str(zmedia), str(uid), md5, sha, m["create_utc"]]
                           + [str(r) for r in m.get("media_refs") or []]
+                          + [rec["uuid"] for rec in m.get("memdata") or []]
                           + list(tokens) + list(dict.fromkeys(m["urls"].values())))
             # The AES key and IV in hex, as another tool prints them, so a key seen elsewhere finds
             # its Memory here; and what the media files say about themselves (camera, software, GPS,

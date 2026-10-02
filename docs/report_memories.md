@@ -273,6 +273,7 @@ value with its source** rather than folding them into one column (`_memory_times
 | Tag | What it is | Clock |
 |---|---|---|
 | `scdb-27 › ZGALLERYSNAP.<col>` / `ZGALLERYENTRY.<col>` | the app's record — every `*TIME*`/`*DATE*` column of the snap row and of the entry/album row it belongs to | Cocoa seconds (since 2001-01-01 UTC), converted to the run's timezone |
+| `scdb-27 › ZGALLERYSNAP.ZMEMDATAIDS › snapMemDataId.creationTimeMs` (and `entryMemDataId`, and `ZGALLERYENTRY.ZMEMDATAID`) | the creation time the app archived with each MemData identifier (below) | Unix milliseconds, converted to the run's timezone |
 | `inside <file>` | written **into** the recovered media by whatever produced it: EXIF `DateTime*`, XMP `CreateDate`, PNG `Creation Time`, an MP4's `mvhd` creation/modification time, a QuickTime `creationdate` (`©day` / `com.apple.quicktime.creationdate`), the EXIF GPS stamp | converted to the run's timezone when the file **states** its zone (EXIF `OffsetTime*`, an ISO 8601 offset); marked *UTC assumed* where only the format defines the field as UTC (`mvhd`, the GPS stamp); otherwise shown *as written* and tagged *no timezone in the file* — a wall clock on the writing device's clock, never guessed into an instant |
 | `extraction archive › <path>` | what the **device's filesystem** recorded about the cache file — created (birth), modified, accessed, inode changed — from a UFED archive's `metadata.msgpack` or the ZIP entry's `UT` field (in a UFED archive, the access time only) via `extraction_manifest.json` (see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)); never the extracted copy's own times, which are when *we* unzipped it | UTC, converted to the run's timezone at the source's precision (nanoseconds from UFED, seconds from `UT`); identical instants on one line, a split file's parts bounded; *accessed* and *inode changed* can be the acquisition's; *not recorded* when the archive carried none |
 
@@ -297,6 +298,20 @@ nothing is known the value is shown as written. `media_meta` records this as the
 Two things are excluded on purpose. A **poster frame** this tool generated is never read: it is ours,
 not evidence, and its encoder's stamps would be this run's. And `gallery.encrypteddb` rows (keys,
 coordinates) carry no time of their own; they are dated only by the snap row they belong to.
+
+### The MemData identifiers (`ZMEMDATAIDS`, `ZMEMDATAID`)
+
+Newer app versions add two blob columns: `ZGALLERYSNAP.ZMEMDATAIDS` and `ZGALLERYENTRY.ZMEMDATAID`. Both
+are NSKeyedArchiver plists of one small record — a `uuid`, a `creationTimeMs` (Unix milliseconds) and an
+`entryType` (an integer, shown as stored). `ZMEMDATAIDS`' root (`SOJUGalleryServletMemDataIds`) holds up to
+two of them, under `snapMemDataId` and `entryMemDataId`; `ZMEMDATAID`'s root *is* one record
+(`SOJUGalleryServletMemDataId`). The uuids are not the snap's `ZSNAPID` or the entry's `ZENTRYID`.
+
+`decode_memdata` reads them strictly — the archive's classes must be those records and every uuid must
+parse, as a string or an `NSUUID` — and the value cell then reads
+`snap <uuid> · created <time> · entry type <n>; entry …` instead of `<blob N bytes>`. Anything else keeps
+the size marker. The uuids are searchable, and each creation time is a row of the Memory's timestamps
+(tagged with its column and slot), so the time filter finds it.
 
 ### Embedded metadata — what the file says about itself
 
