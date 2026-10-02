@@ -6,7 +6,7 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
-## [Unreleased] — 1.9.0-beta.1
+## [1.9.0-beta.1] — 2026-10-02
 
 ### Added
 - **`--trace-ids <run folder> <id> …`** — `scripts/trace_ids.py`. Searches every file a run extracted
