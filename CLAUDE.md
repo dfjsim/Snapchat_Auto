@@ -62,7 +62,7 @@ Memories / My Eyes Only.
   sharper?" cannot be answered without something to compare against. See
   [hidpi_scaling.md](docs/hidpi_scaling.md).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
-  `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
+  `Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
   thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
   `protobuf_wire.py`, the schema-less protobuf reader every decode shares, and `snap_session.py`, the
 snap editor's session record in `userPreferences/pref.docobjects` (which CACHE_KEY a context-34 claim's

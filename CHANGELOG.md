@@ -33,6 +33,16 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   fingerprint. `scripts/data/protobuf_wire.py` is the protobuf reader `arroyo_content` already used,
   now shared.
 
+### Changed
+- **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
+  `scripts/data/keychain.py` (GPL-3.0-or-later) is replaced by `scripts/data/ufed_keychain.py`, written
+  from [docs/ufed_keychain_format.md](docs/ufed_keychain_format.md); on every UFED keychain in the test
+  corpus it yields the same items and the same keychain status. `scripts/data/parse3.py` (GPL-2.0) is
+  replaced by `protobuf_wire.strings`: the reports are unchanged on the corpus; the legacy
+  Communications report's concatenated value for a media message can differ — a stray control
+  character is gone, and a printable CDN token the old parser took for a nested message is now listed.
+  `requests`, `urllib3` and `pyasn1` are no longer dependencies.
+
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
   database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both

@@ -75,3 +75,50 @@ def values(data, *path):
                 nxt.append(value)
         level = nxt
     return level
+
+
+#: Control characters a typed text contains; any other one means the bytes are not text.
+_TEXT_CONTROLS = frozenset("\n\r\t")
+
+
+def _text(value):
+    """``value`` as text when it is printable UTF-8 (line breaks and tabs allowed), else None."""
+    try:
+        text = bytes(value).decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if text and all(ch.isprintable() or ch in _TEXT_CONTROLS for ch in text):
+        return text
+    return None
+
+
+def strings(data):
+    """Every text value in a message and the messages nested in it, depth first in field order.
+
+    A length-delimited value is text when it is printable UTF-8; otherwise it is searched as a
+    nested message when it parses as one to its last byte; otherwise (raw bytes, packed numbers) it
+    is skipped. Without a schema "printable" is the only test that separates a word from bytes that
+    happen to parse — so a short printable value that would also parse as a message is read as the
+    text it looks like. Returns None when ``data`` itself is not a message.
+    """
+    out = []
+
+    def walk(buf):
+        for _field, wire, value in fields(buf):
+            if wire != 2:
+                continue
+            text = _text(value)
+            if text is not None:
+                out.append(text)
+                continue
+            try:
+                nested = fields(value) if value else []
+            except Malformed:
+                continue
+            if nested:
+                walk(value)
+    try:
+        walk(bytes(data))
+    except Malformed:
+        return None
+    return out

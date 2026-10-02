@@ -86,7 +86,10 @@ already-open tab. See [report_ui.md](report_ui.md).
 ## Reading the text a person actually typed
 
 `proto_to_msg` does not read a message's text field: it walks the whole protobuf and concatenates
-**every** string it finds. That is what lets the cache join recognise a media id, so
+**every** string it finds (`protobuf_wire.strings`). Without a schema a length-delimited value is read as
+text when it is printable UTF-8 (line breaks and tabs allowed), searched as a nested message when it
+parses as one to its last byte (protobuf.dev, *Encoding*), and skipped otherwise — raw ids and packed
+numbers are not text. That is what lets the cache join recognise a media id, so
 `message_content` still holds it — but it also glues the encryption key, IV, lens name, sticker name
 and any typed text into one value, so a reply to a Snap reached the report as `…` buried inside
 `<key>=<iv>==<uuid>…`. `getChats` therefore fills `message_text` from the field that holds the text

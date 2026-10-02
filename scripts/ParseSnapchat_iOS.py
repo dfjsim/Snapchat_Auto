@@ -6,13 +6,14 @@ import pandas as pd
 import plistlib
 import re
 import shutil
-from scripts.data.parse3 import *
+import sys
 import datetime
 import ntpath
 import filetype
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import arroyo_content
+from scripts.data import protobuf_wire
 from scripts.data import flatbuffers_doc
 from scripts.data import tsaf
 from pathlib import Path
@@ -43,18 +44,11 @@ platform = system()
 
 
 def proto_to_msg(bin_file):
-    try:
-        messages_found = []
-        messages = ParseProto(bin_file)
-
-        res = find_string_in_dict(messages)
-    except:
+    # Every text value in the protobuf, wherever it sits (protobuf_wire.strings); "" when the blob is
+    # not a protobuf at all.
+    messages_found = protobuf_wire.strings(bin_file)
+    if messages_found is None:
         return ""
-        
-    for k, v in res:
-        if "string" in k:
-            messages_found.append(v)
-            
     if messages_found == [] or len(messages_found) >= 2:
         try:
             message,typedef = blackboxprotobuf.decode_message(bin_file)
@@ -70,15 +64,6 @@ def proto_to_msg(bin_file):
     return messages_found
 
 
-def find_string_in_dict(data):
-    for k, v in data.items():
-        if isinstance(v, dict):
-            yield k, v
-            yield from find_string_in_dict(v)
-        else:
-            yield k, v
-            
-            
 def getHtml(final_df, friends_df, group_df):
 
     report_ui.copy_css(outputDir)
