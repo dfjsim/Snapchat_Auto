@@ -43,6 +43,7 @@ def test_memory_claim_shapes_are_recognised(ek, role):
     f"content~1:{U}:28:0:0",
     f"resumable-data-SOMEUSER~{U}",
     f"PH-{U}",
+    f"{U}~1",                                       # a snap editor / newer claim key
     U,                                              # a bare UUID claims nothing about a Memory
 ])
 def test_shapes_that_do_not_name_a_memory_are_not_indexed(ek):

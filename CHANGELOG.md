@@ -21,6 +21,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   `<blob N bytes>`; they are NSKeyedArchiver records of a uuid, a creation time and an entry type, and
   the Memory page now shows them as such. The uuids are searchable and the creation times join the
   Memory's timestamps.
+- **A cache claim carrying a Memory's MemData identifier links to that Memory**, in both reports
+  (`cache_controller_report._memdata_link`, `memories_media_report.index_claim_uuids`): a recorded
+  identifier, like a `ZMEDIAID`, used only when nothing stronger matched and only when exactly one
+  Memory records it.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL

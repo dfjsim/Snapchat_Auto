@@ -119,6 +119,13 @@ Tried in priority order; the first that matches wins, and the icon records which
    snap-scoped key.
 3. **ZMEDIAID (fallback).** A UUID inside an `EXTERNAL_KEY` matches the Memory's `ZMEDIAID`
    (used only when it is *not* also a `ZSNAPID`).
+4. **A MemData identifier (fallback).** A UUID inside an `EXTERNAL_KEY` is one the Memory records
+   about itself in `ZGALLERYSNAP.ZMEMDATAIDS` (`snapMemDataId` / `entryMemDataId`) or in its entry's
+   `ZGALLERYENTRY.ZMEMDATAID` (newer app versions; `memories_media_report.decode_memdata`). An entry's
+   id is shared by every snap of the entry, so an id that more than one Memory records links to none
+   of them. Like rule 3, a recorded identifier — never a time or content match. The key shapes this
+   applies to (e.g. `<UUID>~1`) name no Memory by themselves, so they stay out of the shape list
+   below.
 
 ### Which `EXTERNAL_KEY` shapes name a Memory
 
@@ -161,7 +168,8 @@ either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target
 Claims are looked up by the Memory's `ZSNAPID` **and** by the media-object ids its row references
 (`m["media_refs"]` — `ZMEDIAID`, `ZDUPLICATEDFROMSNAPID`), which is the mirror of fallback 3 above:
 a claim can name the media object rather than the snap, and a Memory moved into My Eyes Only is
-exactly that case. Both are used, not one instead of the other — a Memory has several cached files
+exactly that case. The Memory's MemData identifiers are looked up the same way (`index_claim_uuids`), the
+mirror of rule 4, under the same rule: an id another Memory records too is not used. Both are used, not one instead of the other — a Memory has several cached files
 and only some of the claims name it by `ZSNAPID`. Every hit is still confirmed by the file
 decrypting, so the id match selects candidates rather than asserting the association.
 

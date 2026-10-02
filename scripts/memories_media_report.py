@@ -1429,6 +1429,27 @@ def index_cache_controller(app):
     return out
 
 
+def index_claim_uuids(app):
+    """Every UUID in any CACHE_FILE_CLAIM EXTERNAL_KEY: ``{UPPER(uuid): [(cache_key, context)]}``.
+
+    Unlike :func:`index_cache_controller` this does not care about the claim's shape: it is how a
+    Memory's MemData identifiers (:func:`decode_memdata`) find the claims that carry them, whatever
+    those claims look like. Both readings of the database, like every other read here.
+    """
+    out = {}
+    for db in cache_controller_paths(app):
+        claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
+        for c in claims:
+            ek, ck = c.get("EXTERNAL_KEY"), c.get("CACHE_KEY")
+            if not ek or not ck:
+                continue
+            for mo in _UUID_RE.finditer(str(ek)):
+                pair = (ck, c.get("MEDIA_CONTEXT_TYPE"))
+                if pair not in out.setdefault(mo.group(0).upper(), []):
+                    out[mo.group(0).upper()].append(pair)
+    return out
+
+
 def all_cache_keys(app):
     """Return the set of every CACHE_KEY present in cache_controller.db (lowercased).
 
@@ -1791,7 +1812,8 @@ def _add_posters(memories, outdir, published):
                 f"in {time.monotonic() - t0:.0f}s")
 
 
-def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None):
+def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None,
+                  claim_uuids=None):
     """Decrypt SCContent + caching-media for all memories; write files, fill m['media_files'].
 
     SCContent files are located two ways: by ``SHA256(url token)[:16]`` (CDN-downloaded media)
@@ -1822,6 +1844,16 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     # They go through the same path below, where decrypt_sccontent identifies plaintext before it
     # ever looks at a key, so exactly the plaintext caches are recovered and nothing else.
     unkeyed = [(sid, m) for sid, m in memories.items() if not (m["key"] and m["iv"])]
+    # The MemData identifiers each Memory records about itself, and which Memories record each one:
+    # an entry's id is shared by every snap of the entry, and an id several Memories share names
+    # none of them. Only read when some Memory has one (newer app versions).
+    memdata_owners = {}
+    for sid, m in memories.items():
+        for rec in m.get("memdata") or []:
+            memdata_owners.setdefault(rec["uuid"], set()).add(sid)
+    if memdata_owners and claim_uuids is None:
+        claim_uuids = index_claim_uuids(app)
+    claim_uuids = claim_uuids or {}
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
@@ -1862,6 +1894,17 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                          f"this Memory references (ZMEDIAID / ZDUPLICATEDFROMSNAPID) — and points "
                          f"at CACHE_KEY {ck}.")
                 targets.append((role, ck, basis))
+        # A claim can carry a MemData identifier this Memory records about itself (ZMEMDATAIDS /
+        # its entry's ZMEMDATAID) — a recorded reference, like the media object's id above.
+        for rec in m.get("memdata") or []:
+            if memdata_owners.get(rec["uuid"]) != {sid}:
+                continue
+            for ck, context in claim_uuids.get(rec["uuid"], []):
+                basis = (f"Located via cache_controller.db: a CACHE_FILE_CLAIM EXTERNAL_KEY carries "
+                         f"{rec['uuid']}, which this Memory records about itself in {rec['field']}"
+                         + (f" ({rec['slot']})" if rec["slot"] else "")
+                         + f", and points at CACHE_KEY {ck}.")
+                targets.append(("rendered" if context == 26 else "full", ck, basis))
 
         seen = set()
         for role, cache_key, addr_basis in targets:

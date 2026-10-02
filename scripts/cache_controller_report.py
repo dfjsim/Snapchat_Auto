@@ -51,7 +51,7 @@ from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
-    cache_controller_paths,
+    cache_controller_paths, decode_memdata,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -260,12 +260,17 @@ def load_memory_index(app):
     Plus ``snap_urls`` : {ZSNAPID: [CDN URL, …]} — the Memory's download URLs, so a cache file
     linked to a Memory can be found by searching that URL (only ~1 cache entry in 3 carries a
     ``CONTENT_RETRIEVAL_METADATA`` URL of its own).
+
+    And ``memdata_ids`` : {UPPER(uuid): {(ZSNAPID, user_hash, field), …}} — the MemData identifiers
+    a Memory records about itself (``ZGALLERYSNAP.ZMEMDATAIDS``, and its entry's
+    ``ZGALLERYENTRY.ZMEMDATAID``; see ``memories_media_report.decode_memdata``). An entry's id is
+    shared by every snap of that entry, so a caller links through one only when it names one snap.
     """
     if android_layout.is_app_dir(app):
         # the Android app keeps its Memories in memories.db, not in a Core Data store
         from scripts import memories_android_report
         return memories_android_report.memory_index(app)
-    snap_ids, url_keys, media_ids, snap_urls = {}, {}, {}, {}
+    snap_ids, url_keys, media_ids, snap_urls, memdata_ids = {}, {}, {}, {}, {}
     for p in find_profiles(app):
         # Both readings, through sqlite_open like every other evidence database: staged copies, so
         # nothing is ever opened (or given a -shm) in place, and a Memory row the -wal has since
@@ -274,9 +279,10 @@ def load_memory_index(app):
         try:
             views = sqlite_open.open_views(p["scdb"])
             rows, _markers = sqlite_open.read_table(views, "ZGALLERYSNAP")
+            entries, _markers = sqlite_open.read_table(views, "ZGALLERYENTRY")
         except (sqlite3.DatabaseError, OSError) as error:
             logger.debug(f"Could not read memory index from {p['scdb']}: {error}")
-            rows = []
+            rows, entries = [], []
         finally:
             if views is not None:
                 views.close()
@@ -296,8 +302,43 @@ def load_memory_index(app):
                 if tok:
                     ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
                     url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
+            for field, rec in _memdata_of(row, entries):
+                memdata_ids.setdefault(rec["uuid"], set()).add((sid, p["userHash"], field))
     return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
-            "snap_urls": snap_urls}
+            "snap_urls": snap_urls, "memdata_ids": memdata_ids}
+
+
+def _memdata_of(row, entries):
+    """``[(field, record)]`` — the MemData identifiers of one ZGALLERYSNAP row and of its entry."""
+    out = [("ZGALLERYSNAP.ZMEMDATAIDS" + (f" › {rec['slot']}" if rec["slot"] else ""), rec)
+           for rec in decode_memdata(row.get("ZMEMDATAIDS")) or []]
+    pk = row.get("ZENTRY")
+    for entry in entries:
+        if pk is not None and entry.get("Z_PK") == pk:
+            out += [("ZGALLERYENTRY.ZMEMDATAID", rec)
+                    for rec in decode_memdata(entry.get("ZMEMDATAID")) or []]
+            break
+    return out
+
+
+def _memdata_link(clist, memdata_ids):
+    """``(memory, basis)`` for the first claim whose EXTERNAL_KEY carries a MemData id that exactly
+    one Memory records about itself, else ``(None, None)``.
+
+    An identifier stored in the Memory's own row is a recorded reference, like rule 3's ZMEDIAID —
+    not a match by time or by content. An entry's id that several snaps share names none of them.
+    """
+    for c in clist:
+        for mo in _UUID_RE.finditer(c["external_key"] or ""):
+            owners = memdata_ids.get(mo.group(0).upper()) or set()
+            if len({sid for sid, _uh, _field in owners}) != 1:
+                continue
+            canonical, user_hash, field = sorted(owners)[0]
+            return ({"snap_id": canonical, "user_hash": user_hash},
+                    f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries {mo.group(0)}, which "
+                    f"Memory {canonical} records about itself in {field} — an identifier stored "
+                    f"in the Memory's own row, not a match by time or by content.")
+    return None, None
 
 
 def load_chat_links(report_dir):
@@ -814,6 +855,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     url_keys = mem_index["url_keys"]
     media_ids = mem_index["media_ids"]
     snap_urls = mem_index.get("snap_urls") or {}
+    memdata_ids = mem_index.get("memdata_ids") or {}
     # the id columns in the words the link's explanation uses (iOS: the Core Data columns)
     labels = mem_index.get("labels") or {"snap": "ZSNAPID", "media": "ZMEDIAID"}
     memory_pages = memory_pages or {}
@@ -910,6 +952,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     basis = (f"Fallback: EXTERNAL_KEY UUID {mo.group(0)} matches this Memory's "
                              f"{labels['media']} (Memory {canonical}).")
                     break
+        if not memory:                                         # 4. a MemData id the Memory records
+            memory, basis = _memdata_link(clist, memdata_ids)
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
