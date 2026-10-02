@@ -2186,6 +2186,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, URL, user…"
    title="Separate several terms with | to match any of them — that is what a cross-report link
 with more than one target fills in here." oninput="flt()">
+ {report_ui.search_all_link("../")}
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>

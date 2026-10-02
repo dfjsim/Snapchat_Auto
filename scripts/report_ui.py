@@ -429,12 +429,39 @@ function scConsumeHash(){
  setTimeout(function(){scGo(h);},80);}
 window.addEventListener('hashchange',scConsumeHash);
 window.addEventListener('pageshow',scConsumeHash);
+// The "All reports" link next to a report's search box: it carries what the box holds to the search
+// page, set at the moment of the click so the link stays a plain <a> with its named tab.
+function scSearchAll(a){
+ var q=document.getElementById('q'),base=a.getAttribute('data-base');
+ if(!base){base=a.getAttribute('href').split('#')[0];a.setAttribute('data-base',base);}
+ var v=q?q.value.trim():'';
+ a.setAttribute('href',base+(v?'#q='+encodeURIComponent(v):''));}
 """
 
 NAV_CSS = """
  .schl{background:#fff6cc !important;box-shadow:inset 3px 0 0 #e0a800}
  [id]{scroll-margin-top:120px}
+ a.srchall{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:600;
+   color:#2d2d71;background:#fff;border:1px solid #bcbcd0;border-radius:5px;padding:4px 9px;
+   text-decoration:none;white-space:nowrap}
+ a.srchall:hover{background:#e7e7f4}
 """
+
+#: The page that searches every report of a folder at once (scripts/global_search.py), written next to
+#: ``selection.js`` — one level above every report, so each reaches it as ``../search.html``.
+SEARCH_PAGE = "search.html"
+
+
+def search_all_link(prefix):
+    """The *All reports* link that sits beside a report's search box.
+
+    ``prefix`` leads from the page to the report folder (``../`` from a report, ``../../`` from a
+    conversation's page). The search box's text is added when the link is clicked (``scSearchAll``).
+    """
+    return (f'<a class="srchall" target="scauto_search" href="{prefix}{SEARCH_PAGE}" '
+            'onclick="scSearchAll(this)" title="Search every report in this folder at once for what '
+            'is in this search box — the same search, in every report">&#128270; All reports</a>')
+
 
 # --------------------------------------------------------------------------- row selection
 

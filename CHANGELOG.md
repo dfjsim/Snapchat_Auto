@@ -68,6 +68,12 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   among the file's leads. The cache_controller report writes them once, as `data/memory_leads.js`, and
   the Memories pages load it (`SCV.annotate` adds it to the index rows). Differences under ten seconds
   are shown to the tenth.
+- **Search all reports** — `scripts/global_search.py`, `search.html` beside the reports. One search over
+  every report and every conversation's messages at once, from the run's `index.html` or the *🔎 All
+  reports* link beside each report's search box. It is each report's own search (its rows' search text,
+  `|` for either) on its own `data/index.js`, so the counts agree; each hit opens its row, *Open all*
+  opens the report filtered to the same search. Written with every `index.html`, partial extracts
+  included.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**

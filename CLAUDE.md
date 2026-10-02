@@ -49,6 +49,10 @@ Memories / My Eyes Only.
   (`emoji_font.css`, Noto Color Emoji, linked by every page) that makes an emoji look the same on every
   workstation: every report font stack **ends** with `EMOJI_FONT_STACK`, and a symbol the reports draw
   as text belongs in `UI_SYMBOLS` — see [report_ui.md](docs/report_ui.md).
+- Search all reports: `scripts/global_search.py` writes `search.html` beside `selection.js` whenever a
+  folder's `index.html` is written — each report's own search (its `data/index.js` search text, `|` for
+  either) over every report and every conversation's messages at once; every report's search box links
+  to it (`report_ui.search_all_link`). See [report_ui.md](docs/report_ui.md#searching-every-report-at-once-searchhtml).
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,

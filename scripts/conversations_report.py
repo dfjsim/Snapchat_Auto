@@ -1539,7 +1539,7 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         + (report_ui.missing_data_banner("this page") if has_messages else "") +
         '<div class="stickytop"><div class="toolbar">'
         '<input type="search" id="q" placeholder="Search this conversation — text, sender, id, '
-        'hash…" oninput="flt()">'
+        'hash…" oninput="flt()">' + report_ui.search_all_link("../../") +
         '<label>Direction <select id="dir" onchange="flt()"><option value="">any</option>'
         '<option value="Sent">sent</option><option value="Received">received</option>'
         '</select></label>'
@@ -1814,7 +1814,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         + (report_ui.missing_data_banner("Conversations_report.html") if conversations else "") +
         '<div class="stickytop"><div class="toolbar">'
         '<input type="search" id="q" placeholder="Search conversation, participant, id, sender…" '
-        'oninput="flt()">'
+        'oninput="flt()">' + report_ui.search_all_link("../") +
         '<label>Type <select id="kind" onchange="flt()"><option value="">all</option>'
         '<option value="Private">private</option><option value="Group">group</option>'
         '<option value="Unknown">unknown</option></select></label>'

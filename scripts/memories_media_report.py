@@ -4453,6 +4453,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, AES key / IV, camera, user…" oninput="flt()">'
+           f'{report_ui.search_all_link("../")}'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
            f'<label title="Whether the index row can show a still for this Memory. A video with no '
            f'cached still gets one only if a poster frame could be extracted from it, so «no '

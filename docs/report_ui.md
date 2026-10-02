@@ -99,6 +99,30 @@ Measured on a synthetic 101 200-row cache_controller index (Chrome, `file://`):
 > saying so instead of an empty table. Data files are loaded with `<script src=…>` (not `fetch`),
 > because `file://` pages are not allowed to `fetch`/`XMLHttpRequest` their own siblings.
 
+## Searching every report at once (`search.html`)
+
+Each report's box searches only that report, so a value that only one report lists — a file name under
+`Library/Caches`, a CACHE_KEY, a hash — was found only by whoever tried the right page.
+`scripts/global_search.py` writes `search.html` into the report folder, beside `selection.js`, whenever
+the folder's `index.html` is written (a full run, a partial extract, a cloud refresh), and it searches
+every report the folder holds at once.
+
+It runs **the reports' own search on the reports' own data**: it loads each report's `data/index.js` —
+and every conversation page's `pages/data/<key>/index.js`, for the messages — with `<script src>`, on the
+first search only, and matches each row's search text as `VTABLE_JS` does (lower-case substring, `|` for
+either). So a hit is a row the report's own box finds and the count beside a report is the count its box
+gives. Hits are grouped by report (messages by conversation), labelled from a few cells per report
+(`global_search.SOURCES`), and show where in the row's search text the match was. Each opens its row in
+the report's named tab (`#<anchor>`); *Open all* opens the report filtered to the same search
+(`#find=`), every match expanded. A report whose data file did not load is said to be missing, never
+"no match". The legacy single-page reports keep no rows and are named as not searched.
+
+Every report's search box has an *🔎 All reports* link beside it (`report_ui.search_all_link`): a plain
+`<a target="scauto_search">` whose `#q=` fragment `scSearchAll` (in `NAV_JS`) fills from the box at the
+moment of the click, so Ctrl-click and the named tab behave as for every other link. The run's
+`index.html` has the same search as a form, which also works with script off (`?q=`). The page consumes
+its `#q=` fragment as `NAV_JS` does, so the same link clicked twice still searches.
+
 ## Cross-report navigation (`NAV_JS`)
 
 Every report — including the plain ones (Communications legacy, Memory detail sub-pages) — includes

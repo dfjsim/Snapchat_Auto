@@ -365,6 +365,13 @@ So both prune, and only ever inside the run's own output folder:
 removing them cannot touch the extracted copy behind them. Maps need no pruning: they are rendered after
 the filter, from the included Memories only.
 
+Two files written for the whole folder are written from what it holds, not copied from the full report.
+`search.html` (the search over every report, `scripts/global_search.py`) lists the reports and the
+conversation pages the extract has, and its rows are the extract's own `data/index.js` files, so it
+cannot find an unselected row. The cache_controller report's `data/memory_leads.js` (the leads the
+Memory pages show, `memory_leads.write_script`) is written from the included cache rows and names only
+the Memories the extract holds.
+
 ---
 
 ## Memory groups rendered in part

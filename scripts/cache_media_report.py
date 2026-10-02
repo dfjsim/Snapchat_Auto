@@ -1644,6 +1644,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 <div class="stickytop">
 <div class="toolbar">
  <input type="search" id="q" placeholder="Search path, filename, hash, URL, snap id…" oninput="flt()">
+ {report_ui.search_all_link("../")}
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>Location <select id="loc" onchange="flt()"><option value="">all</option>{loc_opts}</select></label>
  <label title="{_esc(UNRECOVERED_BASIS)}">Recovered

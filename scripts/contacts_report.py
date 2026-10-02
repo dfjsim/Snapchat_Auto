@@ -1008,7 +1008,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            + (report_ui.missing_data_banner("Contacts_report.html") if contacts else "") +
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search name, username, user id, '
-           f'conversation…" oninput="flt()">'
+           f'conversation…" oninput="flt()">{report_ui.search_all_link("../")}'
            f'<label>Conversation <select id="conv" onchange="flt()"><option value="">any</option>'
            f'<option value="y">has a conversation id</option>'
            f'<option value="n">no conversation id</option></select></label>'

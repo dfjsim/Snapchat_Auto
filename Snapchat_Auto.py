@@ -9,6 +9,7 @@ from scripts import app_version
 from scripts import selection_file
 from scripts import source_fingerprint
 from scripts import partial_report
+from scripts import global_search
 from scripts import cloud_refresh
 from scripts import hidpi
 import os
@@ -442,6 +443,24 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
                          f'<div class="d">{desc}</div></li>')
     if not items:
         return
+    # One search over every report of this folder (scripts/global_search.py), rewritten with the index
+    # so it always lists the reports the folder holds.
+    search = global_search.write_page(os.path.join(root_dir, reports_subdir), closure=closure,
+                                      prov=prov, platform=platform)
+    search_form = ""
+    if search:
+        href = f"{reports_subdir}/{global_search.PAGE}"
+        # A plain GET form, so the page works without script too (search.html reads ?q=); with script
+        # the search goes in the fragment, which reuses an open search tab instead of reloading it.
+        search_form = (
+            f'<form class="gsearch" action="{href}" method="get" target="scauto_search" '
+            f'onsubmit="return scSearchForm(this)">'
+            f'<input type="search" name="q" placeholder="Search every report at once &mdash; '
+            f'CACHE_KEY, snap id, hash, file name, URL, user id, message text&hellip;">'
+            f'<button type="submit">&#128270; Search all reports</button></form>'
+            f'<script>function scSearchForm(f){{var q=f.q.value.trim(),a=document.createElement("a");'
+            f'a.target="scauto_search";a.href=f.getAttribute("action")+(q?"#q="+encodeURIComponent(q):"");'
+            f'document.body.appendChild(a);a.click();a.remove();return false;}}</script>')
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # What the run read, and its hashes, on the face of the report rather than only in sources.json —
     # a partial report built later re-checks them and says whether they still match.
@@ -543,6 +562,10 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin-bottom:10px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
+ form.gsearch{{display:flex;gap:8px;padding:18px 26px 0;max-width:920px}}
+ form.gsearch input{{flex:1;font-size:14px;padding:8px 11px;border:1px solid #bcbcd0;border-radius:6px}}
+ form.gsearch button{{font-size:14px;padding:8px 14px;border:1px solid #2d2d71;border-radius:6px;
+   background:#2d2d71;color:#fff;font-weight:600;cursor:pointer;white-space:nowrap}}
  /* The sources block sits BELOW the report links and starts closed. It is provenance, not
     navigation: spelled out it ran to a screen and a half of hashes and pushed the links -- the
     reason anyone opens this page -- out of sight. */
@@ -566,6 +589,7 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
 </style></head><body>
 <header><h1>Snapchat Auto v{get_version()} &mdash; Report index{" (Android)" if platform == "android" else ""}</h1><div class="sub">Generated {generated}</div></header>
 {banner}{cloud_banner}{provenance}
+{search_form}
 <ul>{''.join(items)}</ul>
 {sources}
 </body></html>"""

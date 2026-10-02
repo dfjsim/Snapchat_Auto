@@ -199,6 +199,11 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   metadata, children and deletion tables, resolving each entry to its on-disk cache file(s), and
   cross-linking two-way to the Memories and Conversations reports. Run standalone with
   `python -m scripts.cache_controller_report <extraction_root_or_app_container> [output_dir]`.
+- **Search all reports** (`Reports/search.html`, from the run's `index.html` or the *🔎 All reports*
+  link beside every report's search box) — one search over every report and every conversation's
+  messages at once: a CACHE_KEY, a snap id, a hash, a file name, a URL or a few words of a message,
+  with each hit opening its row in its report. It is each report's own search on each report's own
+  data, so the counts agree (see [docs/report_ui.md](docs/report_ui.md#searching-every-report-at-once-searchhtml)).
 - **Compatibility fixes** for pandas 3.x / Python 3.14 and for newer Snapchat iOS schemas — see
   [docs/pandas3_python314_compat.md](docs/pandas3_python314_compat.md).
 - `uv` project setup (`pyproject.toml`) and a Nuitka build script.
