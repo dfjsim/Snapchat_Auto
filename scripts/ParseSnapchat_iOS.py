@@ -2061,6 +2061,11 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
             "cache_controller": cacheController[0] if cacheController else "",
             "contentmanager": contentmanager,
             "primary_docobjects": primaryDoc[0] if primaryDoc else "",
+            "pref_docobjects": next(iter(
+                glob.glob(snapchatFolder + f"/Documents/user_scoped/{user_scoped_id}/userPreferences/"
+                          "pref.docobjects")
+                or glob.glob(snapchatFolder + "/Documents/user_scoped/*/userPreferences/"
+                             "pref.docobjects")), ""),
             "user_plist": str(userPlist) if userPlist and os.path.exists(userPlist) else "",
             "client_encryption": client_enc[0] if client_enc else "",
             "group_plist": groupPlist,

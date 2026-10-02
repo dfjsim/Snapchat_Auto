@@ -70,6 +70,7 @@ ROLES = (
     ("cache_controller", "cache_controller.db", "the cached-file index", True),
     ("contentmanager", "contentManagerDb.db", "cached content metadata", True),
     ("primary_docobjects", "primary.docobjects", "contacts / friends", False),
+    ("pref_docobjects", "pref.docobjects", "the snap editor's session record", True),
     ("user_plist", "user.plist", "the account's own identifiers", False),
     ("client_encryption", "ClientEncryptionService.plist", "the story-cache AES key", False),
     ("group_plist", "group.snapchat.picaboo.plist", "friends / groups", False),

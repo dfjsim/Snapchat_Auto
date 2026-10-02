@@ -44,6 +44,7 @@ from scripts import partial_report
 from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
+from scripts.data import snap_session
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.data import device_fs
 from scripts.memories_media_report import (
@@ -92,7 +93,22 @@ def make_ms_formatter(tz):
 # shown as their raw number. Snapchat reuses these numbers across contexts, so keep this short.
 MCT_LABELS = {
     2: "Chat media", 3: "Chat media", 19: "Full media", 26: "Rendered low-res",
+    34: "Snap editor working copy",
 }
+
+#: Why a context is named, where the name rests on more than the number seen beside a key shape.
+MCT_BASIS = {
+    34: ("Named from the device's own record. The app's preference row "
+         "'SnapEditor-SnapSessionContext' (Documents/user_scoped/<hash>/userPreferences/"
+         "pref.docobjects) names the file(s) of the snap being edited by their CACHE_KEY, together "
+         "with a claim key '<UUID>~<position>' and this context — and the claims on those files are "
+         "exactly that. Where such a record survives for a file it is shown under the claims. The "
+         "label says what kind of claim this is; on its own it links the file to nothing."),
+}
+
+# A claim key the snap editor writes: a UUID and the item's position in the snap.
+_EDITOR_KEY = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                         r"[0-9A-Fa-f]{12}~\d+$")
 
 
 def classify_external_key(ek, mct):
@@ -122,13 +138,15 @@ def classify_external_key(ek, mct):
         return ("CDN media", None)
     if mct in (2, 3):
         return ("Chat media", None)
+    if mct == 34 and _EDITOR_KEY.match(ek):
+        return ("Snap editor", None)
     return ("Other", None)
 
 
 def _category_of(claims):
     """Pick the most meaningful category across a physical file's claims (Memory beats Other)."""
-    order = ["Memory media", "Memory overlay", "Memory thumbnail", "Chat media", "Video / Discover",
-             "Lens", "Preview", "App install", "CDN media", "Other", "Unknown"]
+    order = ["Memory media", "Memory overlay", "Memory thumbnail", "Chat media", "Snap editor",
+             "Video / Discover", "Lens", "Preview", "App install", "CDN media", "Other", "Unknown"]
     cats = {c["category"] for c in claims}
     for name in order:
         if name in cats:
@@ -1156,6 +1174,39 @@ def _esc(v):
     return html.escape(str(v)) if v not in (None, "") else ""
 
 
+SESSION_BASIS = (
+    "The app's own record of the snap its editor is working on: the row 'SnapEditor-SnapSessionContext' "
+    "of docprefitem in userPreferences/pref.docobjects. It names this file by its CACHE_KEY and gives "
+    "the claim key ('<UUID>~<position>') and context the file is claimed under, with when the record "
+    "was saved and when the snap was edited (Unix seconds and milliseconds, converted to this report's "
+    "timezone). Only the latest session is a live row; earlier versions survive in write-ahead-log "
+    "frames a later write superseded, and are carved from them — kept only when a claim in "
+    "cache_controller.db says the same (same CACHE_KEY, claim key and context). It says which editing "
+    "session the file belonged to; it does not say what became of the snap afterwards.")
+
+
+def _session_html(entry, src_root, manifest):
+    """The snap editor's session record(s) naming this file, when any survives."""
+    rows = []
+    for rec in entry.get("session") or []:
+        if rec["wal"] == sqlite_open.CARVED:
+            read = ('<span class="walbadge mainonly">carved</span>'
+                    + _info(sqlite_open.MARKER_HELP[sqlite_open.CARVED]))
+        else:
+            read = _wal_cell(rec["wal"])
+        rows.append(f"<tr><td>{_esc(rec.get('saved'))}</td><td>{_esc(rec.get('edited'))}</td>"
+                    f"<td class='mono'>{_esc(rec['claim_uuid'])}~{_esc(rec['position'])}</td>"
+                    f"<td>{_esc(_mct_label(rec['context']))}</td>"
+                    f"<td class='mono'>{_esc(device_path(rec['store'], src_root, manifest))}</td>"
+                    f"<td>{read}</td></tr>")
+    if not rows:
+        return ""
+    return ("<div class='sect'>Snap editor session record — pref.docobjects › docprefitem "
+            "'SnapEditor-SnapSessionContext'" + _info(SESSION_BASIS) + "</div>"
+            "<table class='sub'><tr><th>saved</th><th>snap edited</th><th>claim key</th>"
+            "<th>context</th><th>store</th><th>(read from)</th></tr>" + "".join(rows) + "</table>")
+
+
 # What the search box should match for a row read from only one of the two database views, so an
 # examiner can type "deleted since checkpoint" or "wal" and find them.
 _WAL_SEARCH = {
@@ -1509,7 +1560,8 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     rows = []
     for c in e["claims"]:
         rows.append(f"<tr><td class='mono'>{_esc(c['external_key'])}</td>"
-                    f"<td>{_esc(_mct_label(c['mct']))}</td><td class='mono'>{_esc(c['user_id'])}</td>"
+                    f"<td>{_esc(_mct_label(c['mct']))}{_info(MCT_BASIS.get(c['mct']))}</td>"
+                    f"<td class='mono'>{_esc(c['user_id'])}</td>"
                     f"<td>{_esc(c['category'])}</td><td>{_esc(c['created'])}</td>"
                     f"<td>{_esc(c['expires'])}</td><td>{_esc(c['deleted'])}</td>"
                     f"<td>{_wal_cell(c.get('wal'))}</td></tr>")
@@ -1520,6 +1572,9 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                      "<th>EXPIRATION_TIMESTAMP_MILLIS (expires)</th>"
                      "<th>DELETED_TIMESTAMP_MILLIS (deleted)</th><th>(read from)</th></tr>"
                      + "".join(rows) + "</table>")
+    session = _session_html(e, src_root, manifest)
+    if session:
+        parts.append(session)
 
     # metadata grid — real CACHE_FILE_METADATA column names with descriptions in parentheses
     m = e["meta"]
@@ -2158,6 +2213,17 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                     f"cache_controller.db — listed as \"{ORPHAN_CATEGORY}\"")
         all_entries.extend(orphans)
         all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
+
+    # The snap editor's session records, attached to the files they name (see snap_session).
+    claims_by_key = {}
+    for e in all_entries:
+        for c in e["claims"]:
+            claims_by_key.setdefault(e["cache_key"].lower(), []).append((c["external_key"], c["mct"]))
+    sessions = snap_session.read(app, claims_by_key)
+    for e in all_entries:
+        e["session"] = [dict(rec, saved=ms_fmt(rec["saved_unix"] * 1000),
+                             edited=ms_fmt(rec["edited_ms"]) if rec["edited_ms"] else "")
+                        for rec in sessions.get(e["cache_key"].lower(), [])]
 
     for e in all_entries:
         stamps, records = {}, {}

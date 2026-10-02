@@ -301,8 +301,37 @@ many have no key at all; a filter selects each group.
 `classify_external_key` buckets each claim from its `EXTERNAL_KEY` (and `MEDIA_CONTEXT_TYPE` as a
 tie-breaker): *Memory media / overlay / thumbnail* (`snap-*`/`g-media-`), *Chat media* (context
 2/3), *Lens*, *Preview*, *App install*, *Video / Discover* (`topvideo~`/`firstframe`/`video~`),
-*CDN media* (a bare `http(s)` URL), else *Other*. The row's category is the most meaningful across
-its claims (Memory beats Other).
+*CDN media* (a bare `http(s)` URL), *Snap editor* (context 34 with a `<UUID>~<position>` key — below),
+else *Other*. The row's category is the most meaningful across its claims (Memory beats Other).
+
+### Context 34 — the snap editor's working copy
+
+Claims with `MEDIA_CONTEXT_TYPE` 34 are keyed `<UUID>~<position>` and claim the files of a snap being
+edited — usually plaintext media written at capture, so the report plays them. The name rests on the
+device's own record, not on the number: `Documents/user_scoped/<hash>/userPreferences/pref.docobjects`
+(SQLite, `docprefitem(rowid, p BLOB, key STRING UNIQUE)`) keeps the editor's current snap under the key
+`SnapEditor-SnapSessionContext`. Its `p` cell is a TSAF container (root type `SESnapSessionContext`)
+whose `GPBData` key is followed by two little-endian 32-bit words, the second the length of a protobuf
+that follows:
+
+| field | value |
+|---|---|
+| `1` | when the record was saved — Unix seconds |
+| `2.2.4` (one per media item) | `.6` the item's position (1, 2, …), `.10` its **CACHE_KEY** |
+| `2.2.17.7` | when the snap was edited — Unix milliseconds |
+| `2.5.1`, `2.5.2` | the UUID and context of the claims on those files: `<UUID>~<position>`, 34 |
+
+Verified on a test device (iOS 18.3, app 13.4x) against `cache_controller.db` and the files. Only the
+latest session is a live row (an ended session is often emptied); earlier ones survive in `-wal` frames
+a later write superseded. `scripts/data/snap_session.py` reads both readings and carves those frames,
+keeping a carved record **only** when a claim corroborates it (same CACHE_KEY, claim key and context).
+A record found for a row's file is shown under its claims: saved, edited, claim key, context, store and
+how it was read.
+
+The record dates an editing session and ties it to the file; it does not say what became of the snap.
+A working copy saved to Memories is byte-identical to that Memory's media once decrypted (seen on a test
+device), but nothing recorded on that device connects the two — which is what the cloud retrieval's
+content proof and the unproven leads are for.
 
 ## Locating the bytes on disk
 

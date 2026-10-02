@@ -35,6 +35,8 @@ import re
 import struct
 import uuid
 
+from scripts.data import protobuf_wire
+
 # --------------------------------------------------------------------------- content_type
 
 # conversation_message.content_type -> (label, category). The category is what the reports need to
@@ -98,47 +100,11 @@ def content_type_category(value):
 
 # --------------------------------------------------------------------------- wire format
 
-class _Malformed(ValueError):
-    pass
-
-
-def _varint(data, pos):
-    value = shift = 0
-    while True:
-        if pos >= len(data):
-            raise _Malformed("varint runs off the end")
-        byte = data[pos]
-        pos += 1
-        value |= (byte & 0x7F) << shift
-        if not byte & 0x80:
-            return value, pos
-        shift += 7
-        if shift >= 70:
-            raise _Malformed("varint too long")
-
-
-def _fields(data):
-    """``[(field, wire type, value)]`` of one message; raises _Malformed."""
-    out, pos, end = [], 0, len(data)
-    while pos < end:
-        key, pos = _varint(data, pos)
-        field, wire = key >> 3, key & 7
-        if wire == 0:
-            value, pos = _varint(data, pos)
-        elif wire in (1, 5):
-            size = 8 if wire == 1 else 4
-            if pos + size > end:
-                raise _Malformed("fixed-size value runs off the end")
-            value, pos = data[pos:pos + size], pos + size
-        elif wire == 2:
-            length, pos = _varint(data, pos)
-            if pos + length > end:
-                raise _Malformed("length runs off the end")
-            value, pos = data[pos:pos + length], pos + length
-        else:
-            raise _Malformed(f"wire type {wire}")
-        out.append((field, wire, value))
-    return out
+# The reader is shared with every other schema-less decode in the project
+# (scripts/data/protobuf_wire.py); the private names are kept because this module uses them.
+_Malformed = protobuf_wire.Malformed
+_varint = protobuf_wire.varint
+_fields = protobuf_wire.fields
 
 
 class _Msg:

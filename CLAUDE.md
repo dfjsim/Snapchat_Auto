@@ -64,7 +64,10 @@ Memories / My Eyes Only.
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
   thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
-  `sniff.py`, the shared magic-byte identifier — identify content with `sniff.classify`, never by
+  `protobuf_wire.py`, the schema-less protobuf reader every decode shares, and `snap_session.py`, the
+snap editor's session record in `userPreferences/pref.docobjects` (which CACHE_KEY a context-34 claim's
+snap is held in; carved versions kept only when a claim corroborates them) —
+`sniff.py`, the shared magic-byte identifier — identify content with `sniff.classify`, never by
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
   encrypted" — and `media_meta.py`, which reads what a media file says about **itself**: EXIF/XMP,

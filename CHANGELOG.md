@@ -25,6 +25,13 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   (`cache_controller_report._memdata_link`, `memories_media_report.index_claim_uuids`): a recorded
   identifier, like a `ZMEDIAID`, used only when nothing stronger matched and only when exactly one
   Memory records it.
+- **Context-34 claims are the snap editor's working copy** — `scripts/data/snap_session.py`. They are
+  categorised *Snap editor*, and the app's own session record (`userPreferences/pref.docobjects`,
+  `SnapEditor-SnapSessionContext`), which names the file's CACHE_KEY with the claim key and context
+  and dates the editing, is shown under the claims — the live row, and earlier versions carved from
+  superseded `-wal` frames when a claim corroborates them. `pref.docobjects` joins the source
+  fingerprint. `scripts/data/protobuf_wire.py` is the protobuf reader `arroyo_content` already used,
+  now shared.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
