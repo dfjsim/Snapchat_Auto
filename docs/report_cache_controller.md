@@ -403,7 +403,8 @@ Implications for the report / examiner:
 See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory** by snap UUID in the
 `EXTERNAL_KEY` (primary), then `SHA-256(url token)[:16] == CACHE_KEY` (fallback), then `ZMEDIAID`
 (fallback), then a MemData identifier the Memory records about itself (`ZMEMDATAIDS` / `ZMEMDATAID`,
-fallback); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
+fallback), then byte-identity with a copy retrieved from Snapchat's servers (last; ☁ on the chip — see
+[cloud_download.md](cloud_download.md)); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
 and — so that every cache entry of a message links back, not only the file the chat report showed —
 by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
 

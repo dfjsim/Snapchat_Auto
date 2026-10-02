@@ -66,6 +66,11 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   with device media, and the authority is stated beside it, on `index.html` and in partial extracts.
   Method after DFIR-HBG's Snapchat_DownloadMemories_iOS (overlay retrieval there by John Hyla); that
   repository has no licence, so none of its code is used.
+- **Proven by content** — a cached file byte-identical to a Memory's copy retrieved from the servers
+  (decrypted, or as received) links to that Memory in the cache_controller and Library/Caches reports,
+  marked ☁ and showing the retrieval and its authority. It is how a file no identifier connects to its
+  Memory — the snap editor's working copy of a snap later saved to Memories — is proven to be its media.
+  Every recorded identifier still wins over it.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL

@@ -62,7 +62,7 @@ from scripts.memories_media_report import (
 )
 from scripts.cache_controller_report import (
     find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
-    load_memory_pages, load_memory_packs, POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
+    load_memory_pages, load_memory_packs, load_memory_content, CONTENT_BASIS, POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
 )
 
 try:
@@ -880,7 +880,7 @@ def _pack_keys(entry, packs):
 
 
 def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, memory_pages,
-              chat_by_key, chat_by_message, packs=None):
+              chat_by_key, chat_by_message, packs=None, content=None):
     """Attach every exact link this file supports. Each records the method that produced it.
 
     Priority: the claim a UUID in the filename names, then the conversation/message/part triple,
@@ -983,6 +983,22 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
                               f"media token \"{token}\" (first 16 bytes) is {digest}, which equals "
                               f"the cache key of a Memory's {field}."),
                 })
+
+    # 5. byte-identical to media retrieved from Snapchat's servers (cloud_memories.write_manifests)
+    if not any(link["kind"] == "memory" for link in links):
+        for digest in (entry.get("sha256"), entry.get("raw_sha256")):
+            for rec in ((content or {}).get(digest) or [])[:1] if digest else []:
+                links.append({
+                    "kind": "memory", "snap_id": rec["snap_id"],
+                    "page": memory_pages.get(rec["snap_id"]),
+                    "basis": CONTENT_BASIS.format(
+                        sha=digest, sid=rec["snap_id"], role=rec.get("role", "media"),
+                        when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
+                        what=" as received, before decryption" if rec.get("what") == "encrypted"
+                        else ", decrypted with that Memory's own key"),
+                })
+            if any(link["kind"] == "memory" for link in links):
+                break
     return links
 
 
@@ -1820,11 +1836,12 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     ldir = links_dir or rdir
     memory_pages = load_memory_pages(ldir)
     memory_packs = load_memory_packs(ldir)
+    memory_content = (load_memory_content(ldir) or {}).get("by_sha256") or {}
     chat_by_key, chat_by_message = load_chat_links(ldir)
     for entry in entries:
         entry["links"] = attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size,
                                    mem_index, memory_pages, chat_by_key, chat_by_message,
-                                   packs=memory_packs)
+                                   packs=memory_packs, content=memory_content)
 
     # The closure's view. Rows keep their build order, which `render` preserves: the sort below
     # happens after publishing today, and poster extraction runs under a budget, so re-ordering the

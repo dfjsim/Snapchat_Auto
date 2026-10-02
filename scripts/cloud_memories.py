@@ -270,6 +270,7 @@ class CloudRequest:
     control: object = None
     on_event: object = None
     runner: object = None                                   # callable(run) -> Summary (a GUI)
+    fetcher: object = None                                  # tests replace the network here
 
     def problems(self):
         out = list(self.authority.problems()) + self.pace.problems()
@@ -414,7 +415,7 @@ def cloud_phase(memories, run_folder, request, decrypt_sccontent):
     if not jobs:
         return None
     policy = cd.HostPolicy(cd.DEFAULT_HOST_SUFFIXES + tuple(request.allow_hosts))
-    fetcher = cd.UrllibFetcher(policy, cd.default_user_agent())
+    fetcher = request.fetcher or cd.UrllibFetcher(policy, cd.default_user_agent())
     control = request.control or cd.Control(request.pace)
     engine = cd.Engine(cd.Store(run_folder), fetcher, control, request.authority,
                        on_event=request.on_event or _log_event)
@@ -592,10 +593,23 @@ def write_manifests(memories, outdir, identical=None):
                       fh, indent=1)
     elif os.path.exists(path):
         os.remove(path)
+    # by_sha256 lets a report that hashes its own files (Library/Caches) find them without a cache key
+    by_sha256 = {}
+    for sid, m in memories.items():
+        for f in m.get("cloud_files") or []:
+            common = {"snap_id": sid, "role": f.get("role"), "retrieved_utc": f.get("retrieved_utc"),
+                      "session": f.get("session"),
+                      "authority_note": (f.get("authority") or {}).get("note", "")}
+            if f.get("hashes") and f["hashes"][0][2]:
+                by_sha256.setdefault(f["hashes"][0][2], []).append(dict(common, what="decrypted"))
+            enc = (f.get("encrypted") or {}).get("sha256")
+            if enc:
+                by_sha256.setdefault(enc, []).append(dict(common, what="encrypted"))
     path = os.path.join(outdir, "media_by_content.json")
-    if identical:
+    if identical or by_sha256:
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump({"version": 1, "by_cache_key": identical}, fh, indent=1)
+            json.dump({"version": 1, "by_cache_key": identical or {}, "by_sha256": by_sha256}, fh,
+                      indent=1)
     elif os.path.exists(path):
         os.remove(path)
 

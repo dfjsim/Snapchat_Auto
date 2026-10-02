@@ -419,6 +419,26 @@ def load_memory_media(report_dir):
     return {}
 
 
+def load_memory_content(report_dir):
+    """The Memories report's ``media_by_content.json``: the cache files on the device proven
+    byte-identical to media retrieved from Snapchat's servers. ``{}`` when there is none."""
+    cand = os.path.join(report_dir or "", "Memories", "media_by_content.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as error:
+            logger.debug(f"Could not read content manifest {cand}: {error}")
+    return {}
+
+
+CONTENT_BASIS = (
+    "Proven by content: this file is byte-identical (SHA-256 {sha}) to the copy of Memory {sid}'s "
+    "{role} retrieved from Snapchat's servers on {when} (UTC){what}, at the examiner's request under: "
+    "{note}. The server copy is not device evidence; it is the reference that identifies this file, "
+    "which no identifier on the device connects to the Memory.")
+
+
 def load_memory_pages(report_dir):
     """Load the Memories report's snap_id -> detail-sub-page manifest, if present.
 
@@ -859,7 +879,7 @@ def _chat_links_for(clist, cache_key, by_key, by_message):
 
 
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
-                  chat_by_message=None, workdir=None):
+                  chat_by_message=None, workdir=None, memory_content=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows, wal_info). Each entry aggregates its claims, metadata,
@@ -972,6 +992,16 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     break
         if not memory:                                         # 4. a MemData id the Memory records
             memory, basis = _memdata_link(clist, memdata_ids)
+        proofs = (memory_content or {}).get(key.lower()) or []
+        if not memory and proofs:                              # 5. byte-identical to a server copy
+            rec = proofs[0]
+            canonical, user_hash = snap_ids.get(str(rec["snap_id"]).upper(), (rec["snap_id"], ""))
+            memory = {"snap_id": canonical, "user_hash": user_hash, "by_content": True}
+            basis = CONTENT_BASIS.format(
+                sha=rec.get("sha256", ""), sid=canonical, role=rec.get("role", "media"),
+                when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
+                what=" as received, before decryption" if rec.get("what") == "encrypted" else
+                     ", decrypted with that Memory's own key")
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
@@ -1014,6 +1044,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                         "scope_by_path": scope_by_path, "cross_scope": cross_scope},
             "memory": memory,
             "memory_basis": basis,
+            "content_proof": proofs,
             "chats": chats,
             "tombstones": tomb_by_key.get(key, []),
             "created_sort": created_sort,
@@ -1344,7 +1375,8 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
             f'<a class="chip mem" target="scauto_memories" '
             f'title="open this Memory\'s row in the Memories index" '
             f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
-            f'🧠 Memory {_esc(sid[:8])}…</a>',
+            f'🧠 Memory {_esc(sid[:8])}…'
+            + (' ☁' if entry["memory"].get("by_content") else '') + '</a>',
             [("mem", f"mem-{sid}")], closure=closure, brief=compact)
             + why(entry.get("memory_basis")))
         if page:
@@ -1575,6 +1607,17 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     session = _session_html(e, src_root, manifest)
     if session:
         parts.append(session)
+    if e.get("content_proof"):
+        rows = "".join(
+            f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
+            f"<td>{'as received' if r.get('what') == 'encrypted' else 'decrypted'}</td>"
+            f"<td>{_esc(r.get('retrieved_utc'))}</td><td>{_esc(r.get('authority_note'))}</td></tr>"
+            for r in e["content_proof"])
+        parts.append("<div class='sect'>☁ Identical to media retrieved from Snapchat&#39;s servers"
+                     + _info(CONTENT_BASIS.format(sha="…", sid="…", role="media", when="…", what="",
+                                                  note="the authority recorded")) + "</div>"
+                     "<table class='sub'><tr><th>Memory</th><th>role</th><th>compared</th>"
+                     "<th>retrieved (UTC)</th><th>legal authority</th></tr>" + rows + "</table>")
 
     # metadata grid — real CACHE_FILE_METADATA column names with descriptions in parentheses
     m = e["meta"]
@@ -2188,6 +2231,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     chat_links, chat_by_message = load_chat_links(ldir)
     memory_pages = load_memory_pages(ldir)
     memory_media = load_memory_media(ldir)
+    memory_content = (load_memory_content(ldir) or {}).get("by_cache_key") or {}
     cache_media = load_cache_media(ldir)
     # the shared, examiner-owned selection file every report of this run loads
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
@@ -2199,7 +2243,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     for db in dbs:
         entries, virt, wal_info = build_entries(db, app, scfull, scparts, mem_index, chat_links,
                                                 ms_fmt, memory_pages, chat_by_message,
-                                                workdir=outdir)
+                                                workdir=outdir, memory_content=memory_content)
         all_entries.extend(entries)
         virtual.extend(virt)
         wal_infos.append(wal_info)

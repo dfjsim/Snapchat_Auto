@@ -126,6 +126,12 @@ Tried in priority order; the first that matches wins, and the icon records which
    of them. Like rule 3, a recorded identifier — never a time or content match. The key shapes this
    applies to (e.g. `<UUID>~1`) name no Memory by themselves, so they stay out of the shape list
    below.
+5. **Proven by content (last).** The file is byte-identical (SHA-256) to a Memory's media retrieved
+   from Snapchat's servers ([cloud_download.md](cloud_download.md)) — decrypted with the Memory's key, or
+   as received. `Memories/media_by_content.json` carries the matches (`by_cache_key` for this report,
+   `by_sha256` for the Library/Caches one); the chip gains ☁ and the row's detail lists the retrieval it
+   rests on and the authority it was made under. The only link here that no identifier on the device
+   supports, so any of rules 1-4 wins over it.
 
 ### Which `EXTERNAL_KEY` shapes name a Memory
 
