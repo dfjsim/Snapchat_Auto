@@ -32,24 +32,6 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   superseded `-wal` frames when a claim corroborates them. `pref.docobjects` joins the source
   fingerprint. `scripts/data/protobuf_wire.py` is the protobuf reader `arroyo_content` already used,
   now shared.
-
-### Changed
-- **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
-  `scripts/data/keychain.py` (GPL-3.0-or-later) is replaced by `scripts/data/ufed_keychain.py`, written
-  from [docs/ufed_keychain_format.md](docs/ufed_keychain_format.md); on every UFED keychain in the test
-  corpus it yields the same items and the same keychain status. `scripts/data/parse3.py` (GPL-2.0) is
-  replaced by `protobuf_wire.strings`: the reports are unchanged on the corpus; the legacy
-  Communications report's concatenated value for a media message can differ — a stray control
-  character is gone, and a printable CDN token the old parser took for a nested message is now listed.
-  `requests`, `urllib3` and `pyasn1` are no longer dependencies.
-- **The licences travel with the application.** `THIRD_PARTY_NOTICES.md` names every file in the
-  repository that is not this project's own (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell with
-  its SQLite and OpenSSL, Bootstrap, the emoji font) and what the build carries (FreeSimpleGUI,
-  opencv's FFmpeg, CPython and Tcl/Tk, the Nuitka runtime, the update helper); `THIRD_PARTY_LICENSES.txt`
-  holds the licence of every Python package the build carries, generated from `uv.lock` by
-  `build_tools/collect_licenses.py`. The EXE and the MSI now ship both, and LICENSE, which neither
-  shipped before. The README no longer says LICENSE is unmodified.
-
 - **Retrieving Memories media from Snapchat's servers** — `scripts/cloud_download.py`,
   `scripts/cloud_memories.py`, `scripts/cloud_refresh.py`; [docs/cloud_download.md](docs/cloud_download.md).
   Off unless asked. It will not start until the examiner confirms holding the legal authority and types
@@ -81,6 +63,23 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   creation or capture time falls within ten minutes of the file's claim or filesystem times — ranked,
   with every difference and how many Memories fell in the window, never as a link. Its *Copy snap IDs*
   feeds the Cloud download, which proves or rules the lead out.
+
+### Changed
+- **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
+  `scripts/data/keychain.py` (GPL-3.0-or-later) is replaced by `scripts/data/ufed_keychain.py`, written
+  from [docs/ufed_keychain_format.md](docs/ufed_keychain_format.md); on every UFED keychain in the test
+  corpus it yields the same items and the same keychain status. `scripts/data/parse3.py` (GPL-2.0) is
+  replaced by `protobuf_wire.strings`: the reports are unchanged on the corpus; the legacy
+  Communications report's concatenated value for a media message can differ — a stray control
+  character is gone, and a printable CDN token the old parser took for a nested message is now listed.
+  `requests`, `urllib3` and `pyasn1` are no longer dependencies.
+- **The licences travel with the application.** `THIRD_PARTY_NOTICES.md` names every file in the
+  repository that is not this project's own (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell with
+  its SQLite and OpenSSL, Bootstrap, the emoji font) and what the build carries (FreeSimpleGUI,
+  opencv's FFmpeg, CPython and Tcl/Tk, the Nuitka runtime, the update helper); `THIRD_PARTY_LICENSES.txt`
+  holds the licence of every Python package the build carries, generated from `uv.lock` by
+  `build_tools/collect_licenses.py`. The EXE and the MSI now ship both, and LICENSE, which neither
+  shipped before. The README no longer says LICENSE is unmodified.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
