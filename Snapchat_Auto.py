@@ -9,6 +9,7 @@ from scripts import app_version
 from scripts import selection_file
 from scripts import source_fingerprint
 from scripts import partial_report
+from scripts import cloud_refresh
 from scripts import hidpi
 import os
 import json
@@ -506,11 +507,30 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
                '<span class="ab none">(none provided)</span>')
         return f'<div class="arow"><span class="an">{label}</span>{val}</div>'
 
+    cloud_row, cloud_banner = "", ""
+    try:
+        with open(os.path.join(root_dir, reports_subdir, "Memories", "cloud_media.json"),
+                  encoding="utf-8") as fh:
+            cloud = (json.load(fh) or {}).get("provenance") or {}
+    except (OSError, ValueError):
+        cloud = {}
+    if cloud:
+        notes = "; ".join(_esc(x.get("note") or "") for x in cloud.get("sessions") or [])
+        cloud_row = (f'<div class="arow"><span class="an">Retrieved from Snapchat&#39;s servers</span>'
+                     f'<span class="ab">{cloud.get("files", 0)} file(s) for '
+                     f'{cloud.get("memories", 0)} Memory/Memories, {_esc(cloud.get("first_utc"))} '
+                     f'&hellip; {_esc(cloud.get("last_utc"))} UTC, under: {notes}. Not device '
+                     f'evidence: every request is recorded in CloudDownloads/cloud_manifest.jsonl.'
+                     f'</span></div>')
+        cloud_banner = (f'<div style="background:#e3f1fb;border:1px dashed #5b9bc8;color:#0d4a75;'
+                        f'padding:10px 26px;font-size:13px">&#9729; These reports include media '
+                        f'retrieved from Snapchat&#39;s servers at the examiner&#39;s request &mdash; '
+                        f'not device evidence &mdash; under: {notes}</div>')
     sources = (f'<details class="sources"><summary class="stitle">Sources &mdash; what this run read, '
                f'and its hashes</summary><div class="sbody">'
                f'{_src_row("Extraction", zip_path)}'
                f'{_src_row("Keychain / keystore", keychain_path)}'
-               f'{artifact_rows}</div></details>')
+               f'{cloud_row}{artifact_rows}</div></details>')
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     provenance = (partial_report.provenance_html(closure, prov, open_by_default=True)
                   if closure is not None else "")
@@ -545,7 +565,7 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
 {partial_css}
 </style></head><body>
 <header><h1>Snapchat Auto v{get_version()} &mdash; Report index{" (Android)" if platform == "android" else ""}</h1><div class="sub">Generated {generated}</div></header>
-{banner}{provenance}
+{banner}{cloud_banner}{provenance}
 <ul>{''.join(items)}</ul>
 {sources}
 </body></html>"""
@@ -566,7 +586,7 @@ def _map_timezone(tzval):
 
 def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
         tile_server="", run_name=None, pause=False, hash_zip=False, partial=None,
-        legacy_reports=False):
+        legacy_reports=False, cloud=None):
     """Do one extraction + report run. Shared by the GUI and the command line.
 
     Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
@@ -577,12 +597,18 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     ``pause`` waits for a keypress at the end — the GUI wants that so the console does not vanish;
     a scripted run must not, or it hangs forever with nobody there to press a key.
 
+    ``cloud`` (a :class:`cloud_memories.CloudRequest`) retrieves Memories media from Snapchat's
+    servers during the run, under the legal authority it records — never together with ``partial``,
+    and iOS only. See docs/cloud_download.md.
+
     ``partial`` (a :class:`partial_report.Request`) makes this a **partial** run: the same pipeline,
     rendering only the rows the examiner's selection names plus the related items they asked for, into
     ``Reports_partial_<stamp>/`` — never over the reports the selection was made in. The extraction
     itself is unchanged, and ``ExtractedData/`` from the full run is reused as it always is, so a
     partial run into the same run folder skips unzipping entirely.
     """
+    if cloud is not None and (partial is not None or os_mode != "ios"):
+        raise LookupError("a retrieval from Snapchat's servers is part of a full iOS run only")
     started = os.getcwd()
     # The keychain read is cached for the length of a run (the legacy and current Memories
     # reports both ask for it). Drop it here so a second run in the same process — the GUI stays
@@ -619,12 +645,19 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                     partial.links_dir = os.path.abspath("Reports")
                 logger.info(f"Partial report: {os.path.abspath(reports_subdir)}")
                 partial_report.check_links_dir(partial.links_dir)
+            if partial is None:
+                # how this run was made, so a later retrieval can refresh it the same way
+                cloud_refresh.write_settings(
+                    run_folder, os="ios", padding=padding, tz=tz, tile_server=tile_server,
+                    legacy_reports=legacy_reports,
+                    zip=os.path.abspath(zip_path) if zip_path else "",
+                    keychain=os.path.abspath(keychain) if keychain else "")
             ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
                                    padding=padding, tz=tz, report_dir="./" + reports_subdir,
                                    tile_server=tile_server,
                                    zip_path=os.path.abspath(zip_path) if zip_path else "",
                                    hash_zip=hash_zip, partial=partial,
-                                   legacy_reports=legacy_reports)
+                                   legacy_reports=legacy_reports, cloud=cloud)
             if partial is not None and partial.dry_run:
                 logger.info("--dry-run: no report was written")
                 return run_folder
@@ -678,6 +711,58 @@ def diag_keychain(path):
     logger.info(f"Format: {res['format'] or 'not recognized'} - {res['items']} item(s), "
                 f"{res['snap_items']} in the Snapchat access group")
     return 0 if res["status"] == "ok" else 1
+
+
+def run_cloud_download(args):
+    """`--cloud-download <run folder> …`: retrieve from Snapchat's servers for a run folder that
+    already exists, and refresh its reports — targeted (Memories, Library/Caches, cache_controller)
+    when this build wrote them, else the whole pipeline again. Nothing is unzipped again, and the
+    examiner's saved selections are kept. Same options as a run's --cloud ones."""
+    if len(args) < 2 or not os.path.isdir(args[1]):
+        print("--cloud-download requires a run folder: Snapchat_Auto.exe --cloud-download <run "
+              "folder> --cloud missing --attest yes --authority \"…\"")
+        return 2
+    run_folder = os.path.abspath(args[1])
+    values, error = _parse_options(args[2:], _CLOUD_OPTIONS)
+    if error:
+        print(f"Snapchat Auto: {error}")
+        return 2
+    settings = cloud_refresh.load_settings(run_folder)
+    if settings and settings.get("os", "ios") != "ios":
+        print("Snapchat Auto: a retrieval from Snapchat's servers is iOS only.")
+        return 2
+    if not values.get("cloud") and not values.get("cloud-selection") and not values.get("cloud-snaps"):
+        print("Snapchat Auto: say what to retrieve with --cloud missing,incomplete (or "
+              "--cloud-selection / --cloud-snaps). Nothing was contacted.")
+        return 2
+    request, error = _cloud_request(values, "post-run", settings.get("tz") or "local")
+    if error:
+        print(f"Snapchat Auto: {error}")
+        return 2
+    add_log_file(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — retrieval from Snapchat's servers for {run_folder}")
+    keychain = values.get("keychain") or settings.get("keychain") or ""
+    mode, why = cloud_refresh.refresh_mode(settings, (values.get("refresh") or "targeted").lower())
+    logger.info(f"Refresh: {mode} ({why})")
+    try:
+        if mode == "targeted":
+            cloud_refresh.targeted(run_folder, request, settings, keychain=keychain)
+            write_index(run_folder, "Reports", zip_path=settings.get("zip"), keychain_path=keychain)
+        else:
+            zip_path = settings.get("zip") or ""
+            if not os.path.isdir(os.path.join(run_folder, "ExtractedData")) or not zip_path:
+                print("Snapchat Auto: this run folder cannot be re-rendered: it records no extraction "
+                      "ZIP. Run it again with this version first (the extraction is reused).")
+                return 2
+            run(zip_path=zip_path, keychain=keychain, workdir=os.path.dirname(run_folder),
+                run_name=os.path.basename(run_folder), padding=settings.get("padding") or "both",
+                tz=settings.get("tz") or "local", tile_server=settings.get("tile_server") or "",
+                legacy_reports=bool(settings.get("legacy_reports")), cloud=request)
+    except Exception as error:                                     # noqa: BLE001
+        logger.error(f"Retrieval failed: {error}")
+        return 1
+    logger.info(f"Done: {run_folder}")
+    return 0
 
 
 def run_trace_ids(args):
@@ -794,6 +879,27 @@ def print_usage():
           "  --make-selection <out.json> --items <items.json> [--relations <spec>] [--note <text>]\n"
           "                          Build a selection from identifiers, without importing anything:\n"
           "                          items.json is a list of {\"kind\": ..., <identifiers>} objects.\n\n"
+          "Retrieve Memories media from Snapchat's servers (off unless asked; iOS full runs and\n"
+          "--cloud-download only). It requests only the addresses the device recorded for each\n"
+          "Memory, decrypts with the Memory's own key, keeps what comes back in CloudDownloads/ apart\n"
+          "from the evidence and records every request. See docs/cloud_download.md:\n"
+          "  --cloud <scopes>        missing, incomplete, selection, snaps (comma separated).\n"
+          "  --attest yes            You hold the legal authority to retrieve this data from\n"
+          "                          Snapchat's servers. Required.\n"
+          "  --authority <text>      What that authority is (warrant and number, consent and who\n"
+          "                          gave it, ...). Required; stated wherever the media is shown.\n"
+          "  --cloud-selection <file>   The Memories in a saved selection file.\n"
+          "  --cloud-snaps <ids|@file>  Snap ids, comma/space/line separated.\n"
+          "  --cloud-dates <rules|@file>  '<timestamp[,timestamp...]|*>|<from>|<to>|include' rules,\n"
+          "                          ';' separated, dates in the run's timezone (YYYY-MM-DD[ HH:MM]),\n"
+          "                          either end may be empty. A Memory is retrieved when an include\n"
+          "                          rule matches (or there is none) and no exclude rule does.\n"
+          "                          Timestamps: ZCAPTURETIMEUTC, ZCREATETIMEUTC, ZGALLERYENTRY.\n"
+          "                          ZCREATETIMEUTC, ..., MEMDATA, or * for every one.\n"
+          "  --cloud-delay <s> --cloud-jitter <s> --cloud-max-per-min <n> --cloud-max-failures <n>\n"
+          "  --cloud-timeout <s>     Pace (defaults 4, 2, 10, 5, 60).\n"
+          "  --cloud-overlays yes|no --cloud-redownload yes|no --cloud-allow-host <host>\n"
+          "  --refresh targeted|full (--cloud-download only) Which reports to rebuild after.\n\n"
           "Display scaling (Windows). Add these to any of the above, or use them alone with the\n"
           "GUI. The first two are also read from the environment (SNAPCHAT_AUTO_DPI_AWARENESS,\n"
           "SNAPCHAT_AUTO_DPI_SCALE) and from \"dpi_awareness\" / \"dpi_scale\" in\n"
@@ -814,6 +920,9 @@ def print_usage():
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
           "                          recovered, 1 otherwise.\n"
+          "  --cloud-download <run folder> [options]\n"
+          "                          Retrieve Memories media from Snapchat's servers for a run that\n"
+          "                          already exists, and refresh its reports (see below).\n"
           "  --trace-ids <run folder> <id> [<id> ...]\n"
           "                          Search every file the run extracted for each identifier (a\n"
           "                          snap id, a CACHE_KEY, a claim key, ... or @file, one per line)\n"
@@ -838,7 +947,96 @@ _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz"
                 # expand the selection and write it back out for checking, instead of building
                 "expand-selection": True,
                 # the two superseded reports, off unless asked for on either path
-                "legacy-reports": True}
+                "legacy-reports": True,
+                # retrieval from Snapchat's servers (docs/cloud_download.md) — needs the next two
+                **{name: True for name in ("cloud", "authority", "attest", "cloud-selection",
+                                           "cloud-snaps", "cloud-dates", "cloud-delay",
+                                           "cloud-jitter", "cloud-max-per-min",
+                                           "cloud-max-failures", "cloud-timeout",
+                                           "cloud-overlays", "cloud-redownload",
+                                           "cloud-allow-host")}}
+
+# `--cloud-download <run folder>`: the same retrieval options, for a run folder that already exists.
+_CLOUD_OPTIONS = {name: True for name in ("keychain", "refresh", "cloud", "authority", "attest",
+                                          "cloud-selection", "cloud-snaps", "cloud-dates",
+                                          "cloud-delay", "cloud-jitter", "cloud-max-per-min",
+                                          "cloud-max-failures", "cloud-timeout", "cloud-overlays",
+                                          "cloud-redownload", "cloud-allow-host")}
+
+
+def _cloud_request(values, entry_point, tz="local"):
+    """Build the :class:`cloud_memories.CloudRequest` both front ends hand to a run.
+
+    Returns ``(request, error)``. Every refusal happens here, before anything is contacted: no
+    attestation or no note of the legal authority, a scope that names nothing, a date rule that does
+    not read, a pace that makes no sense.
+    """
+    from scripts import cloud_download, cloud_memories
+    scopes = {x.strip().lower() for x in (values.get("cloud") or "").split(",") if x.strip()}
+    unknown = scopes - set(cloud_memories.SCOPES)
+    if unknown:
+        return None, (f"--cloud takes {', '.join(cloud_memories.SCOPES)} (comma separated), not "
+                      f"{', '.join(sorted(unknown))}")
+    authority = cloud_download.Authority(
+        (values.get("authority") or "").strip(), _yes(values.get("attest")),
+        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    pace = cloud_download.Pace()
+    try:
+        for option, name, cast in (("cloud-delay", "delay_s", float),
+                                   ("cloud-jitter", "jitter_s", float),
+                                   ("cloud-max-per-min", "max_per_min", int),
+                                   ("cloud-max-failures", "max_failures", int),
+                                   ("cloud-timeout", "timeout_s", float)):
+            if values.get(option) not in (None, ""):
+                setattr(pace, name, cast(values[option]))
+    except ValueError as error:
+        return None, f"a --cloud-* pace option is not a number ({error})"
+    request = cloud_memories.CloudRequest(
+        authority, scopes=scopes, pace=pace, entry_point=entry_point, tz=tz,
+        overlays=not str(values.get("cloud-overlays") or "yes").lower().startswith("n"),
+        redownload=_yes(values.get("cloud-redownload")),
+        allow_hosts=tuple(h.strip() for h in (values.get("cloud-allow-host") or "").split(",")
+                          if h.strip()))
+    if values.get("cloud-selection"):
+        path = values["cloud-selection"]
+        try:
+            request.selection_ids = cloud_memories.snap_ids_from_selection(path)
+        except Exception as error:                              # noqa: BLE001
+            return None, f"--cloud-selection could not be read: {error}"
+        request.selection_path = os.path.abspath(path)
+        request.scopes.add("selection")
+    if values.get("cloud-snaps"):
+        text = values["cloud-snaps"]
+        if text.startswith("@"):
+            try:
+                with open(text[1:], encoding="utf-8-sig") as fh:
+                    text = fh.read()
+            except OSError as error:
+                return None, f"--cloud-snaps: {error}"
+        ids, rejected = cloud_memories.snap_ids_from_text(text)
+        if rejected:
+            return None, f"--cloud-snaps: not a snap id: {', '.join(rejected[:5])}"
+        request.snap_ids = set(ids)
+        request.scopes.add("snaps")
+    spec = values.get("cloud-dates") or ""
+    if spec.startswith("@"):
+        try:
+            with open(spec[1:], encoding="utf-8-sig") as fh:
+                spec = ";".join(line.strip() for line in fh if line.strip()
+                                and not line.lstrip().startswith("#"))
+        except OSError as error:
+            return None, f"--cloud-dates: {error}"
+    if spec:
+        try:
+            request.date_rules = cloud_memories.rules_from_spec(spec, tz)
+        except ValueError as error:
+            return None, f"--cloud-dates: {error}"
+        request.date_spec = spec
+    problems = request.problems()
+    if problems:
+        return None, ("Nothing was contacted: " + "; ".join(problems) + ". A retrieval from "
+                      "Snapchat's servers needs --attest yes and --authority \"<what authorises it>\".")
+    return request, None
 
 
 def _yes(value):
@@ -1000,6 +1198,21 @@ def run_cli(args):
         if error:
             print(f"Snapchat Auto: {error}")
             return 2
+    cloud = None
+    if any(name.startswith("cloud") or name in ("authority", "attest") for name in values):
+        if partial is not None or os_mode != "ios":
+            print("Snapchat Auto: a retrieval from Snapchat's servers is part of a full iOS run only "
+                  "(not with --selection, not on Android). Nothing was contacted.")
+            return 2
+        if not values.get("cloud") and not values.get("cloud-selection") \
+                and not values.get("cloud-snaps"):
+            print("Snapchat Auto: say what to retrieve with --cloud missing,incomplete (or "
+                  "--cloud-selection / --cloud-snaps). Nothing was contacted.")
+            return 2
+        cloud, error = _cloud_request(values, "run", _map_timezone(values.get("tz", "local")))
+        if error:
+            print(f"Snapchat Auto: {error}")
+            return 2
 
     try:
         folder = run(zip_path=zip_path, keychain=keychain,
@@ -1009,7 +1222,8 @@ def run_cli(args):
                      run_name=values.get("run-name"), pause=False,
                      hash_zip=(values.get("hash-zip") or "").lower()
                               in ("yes", "y", "true", "1"),
-                     partial=partial, legacy_reports=_yes(values.get("legacy-reports")))
+                     partial=partial, legacy_reports=_yes(values.get("legacy-reports")),
+                     cloud=cloud)
     except partial_report.EvidenceMismatch as error:
         # Its own exit code: a script driving several extractions needs to tell "this is the wrong
         # evidence for that selection" apart from "the run broke".
@@ -1696,6 +1910,8 @@ def main(args):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
     if flag in ("trace-ids", "traceids"):
         sys.exit(run_trace_ids(args))
+    if flag in ("cloud-download", "clouddownload"):
+        sys.exit(run_cloud_download(args))
     if flag in ("install-selection", "installselection"):
         sys.exit(run_install_selection(args))
     if flag in ("describe-selection-api", "describeselectionapi"):

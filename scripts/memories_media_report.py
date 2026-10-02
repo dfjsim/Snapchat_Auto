@@ -163,6 +163,16 @@ def make_time_formatter(tz_spec):
     tz_spec: 'local' (examiner machine, default), 'utc', an IANA name ('America/Toronto',
     DST-aware), or a fixed offset ('-04:00'). Named zones handle daylight saving per-date.
     """
+    target, label = resolve_tz(tz_spec)
+
+    def fmt(ts):
+        return _format_dt(cocoa_to_dt(ts), target)
+
+    return fmt, label
+
+
+def resolve_tz(tz_spec):
+    """``(tzinfo or None for the examiner machine's local time, label)`` for a timezone spec."""
     spec = (tz_spec or "local").strip()
     low = spec.lower()
     if low == "utc":
@@ -187,11 +197,7 @@ def make_time_formatter(tz_spec):
                 target, label = timezone.utc, "UTC"
         else:
             target, label = timezone.utc, "UTC"
-
-    def fmt(ts):
-        return _format_dt(cocoa_to_dt(ts), target)
-
-    return fmt, label
+    return target, label
 
 
 def _format_dt(dt, target):
@@ -2221,6 +2227,7 @@ SNAP_TIME_LABELS = {
     "ZCAPTURETIMEUTC": "Captured",
     "ZPLACEHOLDERCREATETIME": "Placeholder created",
 }
+# (the timestamp names a cloud download's date rule can use are listed after both tables)
 ENTRY_TIME_LABELS = {
     # confirmed ZGALLERYENTRY timestamp columns (note ZCREATETIMEUTC also exists on ZGALLERYSNAP)
     "ZCREATETIMEUTC": "Entry created",
@@ -2245,6 +2252,10 @@ URL_LABELS = {
 # Extra (non-time, non-URL, non-id) columns worth surfacing. Kept in two dicts because a
 # column name (e.g. ZSOURCE) can exist in BOTH tables with a different meaning, so each table
 # owns its own label set and both values are rendered independently in their own section.
+#: Every timestamp a cloud download's date rule can name, as "<table>.<column>".
+TIMESTAMP_FIELDS = ([f"ZGALLERYSNAP.{c}" for c in SNAP_TIME_LABELS]
+                    + [f"ZGALLERYENTRY.{c}" for c in ENTRY_TIME_LABELS])
+
 SNAP_OTHER_LABELS = {
     # ZGALLERYSNAP
     "Z_OPT": "OPT", # integer value usually between 1 and over 20

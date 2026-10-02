@@ -285,6 +285,12 @@ Every function above takes an optional `prov` mapping whose keys are listed in
 externally produced selection knows some and not others, and the report states which rather than
 implying it checked something it could not.
 
+`cloud` is set when a Memory the extract carries has media retrieved from Snapchat's servers
+([cloud_download.md](cloud_download.md)): how many files, for how many Memories, when, and under which
+authority. It goes into the banner on every page — that media is not device evidence — into the
+provenance block and into `partial_manifest.json`. A partial run never contacts the servers itself; it
+carries what the full run's folder already retrieved, and prunes the rest with the other media.
+
 ---
 
 ## Links whose other end is not here

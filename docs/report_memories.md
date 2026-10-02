@@ -375,6 +375,19 @@ inside one. Its detail says so in place of the timestamps, and clearing the filt
 carved Memory whose media *does* carry an `mvhd` time or whose cache file has a recorded mtime is
 findable by those, with the expansion stating that no database time exists.
 
+### Snapchat's servers — what a retrieval would add, and what one did
+
+Every Memory is classed by `cloud_memories.candidate` as *media missing* (no full copy on the device),
+*local copy incomplete* (partially cached, a video with only a still, only the transcoded backup, an
+overlay the row records but the device lacks), *no download address*, or *retrieved*; the index filters
+on it (*Snapchat's servers*), and *📋 Copy snap IDs* copies the ticked Memories' snap ids for the Cloud
+download window. A Memory page with something to gain offers *☁ Get from Snapchat's servers…*, which
+copies its snap id — the page cannot start a retrieval itself. Media retrieved from the servers is
+`m["cloud_files"]`, published under `media/cloud/`, and shown in its own section under a
+*not device evidence* warning with the request it came from, the authority, and every cache file on the
+device byte-identical to it; it never joins `media_files`, so groups, hashes and the media states are
+the device's alone. See [cloud_download.md](cloud_download.md).
+
 ### My Eyes Only
 A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the
 index's Kind column (`m["is_meo"]`, set from `IS_ENCRYPTED` / the MEO key path — see

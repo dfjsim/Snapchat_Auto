@@ -50,6 +50,23 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   `build_tools/collect_licenses.py`. The EXE and the MSI now ship both, and LICENSE, which neither
   shipped before. The README no longer says LICENSE is unmodified.
 
+- **Retrieving Memories media from Snapchat's servers** — `scripts/cloud_download.py`,
+  `scripts/cloud_memories.py`, `scripts/cloud_refresh.py`; [docs/cloud_download.md](docs/cloud_download.md).
+  Off unless asked. It will not start until the examiner confirms holding the legal authority and types
+  what it is; it requests only the addresses a Memory's row records (`ZMEDIADOWNLOADURL`, then
+  `ZMEDIAREDIRECTURI`; the overlay columns), https to the recorded CDN only, no cookies or credentials,
+  one at a time with a delay, a per-minute cap, `Retry-After` and back-off, all adjustable while it runs;
+  it decrypts with the Memory's own key and keeps the bytes as received and decrypted in
+  `CloudDownloads/`, with a hash-chained record of every request. What to retrieve: Memories whose media
+  is **missing** or whose device copy is **incomplete** (the Memories index now filters on that), a
+  selection file, or snap ids — copied from a Memory page's *Get from Snapchat's servers…* or from
+  *Copy snap IDs* for the ticked Memories — narrowed by include/exclude **date rules** on any of the
+  Memory's timestamps. During a run (`--cloud …`) or on an existing run folder (`--cloud-download`),
+  which refreshes the affected reports without unzipping again. Retrieved media is marked ☁, never mixed
+  with device media, and the authority is stated beside it, on `index.html` and in partial extracts.
+  Method after DFIR-HBG's Snapchat_DownloadMemories_iOS (overlay retrieval there by John Hyla); that
+  repository has no licence, so none of its code is used.
+
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
   database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both

@@ -1881,6 +1881,14 @@ def _render_partial(partial, report_dir, args, stages):
                          conversations_report, memories_media_report)
 
     closure, prov = partial.closure, partial.prov
+    # Media retrieved from Snapchat's servers for a Memory this extract carries has to be stated on
+    # every page of it, so the provenance learns it before the first page is written.
+    stage = stages.get("Memories media")
+    if stage is not None:
+        from scripts import cloud_memories
+        cloud = cloud_memories.provenance({row_id[4:]: m for row_id, m in stage.sel.keep(closure)})
+        if cloud:
+            prov["cloud"] = cloud
     conv_index = {}
     stage = stages.get("Conversations")
     if stage is not None:
@@ -1912,7 +1920,8 @@ def _render_partial(partial, report_dir, args, stages):
 
 
 def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
-         tile_server="", zip_path="", hash_zip=False, partial=None, legacy_reports=False):
+         tile_server="", zip_path="", hash_zip=False, partial=None, legacy_reports=False,
+         cloud=None):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -2312,9 +2321,12 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                    owner_username=current_username, friends_source=friends_source, tz=tz,
                    report_dir=report_dir, primary=primary_doc, identifiers=identifiers,
                    account=getAccount(userPlist)),
+        # The run folder holds CloudDownloads/ — earlier retrievals from Snapchat's servers, shown in
+        # full and partial reports alike. A retrieval itself (`cloud`) is never part of a partial run.
         "mem": dict(app_or_root=snapchatFolder, keychain=keychain_file,
                     outdir=report_dir + "/Memories", padding=padding, tz=tz, src_root=src_root,
-                    tile_server=tile_server),
+                    tile_server=tile_server, cloud=cloud if partial is None else None,
+                    run_folder=os.path.dirname(os.path.abspath(report_dir))),
         "cm": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheMedia", tz=tz,
                    src_root=src_root, report_dir=report_dir),
         "cc": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheController", tz=tz,

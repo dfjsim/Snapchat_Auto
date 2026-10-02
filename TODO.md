@@ -214,7 +214,15 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
   e.g. accounts with many cache tokens per Memory.
 
 # Planned features
-- Integrate Snapchat_Download support with guardrails (reminding the user to have proper legal authorization).
+- Retrieval from Snapchat's servers — done in 1.9 ([docs/cloud_download.md](docs/cloud_download.md)).
+  Open: the Android side (`memories.db` keeps the same URLs); a lead (unproven link) that the examiner
+  confirms by retrieving one Memory could be retrieved straight from the cache_controller report's
+  panel instead of by copying its snap id.
+- **The legacy Memories report writes into `ExtractedData/`.** `DecryptLocalMemories_iOS.main` copies
+  every `SnapFixedVideos/` file into the SCContent folder as `<CACHE_KEY>` ("Copying merged media files
+  to cache folder"), so a later run over the same run folder reads tool-made whole files as if the
+  device had stored them — a sharded file's completeness reads differently afterwards. Only with
+  `--legacy-reports yes`. Copy them to a scratch folder instead.
 - Partial reports — still open after 1.6.0 (the feature itself: `--selection`, `--expand-selection`,
   see [docs/guide_partial_reports.md](docs/guide_partial_reports.md) and
   [docs/report_partial.md](docs/report_partial.md)):

@@ -108,6 +108,13 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   each id occurs in a run's `ExtractedData/` (text/UTF-16/hex/raw/LE-UUID/base64; databases row by row in
   both readings; superseded `-wal` frames). Reports locations only, never content — it is how a finding
   on case data is checked without the data leaving the case machine. See [trace_ids.md](docs/trace_ids.md).
+- Retrieval from Snapchat's servers (1.9): `scripts/cloud_download.py` (the engine: authority gate,
+  host policy, pacing, the hash-chained `CloudDownloads/cloud_manifest.jsonl`), `scripts/cloud_memories.py`
+  (candidates, scopes, date rules, `cloud_files` kept apart from `media_files`, the byte-identity proof
+  against cached files) and `scripts/cloud_refresh.py` (a run folder's settings, the targeted refresh).
+  Off unless asked, never in a partial run, nothing contacted without `Authority.problems()` empty. What
+  comes back is not device evidence and every page that shows it says so. Method credited to DFIR-HBG's
+  Snapchat_DownloadMemories_iOS (unlicensed: nothing copied). See [cloud_download.md](docs/cloud_download.md).
 - Partial reports: adding `--selection <file>` to a normal run renders **only** the rows an examiner
   ticked plus the related items they asked for, into `Reports_partial_<stamp>/` — the full `Reports/`
   is never touched. Same pipeline, in two halves: every report's `index()`, then one closure, then

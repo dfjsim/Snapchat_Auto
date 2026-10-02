@@ -261,6 +261,7 @@ class CloudRequest:
     selection_path: str = ""
     date_rules: list = field(default_factory=list)
     date_spec: str = ""                                     # the rules as entered, for the record
+    tz: str = "local"                                       # the timezone dates are entered in
     overlays: bool = True
     redownload: bool = False
     pace: cd.Pace = field(default_factory=cd.Pace)
@@ -384,11 +385,25 @@ def decryptor(memories, decrypt_sccontent):
     return decrypt
 
 
+def all_fields():
+    """Every timestamp a date rule can name, whatever the schema (see TIMESTAMP_FIELDS)."""
+    from scripts.memories_media_report import TIMESTAMP_FIELDS
+    return list(TIMESTAMP_FIELDS) + [MEMDATA_FIELD]
+
+
+def rules_from_spec(spec, tz):
+    """The command line's date rules, read in the run's timezone. Raises ValueError."""
+    from scripts.memories_media_report import resolve_tz
+    return parse_rules(spec, resolve_tz(tz)[0], all_fields())
+
+
 def cloud_phase(memories, run_folder, request, decrypt_sccontent):
     """Plan and run one retrieval. Returns the engine's :class:`~cloud_download.Summary` or None."""
     problems = request.problems()
     if problems:
         raise ValueError("; ".join(problems))
+    if request.date_spec and not request.date_rules:
+        request.date_rules = rules_from_spec(request.date_spec, request.tz)
     jobs, plan = plan_jobs(memories, request)
     logger.info(f"Snapchat's servers: {plan['in_scope']} Memory/Memories in scope, "
                 f"{plan['dropped_by_dates']} left out by the date rules, {plan['no_key']} without a "

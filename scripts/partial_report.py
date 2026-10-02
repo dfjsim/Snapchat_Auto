@@ -870,7 +870,7 @@ KIND_NOUN = {"conv": "conversation(s)", "msg": "message(s)", "ct": "contact(s)",
 #: ``withheld``       Phase 5: the field keys this extract withholds
 #: ``tool_version``   the version that produced *this* extract
 PROVENANCE_KEYS = ("selection", "sources", "version", "reuse", "case_ref", "built", "tz_label",
-                   "withheld", "tool_version")
+                   "withheld", "tool_version", "cloud")
 
 
 def _esc(value):
@@ -930,6 +930,13 @@ def banner_html(closure, prov=None):
              'listed in <span class="mono">partial_manifest.json</span>.']
     if prov.get("case_ref"):
         parts.append(f'Case / exhibit reference: <b>{_esc(prov["case_ref"])}</b>')
+    if prov.get("cloud"):
+        # Server-retrieved media is not device evidence, and an extract that carries any has to say so
+        # on every page, with the authority it was retrieved under.
+        cloud = prov["cloud"]
+        parts.append(f'&#9729; It contains media <b>retrieved from Snapchat&#39;s servers</b> for '
+                     f'{cloud.get("memories", 0)} Memory/Memories &mdash; not device evidence &mdash; '
+                     f'under: ' + "; ".join(_esc(x.get("note") or "") for x in cloud.get("sessions") or []))
     pulled = sum(1 for kind in closure.included for row_id in closure.included[kind]
                  if not closure.chosen(kind, row_id))
     if pulled:
@@ -1063,6 +1070,15 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
                      f'<span class="mono">{_esc(expanded.get("relations") or "")}</span>, expanded '
                      f'{_esc(expanded.get("when") or "")} and reviewed before this build. Rows kept '
                      f'from an expansion are marked as such in the tables.'))
+    cloud = prov.get("cloud") or {}
+    if cloud:
+        rows.append(("Retrieved from Snapchat's servers",
+                     f'{cloud.get("files", 0)} file(s) for {cloud.get("memories", 0)} Memory/Memories, '
+                     f'{_esc(cloud.get("first_utc") or "")} &hellip; {_esc(cloud.get("last_utc") or "")} '
+                     f'UTC, under: ' + "; ".join(_esc(x.get("note") or "")
+                                                 for x in cloud.get("sessions") or [])
+                     + ' &mdash; not device evidence; every request is in CloudDownloads/'
+                       'cloud_manifest.jsonl of the run folder'))
     reuse = prov.get("reuse") or {}
     if reuse:
         rows.append(("Reused from the full run",

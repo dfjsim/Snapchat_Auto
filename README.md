@@ -22,16 +22,22 @@
 
 > ### Scope
 >
-> This is an offline artifact-analysis tool for digital forensic examiners. It reads a device
-> extraction that the examiner is **lawfully authorised to examine**, and nothing else:
+> This is an artifact-analysis tool for digital forensic examiners. It reads a device extraction that
+> the examiner is **lawfully authorised to examine**:
 >
-> - it never contacts Snapchat's servers or any other network service — the only optional network
->   access is to a map tile server and to a folder of newer builds for update checks, both
->   configured by the examiner themselves and both off by default;
-> - it does not circumvent account authentication and cannot access data that is not already on
->   the device;
-> - it decrypts locally stored data using keys recovered **from that same device** (its app
->   container and, where the extraction includes one, its keychain).
+> - it works offline and contacts no network service on its own. Three optional features do, each
+>   off by default and configured or started by the examiner: a map tile server, a folder of newer
+>   builds for update checks, and **retrieval of Memories media from Snapchat's servers**;
+> - that retrieval requests only the download addresses the device itself recorded for a Memory
+>   (`scdb-27`), sends no credentials, cookies or account tokens, does not sign in and does not get
+>   around any authentication. It will not start until the examiner confirms holding the legal
+>   authority to retrieve the data and records what that authority is; requests are paced, and each
+>   one is recorded. What comes back is **not device evidence**: it is kept apart from the
+>   extraction, marked ☁ wherever it is shown, and the authority is stated beside it. See
+>   [docs/cloud_download.md](docs/cloud_download.md);
+> - it decrypts data using keys recovered **from that same device** (its app container and, where
+>   the extraction includes one, its keychain) — a retrieved copy with the key the device holds for
+>   that Memory.
 >
 > The `docs/` notes describe where Snapchat stores data on the device and the formats it uses, so
 > that an examiner can verify or reproduce by hand anything the tool reports. Recovered output is
@@ -77,6 +83,12 @@ that already exists: every extracted file is searched for each id (a snap id, a 
 key…) as text, UTF-16, hex, raw bytes and base64, databases row by row with and without their
 `-wal`. It lists **where** each occurs — never the content — so the result can be discussed without
 the data. See [docs/trace_ids.md](docs/trace_ids.md).
+
+Retrieving Memories media from Snapchat's servers (off unless asked — see *Scope* above) is a run option,
+`--cloud missing,incomplete --attest yes --authority "<what authorises it>"`, or a later step on an
+existing run folder, `--cloud-download <run folder> …`, which refreshes the reports without unzipping
+anything again. Snap ids, a selection file and include/exclude date rules narrow it. See
+[docs/cloud_download.md](docs/cloud_download.md).
 
 ### Update checks (optional, off by default)
 
@@ -204,6 +216,11 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   implemented and in the report popover that explains it; the comparison and the design differences
   are in [docs/related_ileapp.md](docs/related_ileapp.md). That module in turn cites this fork's
   Memories decryption notes.
+- **Retrieving Memories media from Snapchat's servers** — the method of DFIR-HBG's
+  [Snapchat_DownloadMemories_iOS](https://github.com/DFIR-HBG/Snapchat_DownloadMemories_iOS), with
+  overlay retrieval contributed there by John Hyla ([snoop168](https://github.com/snoop168)). That
+  repository carries no licence, so nothing of it is included; the implementation here is this fork's
+  own. Credited in `scripts/cloud_download.py` and in the report popover that explains it.
 - **Noto Color Emoji** — the emoji font the reports embed, so an emoji is drawn the same on every
   workstation: © 2022 Google Inc., [SIL Open Font License 1.1](scripts/data/fonts/OFL.txt),
   <https://github.com/googlefonts/noto-emoji>, bundled unmodified; see
