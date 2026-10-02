@@ -64,6 +64,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   Memory's timestamps. During a run (`--cloud …`) or on an existing run folder (`--cloud-download`),
   which refreshes the affected reports without unzipping again. Retrieved media is marked ☁, never mixed
   with device media, and the authority is stated beside it, on `index.html` and in partial extracts.
+  In the GUI: a *Snapchat's servers* section on the main window, a Cloud download window (the
+  authority, what to retrieve with counts, the date-rule table with *Add for checked* and *Copy
+  range to…*, the pace) and a progress window — progress, the request in flight, a log, and the
+  pace, Pause and Stop while it runs (`scripts/cloud_gui.py`).
   Method after DFIR-HBG's Snapchat_DownloadMemories_iOS (overlay retrieval there by John Hyla); that
   repository has no licence, so none of its code is used.
 - **Proven by content** — a cached file byte-identical to a Memory's copy retrieved from the servers

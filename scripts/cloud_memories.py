@@ -427,6 +427,8 @@ def cloud_phase(memories, run_folder, request, decrypt_sccontent):
                           entry_point=request.entry_point,
                           date_rules=[r.as_dict() for r in request.date_rules])
     summary = request.runner(run) if request.runner else run()
+    if summary is None:
+        return None
     logger.info(f"Snapchat's servers: {summary.done} retrieved, {summary.failed} failed, "
                 f"{summary.skipped} already retrieved ({summary.stopped})")
     return summary

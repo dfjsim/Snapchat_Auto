@@ -740,9 +740,17 @@ def run_cloud_download(args):
         print(f"Snapchat Auto: {error}")
         return 2
     add_log_file(run_folder)
+    return cloud_download_existing(run_folder, request, values.get("keychain") or "",
+                                   (values.get("refresh") or "targeted").lower())
+
+
+def cloud_download_existing(run_folder, request, keychain="", refresh="targeted"):
+    """Retrieve for an existing run folder and refresh its reports. The GUI and the CLI both end
+    here, so the two cannot refresh differently. Returns an exit code."""
+    settings = cloud_refresh.load_settings(run_folder)
     logger.info(f"Snapchat Auto v{get_version()} — retrieval from Snapchat's servers for {run_folder}")
-    keychain = values.get("keychain") or settings.get("keychain") or ""
-    mode, why = cloud_refresh.refresh_mode(settings, (values.get("refresh") or "targeted").lower())
+    keychain = keychain or settings.get("keychain") or ""
+    mode, why = cloud_refresh.refresh_mode(settings, refresh)
     logger.info(f"Refresh: {mode} ({why})")
     try:
         if mode == "targeted":
@@ -1600,6 +1608,35 @@ def _describe_selection(window, path, values):
     note.update(" · ".join(bits), text_color="#eef3fa")
 
 
+def _cloud_ui():
+    """What scripts/cloud_gui.py needs from this window's toolkit setup, in one object."""
+    import types
+    return types.SimpleNamespace(sg=sg, HINT_FONT=HINT_FONT, SECTION_FONT=SECTION_FONT,
+                                 hint_color=hint_color, help=_help, handle_help=_handle_help,
+                                 hidpi=hidpi, build_request=_cloud_request)
+
+
+def _cloud_note(request, active=True):
+    """The one line under the main window's Snapchat's-servers checkbox."""
+    if request is None:
+        return "Not configured — nothing is contacted."
+    if not active:
+        return "Configured, but not ticked — nothing will be contacted."
+    what = ", ".join(sorted(request.scopes)) or "nothing"
+    dates = f", {len(request.date_rules)} date rule(s)" if request.date_rules else ""
+    return f"Will retrieve: {what}{dates} · authority recorded ✓"
+
+
+def _last_run_folder(workdir):
+    """The newest Snapchat_Auto run folder under ``workdir``, or ""."""
+    try:
+        runs = [os.path.join(workdir, d) for d in os.listdir(workdir)
+                if os.path.isdir(os.path.join(workdir, d, "ExtractedData"))]
+    except OSError:
+        return ""
+    return max(runs, key=os.path.getmtime) if runs else ""
+
+
 def _relations_dialog(state):
     """Which related items to bring in with the ticked rows. Edits *state* in place.
 
@@ -1682,7 +1719,9 @@ def _relations_dialog(state):
 
 
 #: How much of the screen the form's viewport may take, and the floor below which it scrolls anyway.
-_VIEW_MAX = (1000, 880)
+#: The height grew with the Snapchat's-servers section (1.9) so the whole form still opens unscrolled
+#: on a screen with the room; a smaller one scrolls, as it already did.
+_VIEW_MAX = (1000, 960)
 _VIEW_MIN = (720, 420)
 #: Room for the title bar, the Ok/Cancel row and the taskbar.
 _VIEW_MARGIN = (200, 220)
@@ -1825,6 +1864,28 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
         [sg.Text('', key="selection_note", font=HINT_FONT, text_color=hint_color())],
         [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
 
+        [sg.Text("Snapchat's servers (optional, iOS)", font=SECTION_FONT),
+         _help("Retrieve Memories media from Snapchat's servers: the copies the device itself "
+               "recorded the addresses of, decrypted with the key the device holds for each Memory. "
+               "For Memories whose media the extraction does not hold, or holds only in part — and "
+               "to prove that a cached file nothing on the device connects to its Memory is that "
+               "Memory's media.\n\n"
+               "Nothing is contacted unless you ask, and only after you confirm holding the legal "
+               "authority and record what it is — for every retrieval, since an authority belongs "
+               "to a case. What comes back is not device evidence: it is kept apart, marked ☁ "
+               "wherever it is shown, and the authority is stated beside it.\n\n"
+               "During this run, or later on a run folder that already exists (no unzipping "
+               "again). See docs/cloud_download.md.", title="Snapchat's servers")],
+        # Two rows, deliberately: the form is sized to open without scrolling (test_gui_window).
+        [sg.Checkbox("Retrieve during this run", key="cloud_run", enable_events=True),
+         sg.Button("Configure…", key="cloud_configure"),
+         sg.Text("Not configured — nothing is contacted.", key="cloud_note", font=HINT_FONT,
+                 text_color=hint_color(), expand_x=True),
+         sg.Button("For an existing run…", key="cloud_existing",
+                   tooltip="Retrieve for a run folder that already exists, and refresh its reports "
+                           "(nothing is unzipped again)")],
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
         [sg.Text('Updates', font=SECTION_FONT)],
         [sg.Text('Folder with newer builds (optional)'),
          _help('A folder where your organization publishes new builds of this tool (e.g. a '
@@ -1950,6 +2011,9 @@ def main(args):
         return "."
 
     window, real, relation_state = build_settings_window(cfg, update_note=update_note)
+    # The retrieval configured for this run. Held here only: the authority it carries belongs to a
+    # case, so it is never written to the settings file and does not outlive this window.
+    cloud_request = None
     while True:
         event, values = window.read()
         values = reconcile_paths(values, real)
@@ -2038,6 +2102,33 @@ def main(args):
                                                                      update_note=update_note)
         elif event == "relations_edit":
             _relations_dialog(relation_state)
+        elif event in ("cloud_configure", "cloud_run"):
+            if event == "cloud_run" and not values.get("cloud_run"):
+                window["cloud_note"].update(_cloud_note(cloud_request, active=False))
+                continue
+            from scripts import cloud_gui
+            request, _extras = cloud_gui.run_cloud_window(
+                _cloud_ui(), mode="run", tz=_map_timezone(values.get("timezone")))
+            if request is not None:
+                cloud_request = request
+            window["cloud_run"].update(cloud_request is not None)
+            window["cloud_note"].update(_cloud_note(cloud_request, active=cloud_request is not None))
+        elif event == "cloud_existing":
+            from scripts import cloud_gui
+            ui = _cloud_ui()
+            last = _last_run_folder(values.get("workdir") or "")
+            request, extras = cloud_gui.run_cloud_window(
+                ui, mode="existing", run_folder=last,
+                tz=cloud_refresh.load_settings(last).get("tz", "local") if last else "local")
+            if request is not None:
+                request.runner = cloud_gui.progress_runner(ui, request)
+                add_log_file(extras["run_folder"])
+                code = cloud_download_existing(extras["run_folder"], request, extras["keychain"],
+                                               extras["refresh"])
+                (sg.popup if code == 0 else sg.popup_error)(
+                    "The reports of this run folder have been refreshed — open index.html." if code == 0
+                    else "The retrieval did not complete — see the log in the run folder.",
+                    title="Snapchat's servers", keep_on_top=True)
         elif event == "Ok":
             if not values["zip"] or not os.path.isfile(values["zip"]):
                 sg.popup_error("Please select a valid extraction ZIP file.")
@@ -2061,6 +2152,17 @@ def main(args):
                     sg.popup_error("That selection file does not exist.", keep_on_top=True)
                     continue
                 if not _confirm_selection(values["selection"].strip(), values["workdir"]):
+                    continue
+            if values.get("cloud_run"):
+                why = ("it is configured" if cloud_request is not None else None)
+                if values["selection"].strip() or values.get("os_android"):
+                    sg.popup_error("A retrieval from Snapchat's servers is part of a full iOS run "
+                                   "only — not with a selection file, not on Android.",
+                                   keep_on_top=True)
+                    continue
+                if why is None:
+                    sg.popup_error("Configure the retrieval from Snapchat's servers first (legal "
+                                   "authority, what to retrieve) — or untick it.", keep_on_top=True)
                     continue
             break
     window.close()
@@ -2106,6 +2208,11 @@ def main(args):
             sg.popup_error(error, keep_on_top=True)
             return
 
+    cloud = None
+    if values.get("cloud_run") and cloud_request is not None:
+        from scripts import cloud_gui
+        cloud = cloud_request
+        cloud.runner = cloud_gui.progress_runner(_cloud_ui(), cloud)
     try:
         run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
             os_mode="ios" if values["os_ios"] else "android",
@@ -2113,7 +2220,7 @@ def main(args):
             tz=_map_timezone(values.get("timezone")),
             tile_server=values.get("tile_server", "").strip(),
             pause=True, partial=partial,
-            legacy_reports=bool(values.get("legacy_reports")))
+            legacy_reports=bool(values.get("legacy_reports")), cloud=cloud)
     except (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection, LookupError) as error:
         # A refused partial run reaches here. Without this it left a traceback on the console and
         # **nothing in the log**, so the examiner saw a run that simply stopped: the reason has to be
