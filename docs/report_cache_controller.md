@@ -333,6 +333,28 @@ A working copy saved to Memories is byte-identical to that Memory's media once d
 device), but nothing recorded on that device connects the two — which is what the cloud retrieval's
 content proof and the unproven leads are for.
 
+## Possible Memory — leads, never links
+
+Some cached media is a Memory's media with nothing on the device to say so: the snap editor's working
+copy of a snap later saved to Memories is byte-identical to that Memory's media once decrypted (seen on
+a test device), and no claim, id or record connects them. What the device does record is time. So for an
+on-disk media file that no identifier, chat or byte comparison links — in the categories *Snap editor*,
+*Not in the index* and *Memory media* (a Memory-shaped claim whose row is gone), or *Other* when the app
+claimed it as Memories media (context 19) — `scripts/memory_leads.py` lists the Memories of the same kind
+(video or image, from `ZMEDIATYPE` and the file's magic bytes) with a time within ±10 minutes of one of
+the file's: each claim's `CREATION_TIMESTAMP_MILLIS`, and the device's birth, modified and access times
+of the file, against the Memory's `ZGALLERYSNAP.ZCREATETIMEUTC`, `ZCAPTURETIMEUTC` and its entry's
+`ZCREATETIMEUTC`. At most five, ranked by the closest pair, each with every difference, and the panel
+says how many Memories fell inside the window. `ZDURATION` is not used: it has been seen to differ from
+the media's real length.
+
+It is a lead, not a link: shown in its own *Possible Memory — NOT proven* panel with a dashed chip,
+never as the 🧠 link, never counted as linked, never followed by a partial report (no closure edge).
+The *Linked* filter has its own option for it. The panel's *📋 Copy snap IDs* copies the leads' snap ids
+for the Cloud download window: retrieving a lead from Snapchat's servers either proves it — the file
+then links *by content* — or rules it out. On the test device every working copy that was a Memory's
+media had that Memory as its first lead.
+
 ## Locating the bytes on disk
 
 `_resolve_on_disk` matches a `CACHE_KEY` against the SCContent index (`index_sccontent`, reused

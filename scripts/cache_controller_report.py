@@ -45,6 +45,7 @@ from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
 from scripts.data import snap_session
+from scripts import memory_leads
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.data import device_fs
 from scripts.memories_media_report import (
@@ -289,6 +290,7 @@ def load_memory_index(app):
         from scripts import memories_android_report
         return memories_android_report.memory_index(app)
     snap_ids, url_keys, media_ids, snap_urls, memdata_ids = {}, {}, {}, {}, {}
+    points = {}            # snap id -> {"kind", "points"}: what memory_leads compares files with
     for p in find_profiles(app):
         # Both readings, through sqlite_open like every other evidence database: staged copies, so
         # nothing is ever opened (or given a -shm) in place, and a Memory row the -wal has since
@@ -322,8 +324,28 @@ def load_memory_index(app):
                     url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
             for field, rec in _memdata_of(row, entries):
                 memdata_ids.setdefault(rec["uuid"], set()).add((sid, p["userHash"], field))
+            if current:
+                points[sid] = _memory_points(row, entries)
     return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
-            "snap_urls": snap_urls, "memdata_ids": memdata_ids}
+            "snap_urls": snap_urls, "memdata_ids": memdata_ids, "points": points}
+
+
+_COCOA = 978307200
+
+
+def _memory_points(row, entries):
+    """``{"kind", "points"}`` of one Memory row: its kind and its times as Unix seconds."""
+    kind = {0: "image", 1: "video"}.get(row.get("ZMEDIATYPE"))
+    pts = [(label, row[col] + _COCOA) for col, label in (("ZCREATETIMEUTC", "ZGALLERYSNAP.ZCREATETIMEUTC"),
+                                                         ("ZCAPTURETIMEUTC", "ZGALLERYSNAP.ZCAPTURETIMEUTC"))
+           if isinstance(row.get(col), (int, float)) and row.get(col)]
+    pk = row.get("ZENTRY")
+    for entry in entries:
+        if pk is not None and entry.get("Z_PK") == pk:
+            if isinstance(entry.get("ZCREATETIMEUTC"), (int, float)) and entry.get("ZCREATETIMEUTC"):
+                pts.append(("ZGALLERYENTRY.ZCREATETIMEUTC", entry["ZCREATETIMEUTC"] + _COCOA))
+            break
+    return {"kind": kind, "points": pts}
 
 
 def _memdata_of(row, entries):
@@ -1216,6 +1238,65 @@ SESSION_BASIS = (
     "session the file belonged to; it does not say what became of the snap afterwards.")
 
 
+#: The categories whose files can be a lead: the snap editor's working copies, files no claim names,
+#: and Memory-shaped claims whose Memory row is gone. A file of no recognised shape ("Other") only when
+#: the app itself claimed it as Memories media (context 19): otherwise every image the app cached
+#: during a busy session would be a "possible Memory".
+LEAD_CATEGORIES = {"Snap editor", ORPHAN_CATEGORY, "Memory media"}
+
+
+def _head_of(paths, size=64):
+    """The first bytes of a cached file (its whole copy, else its first part), for sniffing."""
+    for path in sorted(paths):
+        try:
+            with open(path, "rb") as fh:
+                return fh.read(size)
+        except OSError:
+            continue
+    return b""
+
+
+def _leads_html(entry, rel_prefix, closure=None):
+    """The *Possible Memory — NOT proven* panel; ``""`` when the file has no lead."""
+    found = entry.get("leads")
+    if not found:
+        return ""
+    rows = []
+    for lead in found["leads"]:
+        sid = lead["snap_id"]
+        link = report_ui.xref(
+            f'<a class="chip lead" target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">possible: '
+            f'{_esc(sid)}</a>', [("mem", f"mem-{sid}")], closure=closure)
+        pairs = "<br>".join(f"{_esc(p['file'])} vs {_esc(p['memory'])}: "
+                            f"{_signed(p['delta_s'])}" for p in lead["pairs"][:4])
+        rows.append(f"<tr><td>{link}</td><td>{_signed(lead['best_delta_s'])}</td>"
+                    f"<td class='mono'>{pairs}</td></tr>")
+    ids = _esc(json.dumps([lead["snap_id"] for lead in found["leads"]]))
+    copy_button = (f"<button class='copyids' onclick='scCopySnapIds({ids},"
+                   f"&quot;possible Memories of this file&quot;)'>📋 Copy snap IDs</button>")
+    more = found["in_window"] - len(found["leads"])
+    return ("<div class='sect'>Possible Memory — NOT proven"
+            + _info(memory_leads.basis(found["window_s"])) + "</div>"
+            f"<div class='leadnote'>{found['in_window']} Memory/Memories of this kind have a time within "
+            f"{found['window_s'] // 60} minutes of this file's"
+            + (f" (the closest {len(found['leads'])} shown)" if more > 0 else "")
+            + (" · the app claimed this file as Memories media (context 19)"
+               if found["leads"] and found["leads"][0].get("ctx19") else "")
+            + " " + copy_button + " <span class='muted'>to retrieve them from Snapchat&#39;s "
+              "servers and compare</span></div>"
+            "<table class='sub'><tr><th>Memory</th><th>closest</th>"
+            "<th>file time vs Memory time (Memory minus file)</th></tr>" + "".join(rows) + "</table>")
+
+
+def _signed(seconds):
+    sign = "+" if seconds >= 0 else "−"
+    seconds = abs(seconds)
+    if seconds < 120:
+        return f"{sign}{seconds:.0f} s"
+    return f"{sign}{seconds / 60:.1f} min"
+
+
 def _session_html(entry, src_root, manifest):
     """The snap editor's session record(s) naming this file, when any survives."""
     rows = []
@@ -1607,6 +1688,9 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     session = _session_html(e, src_root, manifest)
     if session:
         parts.append(session)
+    leads = _leads_html(e, rel_prefix, closure)
+    if leads:
+        parts.append(leads)
     if e.get("content_proof"):
         rows = "".join(
             f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
@@ -1952,7 +2036,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
              "7": ("2" if e.get("view") else "1" if e["on_disk"]["found"] else "0")},
             chunk_of.get(anchor),
             {"cat": e["category"], "disk": disk,
-             "link": ",".join(linkbits), "xs": "yes" if is_xscope else "no",
+             "link": ",".join(linkbits + (["Possible"] if e.get("leads") else [])),
+             "xs": "yes" if is_xscope else "no",
              # "enc" is the *measured* state of the bytes, not "we could not display it"
              "enc": ("y" if e.get("ondisk_encrypted") and not e.get("decrypted") else
                      "dec" if e.get("ondisk_encrypted") else "n"),
@@ -2038,6 +2123,10 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
    font-size:11px;text-decoration:none;font-weight:600}}
  .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}
+ .chip.lead{{background:#fff;color:#6b5a00;border:1px dashed #c9a400;text-decoration:none}}
+ .leadnote{{font-size:12px;color:#6b5a00;margin:2px 0 4px}}
+ button.copyids{{font-size:11.5px;padding:2px 8px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}}
  .chip.chat{{background:#e7f6ea;color:#1f6b39;border:1px solid #b3ddc0}}
  .chip.cm{{background:#fdf0e3;color:#8a5a1c;border:1px solid #e8cfae}}
  .chip.ok{{background:#eef7ee;color:#2f7d32}} .chip.miss{{background:#f6efef;color:#9a5a5a}}
@@ -2095,7 +2184,8 @@ with more than one target fills in here." oninput="flt()">
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
  <label>Linked <select id="link" onchange="flt()"><option value="">any</option>
-   <option value="Memory">Memory</option><option value="Chat">Chat</option></select></label>
+   <option value="Memory">Memory</option><option value="Chat">Chat</option>
+   <option value="Possible">possible Memory (not proven)</option></select></label>
  <label title="Only files with an on-disk copy in a different account's SCContent scope than the claim">
    <input type="checkbox" id="xscope" onchange="flt()"> ⚠ cross-scope only</label>
  <label title="Measured from the bytes: high entropy and a length that is a multiple of the AES
@@ -2139,6 +2229,7 @@ counted as encrypted.">Encrypted <select id="enc" onchange="flt()"><option value
 {report_ui.HINT_JS}
 {report_ui.NAV_JS}
 {report_ui.SELECT_TOOLBAR_JS}
+{report_ui.CLIPBOARD_JS}
 var flt_t=0;
 function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
 function xall(btn){{
@@ -2283,6 +2374,32 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                             if record and record.get("mtime") is not None else "")
         e["ondisk_mtimes"] = stamps
         e["ondisk_fs"] = records
+
+    # Possible Memory — leads, never links (scripts/memory_leads.py): for each on-disk media file no
+    # identifier, chat or byte comparison connects to anything, the Memories of its kind whose times
+    # fall near the file's own. Kept in e["leads"] only: never a link, a count or a closure edge.
+    lead_files = {}
+    for e in all_entries:
+        # Only files nothing else accounts for: a category that names what the file is (a lens, a
+        # story preview, a Discover video…) already says it is not a Memory's media.
+        ctx19 = any(c.get("mct") == 19 for c in e["claims"])
+        if (e.get("memory") or e.get("chats") or not e["on_disk"]["found"]
+                or not (e["category"] in LEAD_CATEGORIES or (e["category"] == "Other" and ctx19))):
+            continue
+        kind = memory_leads.kind_of_ext(guess_media(_head_of(e["on_disk"]["paths"])))
+        if not kind:
+            continue
+        pts = [(f"claim, context {c['mct']}", c["created_sort"] / 1000) for c in e["claims"]
+               if c.get("created_sort")]
+        for rec in (e.get("ondisk_fs") or {}).values():
+            for field, label in (("btime", "file created"), ("mtime", "file modified"),
+                                 ("atime", "file last read")):
+                if rec and rec.get(field):
+                    pts.append((label, rec[field] / device_fs.NS))
+        lead_files[e["cache_key"]] = {"kind": kind, "points": pts, "ctx19": ctx19}
+    leads = memory_leads.find_leads(lead_files, mem_index.get("points") or {})
+    for e in all_entries:
+        e["leads"] = leads.get(e["cache_key"])
 
     # which platform's words the explanations use (see PLATFORM_WORDS)
     platform = "android" if android_layout.is_app_dir(app) else "ios"

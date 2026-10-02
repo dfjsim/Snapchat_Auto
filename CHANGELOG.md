@@ -75,6 +75,12 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   marked ☁ and showing the retrieval and its authority. It is how a file no identifier connects to its
   Memory — the snap editor's working copy of a snap later saved to Memories — is proven to be its media.
   Every recorded identifier still wins over it.
+- **Possible Memory — not proven** — `scripts/memory_leads.py`. A cached media file nothing connects to
+  a Memory (a snap editor's working copy, a file no claim names, a Memory-shaped claim whose row is gone,
+  or an unrecognised one the app claimed as Memories media) lists the Memories of the same kind whose
+  creation or capture time falls within ten minutes of the file's claim or filesystem times — ranked,
+  with every difference and how many Memories fell in the window, never as a link. Its *Copy snap IDs*
+  feeds the Cloud download, which proves or rules the lead out.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
