@@ -155,6 +155,14 @@ format examples.
 
 The corpus itself, and the script that runs it, live outside the repo for the same reason.
 
+### Licences — what may go into `scripts/`
+
+`scripts/` is compiled into the MIT-licensed EXE and MSI. **No copyleft (GPL/AGPL) source goes in
+it** — two GPL files had to be rewritten from their formats in 1.9 (`ufed_keychain.py`,
+`protobuf_wire.py`). Every third-party file added to the repository needs its notice in
+`THIRD_PARTY_NOTICES.md`; a new Python dependency is picked up by `build_tools/collect_licenses.py`
+(re-run it, commit `THIRD_PARTY_LICENSES.txt`). `tests/test_third_party_notices.py` enforces all three.
+
 ### Commit messages — the co-author trailer
 
 A commit Claude Code contributed to ends with exactly this trailer, and nothing else naming the

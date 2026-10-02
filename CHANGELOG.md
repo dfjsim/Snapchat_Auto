@@ -42,6 +42,13 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   Communications report's concatenated value for a media message can differ — a stray control
   character is gone, and a printable CDN token the old parser took for a nested message is now listed.
   `requests`, `urllib3` and `pyasn1` are no longer dependencies.
+- **The licences travel with the application.** `THIRD_PARTY_NOTICES.md` names every file in the
+  repository that is not this project's own (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell with
+  its SQLite and OpenSSL, Bootstrap, the emoji font) and what the build carries (FreeSimpleGUI,
+  opencv's FFmpeg, CPython and Tcl/Tk, the Nuitka runtime, the update helper); `THIRD_PARTY_LICENSES.txt`
+  holds the licence of every Python package the build carries, generated from `uv.lock` by
+  `build_tools/collect_licenses.py`. The EXE and the MSI now ship both, and LICENSE, which neither
+  shipped before. The README no longer says LICENSE is unmodified.
 
 ### Fixed
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL

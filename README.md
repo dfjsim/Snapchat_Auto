@@ -208,14 +208,17 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   workstation: © 2022 Google Inc., [SIL Open Font License 1.1](scripts/data/fonts/OFL.txt),
   <https://github.com/googlefonts/noto-emoji>, bundled unmodified; see
   [scripts/data/fonts/README.md](scripts/data/fonts/README.md). Noto is a trademark of Google Inc.
-- **Licence:** MIT, © 2022 DFIR-HBG. The original [LICENSE](LICENSE) is retained unmodified and
-  covers this fork, including all modifications made here.
-- **Bundled dependencies keep their own licences.** The packaged EXE and MSI carry third-party
-  libraries, and one of them is copyleft: the GUI toolkit **FreeSimpleGUI is LGPLv3+**. That is
-  compatible with an MIT application, and the obligation it brings is on *distribution* — ship the
-  licence text and notice, say that the library is used and under which licence, and make its source
-  available (upstream is enough). It is dynamically imported and replaceable, never statically linked
-  into the application's own code.
+- **Licence:** MIT. The upstream [LICENSE](LICENSE) (© 2022 DFIR-HBG) is kept, with one copyright
+  line added for this fork's modifications; it covers this fork, including everything changed here.
+- **Third-party code keeps its own licence**, and every one is listed:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the files in this repository that are not this
+  project's (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell, Bootstrap, the emoji font) and for
+  what the build carries; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for every Python
+  package, generated from `uv.lock`. Both ship with the EXE and the MSI, next to LICENSE. The GUI
+  toolkit **FreeSimpleGUI is LGPL-3.0-or-later**: the portable EXE compiles it in, and this
+  repository's public source and lock file are what let anyone rebuild it against a modified copy.
+  The application's own source contains no GPL-licensed code; the build's one GPL package is named
+  in the notices.
 - Fork maintained by [dfjs1m](https://github.com/dfjs1m). Bugs in the original tool
   should be reported upstream; only fork-specific issues belong here.
 - **Development note:** the fork-specific features and fixes listed under

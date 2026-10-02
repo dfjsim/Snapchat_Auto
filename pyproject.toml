@@ -78,8 +78,10 @@
     # Copied next to the built executable and into the MSI. pyproject.toml is how the installed
     # app knows its own version — including the "+build.N" tag the update check compares against
     # (docs/auto_update.md); scripts/ carries the data files Nuitka leaves out of a standalone
-    # build, notably scripts/data/sqlcipher3.exe.
-    copy_files = ["pyproject.toml", "scripts"]
+    # build, notably scripts/data/sqlcipher3.exe. The three licence files go with every copy of the
+    # app (THIRD_PARTY_NOTICES.md; THIRD_PARTY_LICENSES.txt is build_tools/collect_licenses.py's output).
+    copy_files = ["pyproject.toml", "scripts", "LICENSE", "THIRD_PARTY_NOTICES.md",
+                  "THIRD_PARTY_LICENSES.txt"]
 
 [tool.wix-nuitka]
     # "force" is Nuitka's default and what build_nuitka.cmd's portable EXE gets, so the installed
