@@ -62,7 +62,12 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   or an unrecognised one the app claimed as Memories media) lists the Memories of the same kind whose
   creation or capture time falls within ten minutes of the file's claim or filesystem times — ranked,
   with every difference and how many Memories fell in the window, never as a link. Its *Copy snap IDs*
-  feeds the Cloud download, which proves or rules the lead out.
+  feeds the Cloud download, which proves or rules the lead out. Shown on **both** sides: on the file's
+  row, and on the Memory's — a *≈ possible file* badge and a *Possible cached file* filter in the
+  Memories index, and a panel on the Memory's page with every difference and where the Memory ranks
+  among the file's leads. The cache_controller report writes them once, as `data/memory_leads.js`, and
+  the Memories pages load it (`SCV.annotate` adds it to the index rows). Differences under ten seconds
+  are shown to the tenth.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**

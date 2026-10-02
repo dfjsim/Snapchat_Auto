@@ -1290,8 +1290,14 @@ def _leads_html(entry, rel_prefix, closure=None):
 
 
 def _signed(seconds):
+    """A difference as the leads show it; tenths under ten seconds, where "−0 s" would hide them.
+
+    memory_leads.MEMORY_JS ``scLeadSigned`` writes the same text on the Memory's side.
+    """
     sign = "+" if seconds >= 0 else "−"
     seconds = abs(seconds)
+    if seconds < 10:
+        return f"{sign}{seconds:.1f} s"
     if seconds < 120:
         return f"{sign}{seconds:.0f} s"
     return f"{sign}{seconds / 60:.1f} min"
@@ -2480,6 +2486,13 @@ def render(stage, closure=None, prov=None):
                                     report_ui.run_id(rdir), stage["wal_infos"],
                                     closure=closure, prov=prov,
                                     platform=stage.get("platform") or "ios")
+    # The same leads, seen from the Memory: the Memories pages, already written, load this file. A
+    # partial extract's names only the Memories it holds.
+    memory_leads.write_script(os.path.join(outdir, "data"),
+                              {e["cache_key"]: e.get("leads") for e in all_entries},
+                              report_ui.run_id(rdir),
+                              keep=None if closure is None else
+                              (lambda sid: closure.has("mem", f"mem-{sid}")))
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
     if closure is not None:
         removed = _drop_sqlite_views(outdir)

@@ -355,6 +355,17 @@ for the Cloud download window: retrieving a lead from Snapchat's servers either 
 then links *by content* — or rules it out. On the test device every working copy that was a Memory's
 media had that Memory as its first lead.
 
+The same leads are shown **from the Memory's side** too, so an examiner working through Memories does not
+miss them: a *≈ possible file* badge in the Memories index's Kind column (and *≈ possible file (grouped)*
+on a folded group's row when one of its Memories has one), a *Possible cached file* filter, and a
+*Possible cached file — NOT proven* panel on the Memory's page listing each file with every difference
+and where this Memory ranks among that file's leads. They are not worked out twice: only this report
+knows which files nothing else accounts for, and it renders after the Memories report, so it writes them
+as `data/memory_leads.js` (`memory_leads.write_script`, keyed by snap id, carrying this run's id) and the
+Memories pages load that file with `<script src>` like their own data — `memory_leads.MEMORY_JS` draws
+the badge, the filter and the panel. A page whose folder has no such file, or one from another run, shows
+no lead. A partial extract's file names only the Memories the extract holds.
+
 ## Locating the bytes on disk
 
 `_resolve_on_disk` matches a `CACHE_KEY` against the SCContent index (`index_sccontent`, reused

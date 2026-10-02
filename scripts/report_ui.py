@@ -1216,6 +1216,17 @@ function setRows(r){rows=r;byId={};loaded=true;
  buildFolds();
  if(C)refilter();}
 
+/* Let the page add to its rows what another report's data file says about them — the Memories index
+   marks the Memories a cached file lists as possible, from the cache_controller report's
+   memory_leads.js, which is written after the Memories report and so cannot be in its rows. `fn`
+   may change a row's cells, search text and filter metadata, but never its id. Returns how many
+   rows it changed (fn returns true for those). */
+function annotate(fn){
+ var n=0;
+ for(var i=0;i<rows.length;i++)if(fn(rows[i]))n++;
+ if(n){dirty=true;if(C)refilter();}
+ return n;}
+
 /* ---------- folded rows ----------
    A row may be *folded* into another: it keeps its place in `rows` — so its anchor, its selection
    id and every cross-report link into it go on working — but the table shows its lead's row instead
@@ -1709,7 +1720,7 @@ function clearFilters(){
  page=0;
  refilter();}
 
-return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
+return {init:init,setRows:setRows,annotate:annotate,detail:detail,refilter:refilter,setSort:setSort,
         expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
         remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
         selId:selId,selKeys:selKeys,

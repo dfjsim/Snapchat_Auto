@@ -69,6 +69,7 @@ from scripts import partial_report
 from scripts import offline_maps
 from scripts import gallery_search
 from scripts import cloud_memories
+from scripts import memory_leads
 
 logger = logging.getLogger(__name__)
 
@@ -3742,9 +3743,22 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
           <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
           <div class="sect">Media files</div>{files_table}
+          {_leads_placeholder(members, closure)}
           {_cloud_html(members, media_prefix, cc_prefix, closure)}
         </div>
       </div>"""
+
+
+def _leads_placeholder(members, closure):
+    """Where the Memory's *Possible cached file* panel goes — filled by memory_leads.MEMORY_JS.
+
+    The cache_controller report decides the leads and renders after this page is written, so the
+    page carries only the snap ids to look them up by. A partial extract offers no snap-id copy for
+    a retrieval, as it offers none in the servers block either.
+    """
+    sids = " ".join(html.escape(m["snap_id"]) for m in members)
+    offer = "" if closure is not None else ' data-offer="1"'
+    return f'<div id="memleads" data-snaps="{sids}"{offer}></div>'
 
 
 def _cloud_html(members, media_prefix, cc_prefix, closure):
@@ -3846,14 +3860,18 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>{report_ui.emoji_font_link("../../")}'
            f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
+           f'{memory_leads.MEMORY_CSS}'
            f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
-           f'{banner}{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
-           f'{report_ui.SELECT_TOOLBAR_JS}{report_ui.CLIPBOARD_JS}'
+           f'{banner}{back}{selbar}{body}<script>{memory_leads.LOADER_JS}</script>'
+           f'<script src="../../CacheController/data/{memory_leads.SCRIPT_NAME}"></script>'
+           f'<script>{_HINT_JS}{report_ui.NAV_JS}'
+           f'{report_ui.SELECT_TOOLBAR_JS}{report_ui.CLIPBOARD_JS}{memory_leads.MEMORY_JS}'
+           f'scLeadsPage("../../");'
            f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
            f'scConsumeHash();</script></body></html>')
     os.makedirs(pages_dir, exist_ok=True)
@@ -4416,7 +4434,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'{report_ui.emoji_font_link("../")}'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{partial_css}</style>'
+           f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{memory_leads.MEMORY_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
@@ -4464,6 +4482,12 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<label>Snapchat&#39;s servers{report_ui.info_icon(cloud_memories.CANDIDATE_BASIS)} '
            f'<select id="cloud" onchange="flt()"><option value="">any</option>'
            f'{cloud_opts}</select></label>'
+           # Shown only once the cache_controller report's memory_leads.js names a Memory: until
+           # then it is a control that can match nothing (see memory_leads.MEMORY_JS).
+           f'<label id="pcfl" style="display:none">Possible cached file'
+           f'{report_ui.info_icon(memory_leads.memory_basis())} '
+           f'<select id="pcf" onchange="flt()"><option value="">any</option>'
+           f'<option id="pcfy" value="y">with a possible cached file</option></select></label>'
            + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
            + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
            f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
@@ -4495,8 +4519,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="vwin" id="vwin"></div></div>'
            f'<div class="vempty" id="vempty" style="display:none">No memory matches the current filters.</div>'
            f'<script src="data/index.js"></script>'
+           f'<script>{memory_leads.LOADER_JS}</script>'
+           f'<script src="../CacheController/data/{memory_leads.SCRIPT_NAME}"></script>'
            f'<script>{_HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
-           f'{report_ui.TIME_JS}{report_ui.CLIPBOARD_JS}'
+           f'{report_ui.TIME_JS}{report_ui.CLIPBOARD_JS}{memory_leads.MEMORY_JS}'
            'var flt_t=0;'
            # A lead reached only through a folded member is opened on the member that matched, so
            # the row does not look like one the filters should not have returned. See openFoldHits.
@@ -4519,9 +4545,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
            'ge=document.getElementById("geo").value,me=document.getElementById("meta").value,'
-           'cl=document.getElementById("cloud").value;'
+           'cl=document.getElementById("cloud").value,pc=scFv("pcf");'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!cl||m.cl===cl)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!cl||m.cl===cl)&&(!pc||m.pcf===pc)'
            '&&(!me||(me==="tag"?m.stag==="y":m.meta===me))'
            '&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
@@ -4538,12 +4564,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
            'document.getElementById("wal").value="";document.getElementById("geo").value="";'
            'document.getElementById("meta").value="";document.getElementById("cloud").value="";'
+           'scFvReset("pcf");'
            'scTimeReset("t");'
            # The fold hides rows, so "show me everything again" has to include unfolding — and it is
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
            # reset() when its target is not in the view).
            'document.getElementById("fold").checked=false;'
            'document.getElementById("selonly").value="";}});'
+           # the Kind cell (c2) carries the badge, as it carries every other state badge
+           'scLeadsIndex("../",2);'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
 

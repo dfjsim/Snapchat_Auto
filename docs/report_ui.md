@@ -48,6 +48,11 @@ index and the detail pages load it with `<script src>` / `<link href>`.
 * **A query is OR-ed on `|`.** `a|b` matches a row containing either; a query with no `|` behaves
   exactly as a plain substring search always did. This exists for `#find=` links (below) but is
   usable by hand, and the search box's tooltip says so.
+* **Another report can add to the rows (`SCV.annotate`).** A page may change its rows' cells, search
+  text and filter metadata — never their ids — from a second data file, after its own have loaded. The
+  Memories index marks the Memories the cache_controller report lists as possible from that report's
+  `data/memory_leads.js`, which is written *after* the Memories report and so cannot be in its rows (see
+  [report_memories.md](report_memories.md#possible-cached-file--the-cache_controller-reports-leads-from-this-side)).
 
 ## Links whose target is a set of rows (`#find=`)
 

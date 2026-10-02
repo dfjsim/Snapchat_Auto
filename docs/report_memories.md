@@ -388,6 +388,25 @@ copies its snap id — the page cannot start a retrieval itself. Media retrieved
 device byte-identical to it; it never joins `media_files`, so groups, hashes and the media states are
 the device's alone. See [cloud_download.md](cloud_download.md).
 
+### Possible cached file — the cache_controller report's leads, from this side
+
+A cached media file nothing on the device connects to anything may still be a Memory's media — the snap
+editor's working copy of a snap later saved — and the cache_controller report lists, as *leads*, the
+Memories whose times fall near the file's ([report_cache_controller.md](report_cache_controller.md#possible-memory--leads-never-links)).
+The same leads show here: *≈ possible file* in the Kind column (*≈ possible file (grouped)* on a folded
+group's row, since its members are out of sight), the *Possible cached file* filter (shown only when
+there is one), and on the Memory's page a *Possible cached file — NOT proven* panel after its media
+files: each cached file, its kind, the closest difference and every pair, and where this Memory ranks
+among the file's leads — a Memory that is one of five candidates is a weaker lead than the only one. The
+panel's *📋 Copy snap ID* is for the Cloud download, which proves the lead (the file then links *by
+content*) or rules it out.
+
+None of it is in this report's own files. The cache_controller report decides the leads and renders
+after this one, so it writes `CacheController/data/memory_leads.js` and these pages load it at view time
+(`memory_leads.LOADER_JS` + `MEMORY_JS`; the index adds to its rows through `SCV.annotate`). The badge
+and the panel point at the cache files; nothing becomes a link to this Memory's records, a count, or a
+closure edge.
+
 ### My Eyes Only
 A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the
 index's Kind column (`m["is_meo"]`, set from `IS_ENCRYPTED` / the MEO key path — see
