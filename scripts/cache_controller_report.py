@@ -267,27 +267,35 @@ def load_memory_index(app):
         return memories_android_report.memory_index(app)
     snap_ids, url_keys, media_ids, snap_urls = {}, {}, {}, {}
     for p in find_profiles(app):
+        # Both readings, through sqlite_open like every other evidence database: staged copies, so
+        # nothing is ever opened (or given a -shm) in place, and a Memory row the -wal has since
+        # changed or removed still links its cache files. Current rows come first, so they win.
+        views = None
         try:
-            conn = sqlite3.connect(f"file:{p['scdb']}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(ZGALLERYSNAP)")}
-            url_cols = [c for c in _MEM_URL_COLS if c in cols]
-            has_mediaid = "ZMEDIAID" in cols
-            for row in conn.execute("SELECT * FROM ZGALLERYSNAP WHERE ZSNAPID IS NOT NULL"):
-                sid = str(row["ZSNAPID"])
-                snap_ids[sid.upper()] = (sid, p["userHash"])
-                if has_mediaid and row["ZMEDIAID"]:
-                    media_ids.setdefault(str(row["ZMEDIAID"]).upper(), (sid, p["userHash"]))
-                for c in url_cols:
-                    if row[c]:
-                        snap_urls.setdefault(sid, []).append(str(row[c]))
-                    tok = _url_token(row[c])
-                    if tok:
-                        ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
-                        url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
-            conn.close()
-        except sqlite3.DatabaseError as error:
+            views = sqlite_open.open_views(p["scdb"])
+            rows, _markers = sqlite_open.read_table(views, "ZGALLERYSNAP")
+        except (sqlite3.DatabaseError, OSError) as error:
             logger.debug(f"Could not read memory index from {p['scdb']}: {error}")
+            rows = []
+        finally:
+            if views is not None:
+                views.close()
+        for row in rows:
+            if not row.get("ZSNAPID"):
+                continue
+            sid = str(row["ZSNAPID"])
+            current = sid.upper() not in snap_ids          # the first row of a snap is the current one
+            snap_ids.setdefault(sid.upper(), (sid, p["userHash"]))
+            if row.get("ZMEDIAID"):
+                media_ids.setdefault(str(row["ZMEDIAID"]).upper(), (sid, p["userHash"]))
+            for c in _MEM_URL_COLS:
+                url = row.get(c)
+                if url and (current or str(url) not in snap_urls.get(sid, [])):
+                    snap_urls.setdefault(sid, []).append(str(url))
+                tok = _url_token(url)
+                if tok:
+                    ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
+                    url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
     return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
             "snap_urls": snap_urls}
 
