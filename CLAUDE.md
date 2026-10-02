@@ -101,6 +101,10 @@ Memories / My Eyes Only.
 - Headless runs: `Snapchat_Auto.py --zip <file> [--keychain …] [--workdir …] [--run-name …]`
   runs the whole pipeline with no GUI and no pause, which is how the tool is scripted over
   several extractions. `run()` is the shared entry point for both the GUI and the CLI.
+- Identifier search: `Snapchat_Auto.py --trace-ids <run folder> <id>…` (`scripts/trace_ids.py`) — where
+  each id occurs in a run's `ExtractedData/` (text/UTF-16/hex/raw/LE-UUID/base64; databases row by row in
+  both readings; superseded `-wal` frames). Reports locations only, never content — it is how a finding
+  on case data is checked without the data leaving the case machine. See [trace_ids.md](docs/trace_ids.md).
 - Partial reports: adding `--selection <file>` to a normal run renders **only** the rows an examiner
   ticked plus the related items they asked for, into `Reports_partial_<stamp>/` — the full `Reports/`
   is never touched. Same pipeline, in two halves: every report's `index()`, then one closure, then

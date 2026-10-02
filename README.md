@@ -72,6 +72,12 @@ folder's name instead of using a timestamp, so a repeated run overwrites the sam
 runs stay directly comparable. Exit code is 0 on success, 1 if the run failed, 2 for a bad
 argument. `--help` lists everything; `--diag-keychain <file>` still checks a keychain on its own.
 
+`--trace-ids <run folder> <id> [<id> …]` answers "is this identifier recorded anywhere?" for a run
+that already exists: every extracted file is searched for each id (a snap id, a CACHE_KEY, a claim
+key…) as text, UTF-16, hex, raw bytes and base64, databases row by row with and without their
+`-wal`. It lists **where** each occurs — never the content — so the result can be discussed without
+the data. See [docs/trace_ids.md](docs/trace_ids.md).
+
 ### Update checks (optional, off by default)
 
 If you keep new builds of this tool in a folder — a shared drive, say — point the GUI's *"Folder

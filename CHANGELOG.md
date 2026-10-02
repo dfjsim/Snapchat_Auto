@@ -6,6 +6,17 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [Unreleased] — 1.9.0-beta.1
+
+### Added
+- **`--trace-ids <run folder> <id> …`** — `scripts/trace_ids.py`. Searches every file a run extracted
+  for each identifier — as text in any case, UTF-16, dashless hex, the raw and little-endian UUID
+  bytes and base64 — reads every database row by row in both readings (with and without its
+  `-wal`), and places `-wal` hits in their frame, marking superseded frames. It reports where each
+  identifier occurs — file, offset, table, column, row — and never the content, in the log and in
+  `trace_ids_<stamp>.json`. For asking whether the device recorded a connection no report makes yet,
+  on the machine that holds the case. See [docs/trace_ids.md](docs/trace_ids.md).
+
 ## [1.8.0-beta.4] — 2026-10-01
 
 ### Fixed

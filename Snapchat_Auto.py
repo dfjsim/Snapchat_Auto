@@ -680,6 +680,36 @@ def diag_keychain(path):
     return 0 if res["status"] == "ok" else 1
 
 
+def run_trace_ids(args):
+    """`--trace-ids <run folder> <id> [<id>…]`: where each identifier occurs in a run's extracted
+    files — text, binary and base64 forms, row by row in every database, both -wal readings and
+    superseded frames. Run on the machine that holds the case: it reports locations, never content,
+    so what comes back can be discussed without the data. See scripts/trace_ids.py."""
+    from scripts import trace_ids
+    if len(args) < 3 or not os.path.isdir(args[1]):
+        print("--trace-ids requires a run folder and at least one identifier:\n"
+              "  Snapchat_Auto.exe --trace-ids <run folder> <id> [<id> ...]   (or @ids.txt)")
+        return trace_ids.EXIT_USAGE
+    run_folder = args[1]
+    try:
+        identifiers = trace_ids.read_identifiers(args[2:])
+    except OSError as error:
+        print(f"--trace-ids: {error}")
+        return trace_ids.EXIT_USAGE
+    if not identifiers:
+        print("--trace-ids: no identifier given")
+        return trace_ids.EXIT_USAGE
+    add_log_file(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — --trace-ids over {trace_ids.extracted_root(run_folder)}")
+    payload = trace_ids.trace(run_folder, identifiers)
+    for line in trace_ids.describe(payload):
+        logger.info(line)
+    out = trace_ids.write_report(run_folder, payload)
+    logger.info(f"{len(payload['hits'])} location(s) in {payload['files_scanned']} files "
+                f"({payload['elapsed_s']} s). Written to {out} — locations only, no content.")
+    return trace_ids.EXIT_FOUND if payload["hits"] else trace_ids.EXIT_NONE
+
+
 def print_usage():
     print(f"Snapchat Auto v{get_version()}\n\n"
           "usage: Snapchat_Auto.exe [options]\n\n"
@@ -784,6 +814,15 @@ def print_usage():
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
           "                          recovered, 1 otherwise.\n"
+          "  --trace-ids <run folder> <id> [<id> ...]\n"
+          "                          Search every file the run extracted for each identifier (a\n"
+          "                          snap id, a CACHE_KEY, a claim key, ... or @file, one per line)\n"
+          "                          as text, UTF-16, hex, raw and little-endian UUID bytes and\n"
+          "                          base64; databases row by row, with and without the -wal, and\n"
+          "                          superseded -wal frames. Lists where each occurs - file, table,\n"
+          "                          column, row, offset - never the content, in the log and in\n"
+          "                          trace_ids_<stamp>.json in the run folder. Exit code 0 if\n"
+          "                          anything was found, 1 if nothing, 2 for bad arguments.\n"
           "  --help, -h              Show this message.\n\n"
           "A headless run never pauses for a keypress, so it is safe to call from a script.")
 
@@ -1655,6 +1694,8 @@ def main(args):
         sys.exit(0)
     if flag in ("diag-keychain", "diagkeychain"):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
+    if flag in ("trace-ids", "traceids"):
+        sys.exit(run_trace_ids(args))
     if flag in ("install-selection", "installselection"):
         sys.exit(run_install_selection(args))
     if flag in ("describe-selection-api", "describeselectionapi"):
