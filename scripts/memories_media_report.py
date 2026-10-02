@@ -68,6 +68,7 @@ from scripts import app_version
 from scripts import partial_report
 from scripts import offline_maps
 from scripts import gallery_search
+from scripts import cloud_memories
 
 logger = logging.getLogger(__name__)
 
@@ -752,6 +753,7 @@ def _bare_memory(snap_id, profile):
         "wal": sqlite_open.BOTH,
         "prior_rows": [],
         "memdata": [],
+        "raw_times": {}, "cloud_files": [],
     }
 
 
@@ -853,7 +855,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     # entry values are kept in their own dicts and rendered in their own report sections. The
     # label lists (SNAP_OTHER_LABELS / ENTRY_OTHER_LABELS) also gate which columns appear, so
     # schemas from different app versions only surface the fields we've curated.
-    entry_times, entry_other, entry_memdata = {}, {}, {}
+    entry_times, entry_other, entry_memdata, entry_raw = {}, {}, {}, {}
     etcols, entry_other_cols = [], []
     try:
         ecols = [r[1] for r in cur.execute("PRAGMA table_info(ZGALLERYENTRY)")]
@@ -872,6 +874,9 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                                    else None) for c in etcols}
             entry_other[pk] = {c: _other_value(c, er.get(c), timefmt) for c in entry_other_cols}
             entry_memdata[pk] = _memdata_records(er.get("ZMEMDATAID"), "ZMEMDATAID", timefmt)
+            # the same values as numbers, for the cloud download's date rules
+            entry_raw[pk] = {f"ZGALLERYENTRY.{c}": er[c] for c in etcols
+                             if isinstance(er.get(c), (int, float)) and er.get(c)}
     except sqlite3.DatabaseError as error:
         logger.debug(f"ZGALLERYENTRY read failed: {error}")
     empty_entry_times = {c: None for c in etcols}
@@ -939,6 +944,12 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # the MemData identifiers this row and its entry record about themselves
             "memdata": (_memdata_records(r.get("ZMEMDATAIDS"), "ZMEMDATAIDS", timefmt)
                         + entry_memdata.get(entry_pk, [])),
+            # every timestamp as stored (Cocoa seconds), for the cloud download's date rules
+            "raw_times": dict({f"ZGALLERYSNAP.{c}": r[c] for c in time_cols
+                               if isinstance(r.get(c), (int, float)) and r.get(c)},
+                              **entry_raw.get(entry_pk, {})),
+            # media retrieved from Snapchat's servers — never mixed into media_files
+            "cloud_files": [],
         }
         if has_zenc and r.get("ZENCRYPTION"):
             try:
@@ -3252,6 +3263,11 @@ _BASE_CSS = """
  .partialbar{background:#fdeeee;border:1px solid #edb8b8;border-left:4px solid #b03535;color:#6d1b1b;
    border-radius:5px;padding:8px 12px;margin:8px 0;font-size:12px;line-height:1.5}
  .partialcap{color:#b03535;font-weight:700}
+ .cloudwarn{background:#e3f1fb;border:1px dashed #5b9bc8;border-left:4px solid #0d4a75;color:#0d4a75;
+   border-radius:5px;padding:8px 12px;margin:6px 0;font-size:12px;line-height:1.5}
+ .cloudoffer{font-size:12px;color:#333;margin:4px 0}
+ .cloudoffer button{font-size:12px;padding:3px 9px;border:1px solid #5b9bc8;border-radius:5px;background:#e3f1fb;
+   color:#0d4a75;font-weight:700;cursor:pointer;margin-left:4px}
  tr.partialrow td{background:#fff8f8}
  .hint{position:relative;display:inline-block}
  .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
@@ -3715,8 +3731,78 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
           <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
           <div class="sect">Media files</div>{files_table}
+          {_cloud_html(members, media_prefix, cc_prefix, closure)}
         </div>
       </div>"""
+
+
+def _cloud_html(members, media_prefix, cc_prefix, closure):
+    """The detail page's Snapchat's-servers block: what was retrieved, or what a retrieval could add.
+
+    Retrieved media sits in its own section, under a warning, with the request it came from and the
+    authority it was asked under, and the cache files on the device proven byte-identical to it. A
+    Memory nothing was retrieved for, but which a server copy could complete, gets the reason and a
+    button that copies its snap id for the Cloud download window — never in a partial extract, which
+    is a finished deliverable rather than a working report.
+    """
+    files = [(m, f) for m in members for f in m.get("cloud_files") or []]
+    if files:
+        rows = []
+        for m, f in files:
+            hashes = f.get("hashes") or [("", "", "")]
+            enc = f.get("encrypted") or {}
+            same = []
+            for hit in f.get("identical_cached") or []:
+                same.append(report_ui.xref(
+                    f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                    f"CacheController_report.html#ck-{html.escape(hit['cache_key'])}\">🗄 "
+                    f"{html.escape(hit['cache_key'])}</a>",
+                    [("cc", f"ck-{hit['cache_key']}")], closure=closure)
+                    + (" <span class='muted'>(as received)</span>"
+                       if hit.get("what") == "encrypted" else ""))
+            auth = f.get("authority") or {}
+            rows.append(
+                "<tr>"
+                + (f"<td class='mono'>{html.escape(m['snap_id'])}</td>" if len(members) > 1 else "")
+                + f"<td>{html.escape(f.get('role') or '')}</td>"
+                f"<td>{html.escape((f.get('ext') or '').upper())}</td>"
+                f"<td>{(f.get('bytes') or 0) // 1024} KB</td>"
+                f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
+                f"<td class='hash'><span class='hl'>MD5</span> {html.escape(hashes[0][1] or '')}<br>"
+                f"<span class='hl'>SHA-256</span> {html.escape(hashes[0][2] or '')}"
+                f"<div class='hgap'></div><span class='pl'>as received</span> "
+                f"{html.escape(str(enc.get('bytes') or ''))} bytes, SHA-256 "
+                f"{html.escape(enc.get('sha256') or '')}</td>"
+                f"<td>{html.escape(f.get('retrieved_utc') or '')}<br><span class='muted'>"
+                f"{html.escape(f.get('url_column') or '')} · HTTP "
+                f"{html.escape(str(f.get('http_status') or ''))}</span></td>"
+                f"<td>{'<br>'.join(same) or '<span class=muted>none</span>'}</td>"
+                f"<td>{html.escape(auth.get('note') or '')}</td></tr>")
+        head = ("<tr>" + ("<th>Snap</th>" if len(members) > 1 else "")
+                + "<th>Role</th><th>Type</th><th>Size</th><th>File</th>"
+                "<th>Hashes (decrypted / as received)</th><th>Retrieved (UTC)</th>"
+                "<th>Identical files on the device</th><th>Legal authority</th></tr>")
+        return ("<div class='sect'>☁ Retrieved from Snapchat&#39;s servers — NOT device evidence"
+                + _info(cloud_memories.CLOUD_BASIS) + "</div>"
+                "<div class='cloudwarn'>These files were requested from Snapchat&#39;s servers at "
+                "the examiner&#39;s request, from the addresses this Memory&#39;s row records, and "
+                "decrypted with its own key. They show what the server returned when asked, not what "
+                "the device held — the device&#39;s own copies, if any, are in Media files above."
+                "</div><table class='files'>" + head + "".join(rows) + "</table>")
+    if closure is not None:
+        return ""
+    wanted = [m for m in members if (m.get("cloud") or {}).get("state") in ("missing", "incomplete")]
+    if not wanted:
+        return ""
+    reasons = sorted({r for m in wanted for r in (m.get("cloud") or {}).get("reasons") or []})
+    ids = json.dumps([m["snap_id"] for m in wanted])
+    return ("<div class='sect'>Snapchat&#39;s servers" + _info(cloud_memories.CANDIDATE_BASIS)
+            + "</div><div class='cloudoffer'>A copy from Snapchat&#39;s servers could add to what "
+            "the device holds: " + html.escape("; ".join(reasons)) + ". "
+            f"<button onclick='scCopySnapIds({html.escape(ids)},\"this Memory\")'>☁ Get from "
+            "Snapchat&#39;s servers…</button> <span class='muted'>copies the snap id"
+            + ("s" if len(wanted) > 1 else "") + " for Snapchat Auto&#39;s Cloud download window; "
+            "nothing is requested from here.</span></div>")
 
 
 def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
@@ -3756,7 +3842,7 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
            f'{banner}{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
-           f'{report_ui.SELECT_TOOLBAR_JS}'
+           f'{report_ui.SELECT_TOOLBAR_JS}{report_ui.CLIPBOARD_JS}'
            f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
            f'scConsumeHash();</script></body></html>')
     os.makedirs(pages_dir, exist_ok=True)
@@ -4089,6 +4175,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 kind += "<div class='walgone' title='deleted since the last checkpoint'>DELETED</div>"
             elif changed:
                 kind += "<div class='walchg' title='row rewritten since the last checkpoint'>EDITED</div>"
+            cloud = m.get("cloud") or {}
+            if m.get("cloud_files"):
+                kind += ("<div class='cloudb' title='media retrieved from Snapchat&#39;s servers at the "
+                         "examiner&#39;s request — not device evidence; open Details'>☁ CLOUD</div>")
             # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
             # since every byte here is multiplied by the number of memories in data/index.js
             cells = [
@@ -4151,6 +4241,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                     searchable.append("search index place")
             if changed:
                 searchable.append("edited changed rewritten since checkpoint wal")
+            if m.get("cloud_files"):
+                searchable.append("cloud retrieved snapchat servers download")
+                searchable += [f["hashes"][0][2] for f in m["cloud_files"] if f.get("hashes")]
             if m["latitude"] is not None:
                 searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
             anchor = f"mem-{zsnap}"
@@ -4167,6 +4260,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "geo": _geo_state(m),
                  "meta": "y" if has_meta else "n",
                  **({"stag": "y"} if snap_tags else {}),   # only when true: paid per row
+                 **({"cl": cloud["state"]} if cloud.get("state") else {}),
                  "wal": ("carved" if carved else
                          "keyrow" if recovery.get("method") == METHOD_KEY_ROW else
                          "index" if recovery else
@@ -4189,7 +4283,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     # list and the fold's lead id, which are not states and have nothing to count.
     counts = {}
     for row in rows:
-        for key in ("img", "meo", "part", "geo", "meta"):
+        for key in ("img", "meo", "part", "geo", "meta", "cl"):
             value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
         if row[5].get("stag"):                             # a narrower option of the same filter
@@ -4208,6 +4302,14 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                            ("tag", "with the Snapchat app's tag"),
                                            ("n", "none worth a look")),
                                           counts.get("meta", {}))
+    cloud_opts = report_ui.counted_options(cloud_memories.STATES, counts.get("cl", {}))
+    # what a report holding server-retrieved media has to say about it, at the top of the index
+    cloud_prov = cloud_memories.provenance(memories)
+    cloud_note = "" if not cloud_prov else (
+        "<div class='cloudbar'>☁ <b>" + str(cloud_prov["memories"]) + "</b> Memory/Memories carry "
+        "media retrieved from Snapchat's servers — <b>not device evidence</b> — at the examiner's "
+        "request, under: " + "; ".join(html.escape(x["note"]) for x in cloud_prov["sessions"])
+        + _info(cloud_memories.CLOUD_BASIS) + "</div>")
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -4255,6 +4357,11 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walrec{background:#5e2d1d;color:#fff;border:1px solid #44120a;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2 .cloudb{background:#e3f1fb;color:#0d4a75;border:1px dashed #5b9bc8;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .cloudbar{background:#e3f1fb;border:1px dashed #5b9bc8;color:#0d4a75;padding:8px 24px;font-size:13px}
+ button.copyids{font-size:12.5px;padding:5px 9px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71;margin-left:8px}
  .idxplace{color:#1f5e2e}
  .vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5,.vcells>.vc.c6{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
@@ -4313,7 +4420,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            + f'times in <b>{html.escape(tz_label)}</b></div>'
            + figures
            + _wal_summary_html(memories) + '</header>'
-           f'{partial_banner_html}{banner}'
+           f'{partial_banner_html}{banner}{cloud_note}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, AES key / IV, camera, user…" oninput="flt()">'
@@ -4343,13 +4450,19 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<option value="carved">deleted outright (key carved)</option>'
            f'<option value="keyrow">no Memory row (key row survives)</option>'
            f'<option value="index">no Memory row (search index only)</option></select></label>'
+           f'<label>Snapchat&#39;s servers{report_ui.info_icon(cloud_memories.CANDIDATE_BASIS)} '
+           f'<select id="cloud" onchange="flt()"><option value="">any</option>'
+           f'{cloud_opts}</select></label>'
            + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
            + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
            f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
            f'{report_ui.info_icon(FOLD_CONTROL_HINT)}</label>'
            f'{report_ui.clear_filters_button("memory")}'
            f'<span id="count" style="color:#555"></span></div>'
-           f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
+           f'<div class="toolbar">{report_ui.selection_toolbar("memory")}'
+           f'<button class="copyids" onclick="scCopySelectedMemories()" title="Copy the snap ids of '
+           f'the ticked Memories, one per line, to paste into Snapchat Auto&#39;s Cloud download '
+           f'window">📋 Copy snap IDs</button></div>'
            f'<div class="pager" id="pager"></div>'
            f'<div class="vhdr" id="vhdr" style="grid-template-columns:{MEM_SEL_W} {MEM_COLS}">'
            f'<div class="vc sel">'
@@ -4372,7 +4485,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="vempty" id="vempty" style="display:none">No memory matches the current filters.</div>'
            f'<script src="data/index.js"></script>'
            f'<script>{_HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
-           f'{report_ui.TIME_JS}'
+           f'{report_ui.TIME_JS}{report_ui.CLIPBOARD_JS}'
            'var flt_t=0;'
            # A lead reached only through a folded member is opened on the member that matched, so
            # the row does not look like one the filters should not have returned. See openFoldHits.
@@ -4394,9 +4507,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
-           'ge=document.getElementById("geo").value,me=document.getElementById("meta").value;'
+           'ge=document.getElementById("geo").value,me=document.getElementById("meta").value,'
+           'cl=document.getElementById("cloud").value;'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!cl||m.cl===cl)'
            '&&(!me||(me==="tag"?m.stag==="y":m.meta===me))'
            '&&scTimeHit(scTimeWin("t"),m.ts)'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
@@ -4412,7 +4526,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
            'document.getElementById("wal").value="";document.getElementById("geo").value="";'
-           'document.getElementById("meta").value="";'
+           'document.getElementById("meta").value="";document.getElementById("cloud").value="";'
            'scTimeReset("t");'
            # The fold hides rows, so "show me everything again" has to include unfolding — and it is
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
@@ -4431,7 +4545,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 # --------------------------------------------------------------------------- entry
 
 def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
-          tile_server=""):
+          tile_server="", cloud=None, run_folder=None):
     """
     Recover the Memories and their media, and hand back the closure's view of them.
 
@@ -4449,6 +4563,9 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
     tile_server : URL of an **offline** XYZ map tile server the examiner runs (server root or a
                   ``{z}/{x}/{y}`` template). Only when given, each geolocated Memory's detail page
                   gets a small map rendered from it. Nothing is fetched otherwise.
+    cloud       : a :class:`cloud_memories.CloudRequest` — retrieve media from Snapchat's servers
+                  first, under the legal authority it records. Never given in a partial run.
+    run_folder  : the run folder whose ``CloudDownloads/`` holds earlier retrievals to show.
     """
     app = find_app_container(app_or_root)
     # When no src_root is given (e.g. the standalone CLI), device_path() falls back to anchoring
@@ -4588,6 +4705,25 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
                         src_root=src_root, manifest=manifest,
                         fs=load_fs_records(src_root, app_or_root, app))
 
+    # Snapchat's servers (scripts/cloud_memories.py): whether a copy there could add anything, a
+    # retrieval when the examiner asked for one, and what earlier retrievals into this run folder hold.
+    # What comes back goes into cloud_files, never media_files, so the groups, hashes and states
+    # derived from device evidence cannot change because of it.
+    for m in all_memories.values():
+        m.setdefault("cloud_files", [])
+        m["cloud"] = cloud_memories.candidate(m)
+    if cloud is not None and run_folder:
+        cloud_memories.cloud_phase(all_memories, run_folder, cloud, decrypt_sccontent)
+    identical = {}
+    if run_folder and cloud_memories.attach(all_memories, run_folder, media_dir):
+        for m in all_memories.values():
+            m["cloud"] = cloud_memories.candidate(m)
+        identical = cloud_memories.find_identical(
+            all_memories, scfull, scparts, lambda key: _resolve_sccontent(key, scfull, scparts))
+        if identical:
+            logger.info(f"Snapchat's servers: {len(identical)} cache file(s) on the device are "
+                        f"byte-identical to retrieved media")
+
     # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
     # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds
     # it without this report deriving it twice.
@@ -4619,7 +4755,7 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
                                 tile_server=tile_server, tz_label=tz_label, userids=userids,
                                 src_root=src_root, manifest=manifest,
                                 keychain_available=keychain_available, keychain_note=kc["detail"],
-                                meo_owners=meo_owners)
+                                meo_owners=meo_owners, identical=identical)
 
 
 def _prune_media(outdir, memories):
@@ -4634,17 +4770,21 @@ def _prune_media(outdir, memories):
     media_dir = os.path.join(outdir, "media")
     if not os.path.isdir(media_dir):
         return 0
-    keep = {f["out"] for m in memories.values() for f in m.get("media_files") or () if f.get("out")}
+    keep = {f["out"] for m in memories.values()
+            for f in list(m.get("media_files") or ()) + list(m.get("cloud_files") or ())
+            if f.get("out")}
     removed = 0
-    for name in os.listdir(media_dir):
-        if name in keep:
-            continue
-        try:
-            os.remove(os.path.join(media_dir, name))
-            removed += 1
-        except OSError as error:
-            logger.warning(f"Could not remove decrypted media {name}, which no Memory in this "
-                           f"extract references: {error}")
+    for dirpath, _dirs, names in os.walk(media_dir):
+        for name in names:
+            rel = os.path.relpath(os.path.join(dirpath, name), media_dir).replace("\\", "/")
+            if rel in keep:
+                continue
+            try:
+                os.remove(os.path.join(dirpath, name))
+                removed += 1
+            except OSError as error:
+                logger.warning(f"Could not remove decrypted media {rel}, which no Memory in this "
+                               f"extract references: {error}")
     return removed
 
 
@@ -4682,6 +4822,9 @@ def render(stage, closure=None, prov=None):
         if pruned:
             logger.info(f"  {pruned} decrypted media file(s) and map image(s) removed: no Memory in "
                         f"this extract references them")
+    identical = {key: kept for key, recs in (stage.get("identical") or {}).items()
+                 if (kept := [r for r in recs if r["snap_id"] in memories])}
+    cloud_memories.write_manifests(memories, outdir, identical)
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -4695,7 +4838,7 @@ def render(stage, closure=None, prov=None):
 
 
 def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
-         tile_server=""):
+         tile_server="", cloud=None, run_folder=None):
     """Build a Memories media report: :func:`index` then :func:`render`.
 
     See :func:`index` for the arguments. A partial run calls the two halves separately, so the closure
@@ -4703,7 +4846,7 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     media recovery itself is on the index side; :func:`index` says why.
     """
     stage = index(app_or_root, keychain=keychain, outdir=outdir, padding=padding, tz=tz,
-                  src_root=src_root, tile_server=tile_server)
+                  src_root=src_root, tile_server=tile_server, cloud=cloud, run_folder=run_folder)
     return render(stage)
 
 

@@ -111,8 +111,8 @@ def copy_css(dest_dir):
 EMOJI_FONT_FAMILY = "Snapchat Auto Emoji"
 EMOJI_FONT_STACK = f'"Apple Color Emoji","{EMOJI_FONT_FAMILY}"'   # what ends every report font stack
 EMOJI_FONT_CSS = "emoji_font.css"
-# ©, the sort and link arrows ↔ ↕ ↗, ▶, ⚠, ✔ and the 🗂 🗃 🗄 link icons
-UI_SYMBOLS = "©↔↕↗▶⚠✔🗂🗃🗄"
+# ©, the sort and link arrows ↔ ↕ ↗, ▶, ⚠, ✔, the 🗂 🗃 🗄 link icons and ☁ (server-retrieved media)
+UI_SYMBOLS = "©↔↕↗▶⚠✔🗂🗃🗄☁"
 _EMOJI_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fonts",
                                 "NotoColorEmoji.woff2")
 
@@ -748,6 +748,45 @@ function scSelNote(){
   '<b>'+n+'</b> message selection(s) in it name a message number with no conversation \\u2014 the '+
   'same number exists in several chats, so they cannot be attributed to one and are not counted '+
   'here. Re-tick those messages and save; saving now drops them.';}
+"""
+
+
+# Copying text for the examiner to paste elsewhere — the snap ids a Cloud download is asked for. A page
+# opened from file:// may be refused the asynchronous clipboard, and execCommand is the older route;
+# when both fail the text is shown selected in a box, so the examiner can always copy it by hand.
+CLIPBOARD_JS = """
+function scCopyText(text,done){
+ function show(){
+  var w=document.createElement('div');
+  w.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:99999;'+
+   'display:flex;align-items:center;justify-content:center';
+  w.innerHTML='<div style="background:#fff;border-radius:8px;padding:14px;max-width:640px;'+
+   'width:90%;font:13px system-ui,sans-serif"><div style="margin-bottom:6px"></div>'+
+   '<textarea readonly style="width:100%;height:180px;font:12px ui-monospace,Consolas,monospace">'+
+   '</textarea><div style="text-align:right;margin-top:8px"><button>Close</button></div></div>';
+  w.querySelector('div>div').textContent=done+' (copy it with Ctrl+C)';
+  var t=w.querySelector('textarea');t.value=text;
+  w.querySelector('button').onclick=function(){w.remove();};
+  document.body.appendChild(w);t.focus();t.select();}
+ function legacy(){
+  var t=document.createElement('textarea'),ok=false;
+  t.value=text;t.style.cssText='position:fixed;left:-9999px';document.body.appendChild(t);t.select();
+  try{ok=document.execCommand('copy');}catch(e){}
+  t.remove();
+  if(ok)alert(done);else show();}
+ if(navigator.clipboard&&navigator.clipboard.writeText)
+  navigator.clipboard.writeText(text).then(function(){alert(done);},legacy);
+ else legacy();}
+function scCopySnapIds(ids,what){
+ if(!ids||!ids.length){alert('Nothing to copy: tick the Memories to ask Snapchat\u2019s servers for '+
+  'first.');return;}
+ scCopyText(ids.join('\\n'),ids.length+' snap id(s) copied'+(what?' ('+what+')':'')+'. In '+
+  'Snapchat Auto, open \u201cCloud download for an existing run\u2026\u201d and paste them into '+
+  '\u201cThese snap ids\u201d.');}
+function scCopySelectedMemories(){
+ var ids=SCSel.ids('mem','').filter(function(i){return i.indexOf('mem-')===0;})
+  .map(function(i){return i.slice(4);});
+ scCopySnapIds(ids,'the Memories ticked in this run');}
 """
 
 
