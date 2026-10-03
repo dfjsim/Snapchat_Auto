@@ -15,6 +15,12 @@ count beside each report is the count its box gives. Every hit opens its row in 
 Messages are searched too: each conversation's page keeps its message rows in
 ``Conversations/pages/data/<key>/index.js``, listed here when the page is written.
 
+**By date as well.** Every row carries the times it shows as the wall clocks displayed
+(``report_ui.ts_keys``, in the row's ``ts`` metadata — a conversation's ``ct``/``mt``), and the page
+offers the reports' own date/time window (``report_ui.time_filter``): between two moments, or within
+± N of one. With words as well, a row must match both. A row with no readable time is not presented
+as falling inside a window, exactly as in the reports.
+
 Not searched: the legacy single-page reports, which keep no row data; and anything a row shows only
 when expanded, unless its report put it in the row's search text — exactly as in the reports.
 
@@ -80,12 +86,15 @@ def sources(report_dir, platform="ios"):
         if key == "memories" and platform == "android":
             cells = ANDROID_MEMORY_CELLS
         out.append({"key": key, "title": title, "page": page, "data": data, "tab": tab,
-                    "cells": list(cells)})
+                    "cells": list(cells),
+                    # a conversation's own activity and its messages' times, as its report's
+                    # default scope takes them; every other row's in `ts`
+                    "times": ["ct", "mt"] if key == "conversations" else ["ts"]})
         if key == "conversations":
             pages = conversation_pages(report_dir)
             if pages:
                 out.append({"key": "messages", "title": "Messages", "tab": "scauto_conv_page",
-                            "cells": list(MESSAGE_CELLS), "pages": pages})
+                            "cells": list(MESSAGE_CELLS), "pages": pages, "times": ["ts"]})
     return out
 
 
@@ -98,13 +107,35 @@ function terms(q){
  var out=[],p=String(q||'').toLowerCase().split('|');
  for(var i=0;i<p.length;i++){var t=p[i].trim();if(t)out.push(t);}
  return out;}
-function hits(rows,ts){
- var out=[];
- if(!ts.length||!rows)return out;
- for(var i=0;i<rows.length;i++){
-  var s=rows[i][2]||'';
-  for(var k=0;k<ts.length;k++)if(s.indexOf(ts[k])>=0){out.push(i);break;}}
+/* The row's time keys (report_ui.ts_key: naive wall-clock seconds), from the metadata fields named. */
+function times(row,fields){
+ var m=row[5]||{},out=[];
+ for(var f=0;f<(fields||['ts']).length;f++){var v=m[(fields||['ts'])[f]];if(v)out=out.concat(v);}
  return out;}
+/* The first key inside the window, or null — the reports' scTimeHit, which a row with no time never
+   satisfies. */
+function inWindow(keys,win){
+ for(var i=0;i<keys.length;i++)if(keys[i]>=win.a&&keys[i]<=win.b)return keys[i];
+ return null;}
+/* Rows matching every condition given: any of the words (the reports' rule) and the window. */
+function hits(rows,ts,win,fields){
+ var out=[];
+ if((!ts.length&&!win)||!rows)return out;
+ for(var i=0;i<rows.length;i++){
+  if(ts.length){
+   var s=rows[i][2]||'',any=false;
+   for(var k=0;k<ts.length;k++)if(s.indexOf(ts[k])>=0){any=true;break;}
+   if(!any)continue;}
+  if(win&&inWindow(times(rows[i],fields),win)===null)continue;
+  out.push(i);}
+ return out;}
+/* Whether any row of a source carries a time at all: a report that records none cannot be searched
+   by date, which is not the same as having no row in the window. */
+function timed(rows,fields){
+ for(var i=0;rows&&i<rows.length;i++)if(times(rows[i],fields).length)return true;
+ return false;}
+/* A time key back to the wall clock the report shows. */
+function wall(key){return new Date(key*1000).toISOString().replace('T',' ').slice(0,19);}
 var ENT={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' ',middot:'·',mdash:'—',
  ndash:'–',hellip:'…'};
 /* A cell's text: its markup dropped, its character references read. Never parsed as HTML — the page
@@ -136,7 +167,8 @@ function snippet(s,ts,width){
          post:s.slice(at+len,b)+(b<s.length?'…':'')};}
 /* The fragment that opens a report filtered to the same search (report_ui.find_fragment). */
 function findHash(ts){return '#find='+ts.map(encodeURIComponent).join('|');}
-return {terms:terms,hits:hits,text:text,label:label,snippet:snippet,findHash:findHash};
+return {terms:terms,hits:hits,times:times,inWindow:inWindow,timed:timed,wall:wall,text:text,
+        label:label,snippet:snippet,findHash:findHash};
 })();
 """
 
@@ -184,39 +216,50 @@ function SCS_convTitle(key,page){
    if((conv.rows[i][1]||[]).join('').indexOf(needle)>=0)return SCQ.label(conv.rows[i],[2,4]);}
  return 'Conversation '+key;}
 function SCS_run(q){
- var ts=SCQ.terms(q);
- if(!ts.length){SCS_res=null;document.getElementById('results').innerHTML='';
+ var ts=SCQ.terms(q),win=scTimeWin('g');
+ if(!ts.length&&!win){SCS_res=null;document.getElementById('results').innerHTML='';
   document.getElementById('summary').innerHTML='';return;}
  SCS_load(function(){
-  var res={ts:ts,q:q,groups:[],total:0};
+  var res={ts:ts,q:q,win:win,groups:[],total:0};
   SC_SRC.forEach(function(src){
-   var g={src:src,parts:[],n:0,missing:false};
+   var g={src:src,parts:[],n:0,missing:false,timed:false};
    SCS_items.forEach(function(it){
     if(it.src!==src)return;
     if(it.missing)g.missing=true;
-    var h=SCQ.hits(it.rows,ts);
+    if(SCQ.timed(it.rows,src.times))g.timed=true;
+    var h=SCQ.hits(it.rows,ts,win,src.times);
     if(h.length){g.parts.push({it:it,hits:h});g.n+=h.length;}});
    res.total+=g.n;res.groups.push(g);});
   SCS_res=res;SCS_more={};SCS_draw();});}
-function SCS_hitHtml(it,i,ts){
- var r=it.rows[i],sn=SCQ.snippet(r[2],ts);
+function SCS_hitHtml(it,i,ts,win){
+ var r=it.rows[i],sn=ts.length?SCQ.snippet(r[2],ts):null,
+     at=win?SCQ.inWindow(SCQ.times(r,it.src.times),win):null;
  return '<li><a target="'+SCS_esc(it.src.tab)+'" href="'+SCS_esc(it.page)+'#'+
   encodeURIComponent(r[0])+'">'+SCS_esc(SCQ.label(r,it.src.cells))+'</a>'+
   (sn?'<div class="snip">'+SCS_esc(sn.pre)+'<mark>'+SCS_esc(sn.hit)+'</mark>'+SCS_esc(sn.post)+
-   '</div>':'')+'</li>';}
+   '</div>':'')+
+  (at!==null?'<div class="snip">time in the window: <mark>'+SCS_esc(SCQ.wall(at))+'</mark></div>':'')+
+  '</li>';}
 function SCS_list(id,part,ts,first){
  var shown=SCS_more[id]||first,h=part.hits,out='<ul class="hits">';
- for(var k=0;k<h.length&&k<shown;k++)out+=SCS_hitHtml(part.it,h[k],ts);
+ for(var k=0;k<h.length&&k<shown;k++)out+=SCS_hitHtml(part.it,h[k],ts,SCS_res.win);
  out+='</ul>';
  if(h.length>shown)out+='<button class="more" onclick="SCS_showMore(\''+id+'\','+shown+
   ')">Show '+Math.min(200,h.length-shown)+' more of '+(h.length-shown)+'</button>';
  return out;}
 function SCS_showMore(id,shown){SCS_more[id]=shown+200;SCS_draw();}
+/* The window as the examiner set it, in words. */
+function SCS_winText(win){
+ if(!win)return '';
+ if(win.a===-Infinity)return 'up to '+SCQ.wall(win.b);
+ if(win.b===Infinity)return 'from '+SCQ.wall(win.a);
+ return 'between '+SCQ.wall(win.a)+' and '+SCQ.wall(win.b);}
 function SCS_draw(){
  var res=SCS_res;
  if(!res)return;
  var sum='<b>'+res.total.toLocaleString()+'</b> row'+(res.total===1?'':'s')+' match'+
-  (res.total===1?'es':'')+' <span class="q">'+SCS_esc(res.ts.join(' | '))+'</span>',body='',none=[];
+  (res.total===1?'es':'')+(res.ts.length?' <span class="q">'+SCS_esc(res.ts.join(' | '))+'</span>':'')+
+  (res.win?' <span class="q">'+SCS_esc(SCS_winText(res.win))+'</span>':''),body='',none=[],untimed=[];
  res.groups.forEach(function(g,gi){
   var src=g.src,id='g'+gi;
   sum+=g.n?' <a class="chip" href="#'+id+'" onclick="return SCS_jump(\''+id+'\')">'+
@@ -225,7 +268,7 @@ function SCS_draw(){
   var head='<h2 id="'+id+'">'+SCS_esc(src.title)+' <span class="n">'+g.n.toLocaleString()+
    (src.pages?' message'+(g.n===1?'':'s')+' in '+g.parts.length+' conversation'+
     (g.parts.length===1?'':'s'):' row'+(g.n===1?'':'s'))+'</span>';
-  if(g.n&&!src.pages)head+=' <a class="openall" target="'+SCS_esc(src.tab)+'" href="'+
+  if(g.n&&!src.pages&&!res.win)head+=' <a class="openall" target="'+SCS_esc(src.tab)+'" href="'+
    SCS_esc(src.page)+SCQ.findHash(res.ts)+'">Open '+(g.n===1?'it':'all '+g.n.toLocaleString())+
    ' in the report ▸</a>';
   head+='</h2>';
@@ -234,26 +277,35 @@ function SCS_draw(){
   if(g.missing)head+=miss;
   /* a report with nothing to show is one line at the end, unless its data did not load: then
      "no match" would be a claim the page cannot make */
-  if(!g.n){if(g.missing)body+='<section class="none">'+head+'</section>';else none.push(src.title);
+  if(!g.n){if(g.missing)body+='<section class="none">'+head+'</section>';
+   else if(res.win&&!g.timed)untimed.push(src.title);else none.push(src.title);
    return;}
   var inner='';
   if(src.pages)g.parts.forEach(function(part,pi){
    inner+='<h3>'+SCS_esc(SCS_convTitle(part.it.key,part.it.page))+' <span class="n">'+
-    part.hits.length+' message'+(part.hits.length===1?'':'s')+'</span> <a class="openall" target="'+
-    SCS_esc(src.tab)+'" href="'+SCS_esc(part.it.page)+SCQ.findHash(res.ts)+'">Open '+
-    (part.hits.length===1?'it':'all '+part.hits.length)+' in the conversation ▸</a></h3>'+
+    part.hits.length+' message'+(part.hits.length===1?'':'s')+'</span>'+(res.win?'':
+    ' <a class="openall" target="'+SCS_esc(src.tab)+'" href="'+SCS_esc(part.it.page)+
+    SCQ.findHash(res.ts)+'">Open '+(part.hits.length===1?'it':'all '+part.hits.length)+
+    ' in the conversation ▸</a>')+'</h3>'+
     SCS_list(id+'p'+pi,part,res.ts,20);});
   else inner=SCS_list(id,g.parts[0],res.ts,50);
   body+='<section>'+head+inner+'</section>';});
  if(none.length)body+='<div class="nomatch">No match in '+SCS_esc(none.join(', '))+'.</div>';
+ if(untimed.length)body+='<div class="nomatch">Not searched by date: '+SCS_esc(untimed.join(', '))+
+  ' — no row there records a time this page can read.</div>';
  document.getElementById('summary').innerHTML=sum;
  document.getElementById('results').innerHTML=body;}
 function SCS_jump(id){var e=document.getElementById(id);if(e)e.scrollIntoView();return false;}
 function SCS_go(){clearTimeout(SCS_t);SCS_run(document.getElementById('gq').value);return false;}
+/* the date/time controls (report_ui.time_filter) call flt() and read through scFv */
+function scFv(id){var e=document.getElementById(id);return e?e.value:'';}
+function scFvReset(id){var e=document.getElementById(id);if(e)e.value='';}
+function flt(){clearTimeout(SCS_t);
+ SCS_t=setTimeout(function(){SCS_run(document.getElementById('gq').value);},350);}
 function SCS_typed(){
  clearTimeout(SCS_t);
  var v=document.getElementById('gq').value.trim();
- if(v.length===1)return;                            /* one character matches nearly every row */
+ if(v.length===1&&!scTimeWin('g'))return;             /* one character matches nearly every row */
  SCS_t=setTimeout(function(){SCS_run(v);},350);}
 /* "#q=<search>" from a report's All reports link, "?q=" from the index page without script. The
    fragment is consumed, as report_ui.NAV_JS does, so the same link clicked again still arrives. */
@@ -306,7 +358,17 @@ _CSS = """
  .miss{font-size:12px;color:#7a1f1f;margin:0 0 6px}
  .nomatch{font-size:12.5px;color:#777;margin:4px 2px 12px}
  .notsearched{font-size:12px;color:#777;margin-top:18px}
+ .gtime{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:13px;color:#555}
+ .gtime select,.gtime input{font-size:13px;padding:4px 6px;border:1px solid #bcbcd0;border-radius:5px}
 """
+
+
+DATE_HINT = (
+    "Finds the rows with a time in the window, in every report — on its own, or together with the words "
+    "above (a row must then match both). The times are every one a row shows: a Memory's capture and "
+    "save times, a message's, a conversation's activity, a contact's first and last activity, a cached "
+    "file's claims, last read and the device's own record of when it was created, modified and read, and "
+    "what a media file says about itself where it states its zone.")
 
 
 def page_html(srcs, *, closure=None, prov=None, not_searched=()):
@@ -319,7 +381,7 @@ def page_html(srcs, *, closure=None, prov=None, not_searched=()):
     return (
         f'<!doctype html><html><head><meta charset="utf-8">'
         f'<title>Search all reports</title>{report_ui.emoji_font_link("")}'
-        f'<style>{_CSS}{partial_css}</style></head><body>'
+        f'<style>{_CSS}{report_ui.HINT_CSS}{report_ui.TIME_CSS}{partial_css}</style></head><body>'
         f'<header><h1>Snapchat Auto v{html.escape(app_version.get_version())} &mdash; search all reports'
         f'</h1><div class="sub">Every report of {scope}: {html.escape(titles)}</div></header>'
         f'{banner}<main>'
@@ -327,16 +389,19 @@ def page_html(srcs, *, closure=None, prov=None, not_searched=()):
         '<input type="search" id="gq" autofocus oninput="SCS_typed()" '
         'placeholder="CACHE_KEY, snap id, hash, file name, URL, user id, words of a message…">'
         '<button type="submit">&#128270; Search</button></form>'
+        f'<div class="gtime">{report_ui.time_filter("g", label="Date / time", noun="row", hint=DATE_HINT)}'
+        '</div>'
         '<div class="how">The search each report&#39;s own box runs, over every report at once: it '
         'matches the identifiers, hashes, file names, URLs, message text and timestamps each row is '
         'indexed by, not case-sensitive, and <code>a|b</code> finds rows holding either. Each hit opens '
-        'its row in its report; <i>Open all</i> opens the report filtered to the same search. The rows '
-        'are read from the reports&#39; data folders on the first search, which takes a moment on a '
-        'large report.</div>'
+        'its row in its report; <i>Open all</i> opens the report filtered to the same search. A '
+        '<i>date / time</i> window finds rows by when — on its own, or with the words (a row must then '
+        'match both). The rows are read from the reports&#39; data folders on the first search, which '
+        'takes a moment on a large report.</div>'
         '<div id="status"></div><div id="summary"></div><div id="results"></div>'
         f'{missing}</main>'
         f'<script>var SC_SRC={json.dumps(srcs, ensure_ascii=False).replace("</", "<" + chr(92) + "/")};'
-        f'{CORE_JS}{PAGE_JS}</script>'
+        f'{CORE_JS}{report_ui.HINT_JS}{report_ui.TIME_JS}{PAGE_JS}</script>'
         '</body></html>')
 
 

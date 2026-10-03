@@ -117,6 +117,17 @@ the report's named tab (`#<anchor>`); *Open all* opens the report filtered to th
 (`#find=`), every match expanded. A report whose data file did not load is said to be missing, never
 "no match". The legacy single-page reports keep no rows and are named as not searched.
 
+**By date too.** The page carries the reports' own date/time window (`time_filter`, `TIME_JS`) — between
+two moments, or within ± N of one — on its own or with the words, which a row must then match as well.
+For that every report's rows carry the times they show as `ts` keys (`ts_keys`; a conversation's
+`ct`/`mt`): the Memories and message rows always did, and the Contacts (first and last activity),
+cache_controller (each claim's creation, the last read, the device's created / modified / read times
+of the file — `report_ui.fs_times`, never the inode-change time, which the acquisition itself can set —
+and a media file's own times where it states its zone) and Library/Caches rows (the same, per copy) now
+do. A row with no readable time does not match a window, as in the reports, and a report whose rows
+record none is named as not searched by date rather than as having no match. *Open all* is not offered
+while a window is set: the link carries the words only, and would open more than the page found.
+
 Every report's search box has an *🔎 All reports* link beside it (`report_ui.search_all_link`): a plain
 `<a target="scauto_search">` whose `#q=` fragment `scSearchAll` (in `NAV_JS`) fills from the box at the
 moment of the click, so Ctrl-click and the named tab behave as for every other link. The run's

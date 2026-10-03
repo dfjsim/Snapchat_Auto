@@ -1550,7 +1550,14 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
              # the same file a different id, and may merge or split rows. The raw bytes' hashes are
              # therefore recorded with a selection, and are what a later run matches on when the
              # anchor no longer exists. Copies are few (one file, its duplicates).
-             "raw": [c["raw_sha256"] for c in e["copies"] if c.get("raw_sha256")]},
+             "raw": [c["raw_sha256"] for c in e["copies"] if c.get("raw_sha256")],
+             # the times the row shows, as displayed — the device's record of every copy and what
+             # the file says about itself where it states its zone — for the search over every report
+             "ts": report_ui.ts_keys(
+                 *[c.get("mtime") for c in e["copies"]],
+                 *[t for c in e["copies"] for t in report_ui.fs_times(
+                     [c.get("fs")], c.get("_epochfmt") or (lambda seconds: ""))],
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")])},
         ])
     report_ui.write_rows(data_dir, rows)
 

@@ -2091,7 +2091,16 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
              # The hash of the bytes on disk, recorded with a selection as a fallback match. The
              # CACHE_KEY itself is a key in cache_controller.db and no parsing change can move it,
              # so this is belt and braces rather than the primary route.
-             **({"sha": e["ondisk_sha256"]} if e.get("ondisk_sha256") else {})},
+             **({"sha": e["ondisk_sha256"]} if e.get("ondisk_sha256") else {}),
+             # Every time the row shows — the claims, the last read, the device's own record of the
+             # file, and what the file says about itself where it states its zone — as the wall
+             # clocks displayed (report_ui.ts_key), for the search over every report.
+             "ts": report_ui.ts_keys(
+                 *[c.get("created") for c in e["claims"]], e["meta"].get("last_read"),
+                 *(e.get("ondisk_mtimes") or {}).values(),
+                 *report_ui.fs_times((e.get("ondisk_fs") or {}).values(),
+                                     e.get("_epochfmt") or (lambda seconds: "")),
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")])},
         ])
     report_ui.write_rows(data_dir, rows)
 

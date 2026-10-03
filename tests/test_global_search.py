@@ -139,7 +139,7 @@ const fs=require('fs'),path=require('path'),vm=require('vm');
 const ROOT=process.env.SC_ROOT;
 const EL={};
 function el(id){return EL[id]||(EL[id]={id:id,value:'',innerHTML:'',textContent:''});}
-globalThis.document={getElementById:el,
+globalThis.document={getElementById:el,addEventListener:function(){},
  createElement:function(){return {};},
  head:{appendChild:function(sc){
   const file=path.join(ROOT,sc.src);
@@ -193,3 +193,52 @@ def test_either_term_and_a_report_whose_data_did_not_load(folder):
     # the cache report's rows never arrived: it is not "no match", it is said to be missing
     assert "could not be loaded" in res and "No match in Messages." in res
     assert "Cache controller" not in res.split("No match in")[1]
+
+
+# --------------------------------------------------------------------------------- by date
+
+def _key(text):
+    return report_ui.ts_key(text)
+
+
+@needs_node
+def test_the_core_finds_rows_by_time_alone_or_with_words():
+    rows = [["a", [], "alice", {}, None, {"ts": [_key("2024-03-10 08:30:00")]}],
+            ["b", [], "bob", {}, None, {"ts": [_key("2024-03-11 09:00:00")]}],
+            ["c", [], "alice", {}, None, {}],                                    # no time at all
+            ["d", [], "carol", {}, None, {"ct": [_key("2024-03-10 08:45:00")]}]]
+    win = {"a": _key("2024-03-10 08:00:00"), "b": _key("2024-03-10 09:00:00")}
+    out = _node(global_search.CORE_JS + f"var R={json.dumps(rows)},W={json.dumps(win)};" + r"""
+console.log(JSON.stringify({
+ alone:SCQ.hits(R,[],W,['ts']),
+ both:SCQ.hits(R,['alice'],W,['ts']),
+ conv:SCQ.hits(R,[],W,['ct','mt']),
+ timed:[SCQ.timed(R.slice(2,3),['ts']),SCQ.timed(R,['ts'])],
+ wall:SCQ.wall(W.a)}));""")[0]
+    assert out["alone"] == [0] and out["both"] == [0]        # the row with no time never matches
+    assert out["conv"] == [3]                                 # a conversation's own activity counts
+    assert out["timed"] == [False, True] and out["wall"] == "2024-03-10 08:00:00"
+
+
+@needs_node
+def test_the_page_searches_by_date_and_names_reports_with_no_times(folder):
+    report_ui.write_rows(os.path.join(folder, "Conversations", "pages", "data", "k1"), [
+        _row("msg-1.0", ["", "2024-03-10 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-10 08:30:00")]}]])
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    env = dict(os.environ, SC_ROOT=folder, SC_HASH="")
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + "el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+        "el('gto').value='2024-03-10T09:00';"
+        f"vm.runInThisContext({json.dumps(script)});SCS_run('');"
+        "console.log(JSON.stringify({summary:el('summary').innerHTML,"
+        "results:el('results').innerHTML}));",
+        text=True, encoding="utf-8", capture_output=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert "between 2024-03-10 08:00:00 and 2024-03-10 09:00:00" in out["summary"]
+    assert "msg-1.0" in out["results"] and "time in the window" in out["results"]
+    assert "openall" not in out["results"]                     # a link would carry the words only
+    # the fixture's other reports record no time at all: said so, not "no match"
+    assert "Not searched by date: Contacts, Conversations, Cache controller" in out["results"]

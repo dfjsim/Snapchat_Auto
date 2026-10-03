@@ -935,7 +935,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
              # resolves one more identifier.
              **({"uid": contact["user_id"]} if contact["user_id"] else {}),
              **({"user": contact["username"]} if contact["username"] else {}),
-             **({"conv_id": conv_id} if conv_id else {})},
+             **({"conv_id": conv_id} if conv_id else {}),
+             # first and last activity as displayed, for the search over every report
+             "ts": report_ui.ts_keys(first_txt, last_txt)},
         ])
     report_ui.write_rows(data_dir, rows)
 

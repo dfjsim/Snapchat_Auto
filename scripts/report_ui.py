@@ -880,6 +880,19 @@ def ts_key(text):
     return int(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
 
 
+def fs_times(records, epochfmt):
+    """The displayed times of device filesystem records (``device_fs``) — created, modified, last
+    read — for a row's ``ts`` list, so a cached file is found by when the device touched it. Not the
+    inode-change time: the acquisition itself can set it, and some archives carry a placeholder."""
+    from scripts.data import device_fs                     # local, as in device_fs_html
+    out = []
+    for rec in records or ():
+        for field in ("btime", "mtime", "atime"):
+            if rec and rec.get(field) is not None:
+                out.append(device_fs.format_ns(rec[field], epochfmt))
+    return out
+
+
 def ts_keys(*texts):
     """The distinct `ts_key` values of several displayed timestamps, sorted. Empties are dropped.
 

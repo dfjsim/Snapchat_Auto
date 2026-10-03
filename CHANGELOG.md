@@ -76,7 +76,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   reports* link beside each report's search box. It is each report's own search (its rows' search text,
   `|` for either) on its own `data/index.js`, so the counts agree; each hit opens its row, *Open all*
   opens the report filtered to the same search. Written with every `index.html`, partial extracts
-  included.
+  included. A **date / time window** (between two moments, or within ± N of one) finds rows by when,
+  alone or with the words: every report's rows now carry the times they show — the Contacts,
+  cache_controller and Library/Caches rows newly (claims, last read, the device's created / modified /
+  read times, a media file's own zoned times).
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
