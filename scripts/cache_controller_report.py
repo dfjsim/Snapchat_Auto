@@ -47,6 +47,7 @@ from scripts.data import sniff
 from scripts.data import snap_session
 from scripts import memory_leads
 from scripts import progress
+from scripts import parallel
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.data import device_fs
 from scripts.memories_media_report import (
@@ -723,16 +724,17 @@ POSTER_BASIS = (
 
 
 def publish_posters(entries, files_dir, get_view=None,
-                    file_timeout=poster_worker.FILE_TIMEOUT_S, budget=poster_worker.BUDGET_S):
+                    file_timeout=poster_worker.FILE_TIMEOUT_S, budget=None):
     """Extract a poster frame beside every published video: ``files/<name>_poster.jpg``.
 
     Sets ``entry["poster"]`` (a URL relative to the report) on each entry that gets one and returns
     ``(made, undecodable, not_attempted)``. A poster left by an earlier run into the same folder is
     reused rather than re-extracted, which keeps a re-run into an existing report folder cheap.
 
-    The work runs in a **killable subprocess**, one video at a time, because a cached video that
-    cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of them
-    does. The worker announces each file before it starts, so when it stops answering the parent
+    The work runs in **killable subprocesses**, one video at a time each, because a cached video
+    that cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of
+    them does. ``budget`` (seconds) limits the pass; by default the run's setting applies, which is
+    no limit (see :mod:`scripts.data.poster_worker`). The worker announces each file before it starts, so when it stops answering the parent
     knows which file to skip and restarts it on the rest. Nothing is ever merely abandoned: see
     :mod:`scripts.data.poster_worker` for what abandoning it cost.
 
@@ -768,7 +770,8 @@ def publish_posters(entries, files_dir, get_view=None,
     # complete=False: a cache holds whatever byte ranges the device streamed, so seeking into a
     # cached video regularly lands past the bytes that are there.
     done, stderr_chunks = poster_worker.run_jobs([(j[0], j[1], False) for j in jobs],
-                                                 file_timeout, budget)
+                                                 file_timeout,
+                                                 **({"budget": budget} if budget else {}))
     # "moov atom not found" here means the device cached only part of that video — a finding, so
     # FFmpeg's chatter is summarised into the log rather than dropped on the floor.
     ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
@@ -786,9 +789,10 @@ def publish_posters(entries, files_dir, get_view=None,
                                     "not decode, which usually means the device stored only part "
                                     "of it (the link still opens the bytes that are there)")
         else:
-            # Never attempted: the worker could not be started, or the pass ran out of budget. The
-            # sentence above would be a finding about the evidence that nothing established, so the
-            # absence is attributed where it belongs — to this tool, on this run.
+            # Never attempted: the worker could not be started, or the pass was skipped or ran out
+            # of the time it was given. The sentence above would be a finding about the evidence
+            # that nothing established, so the absence is attributed where it belongs — to this
+            # tool, on this run.
             entry["poster_note"] = ("no poster frame: thumbnail extraction did not run for this "
                                     "file on this run (see the run log) — that is a limit of this "
                                     "tool here, not a statement about whether the video decodes")
@@ -819,27 +823,43 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
     the run's timezone; without one they are left as the file states them.
     """
     os.makedirs(files_dir, exist_ok=True)
+    embedded_todo = []                                      # (target, view), read after the loop
 
     def read_embedded(target, view):
-        if not view:
-            return
-        target["embedded"] = media_meta.extract(os.path.join(files_dir, os.path.basename(view)))
-        target["embedded_times"] = report_ui.file_time_rows(target["embedded"],
-                                                            epochfmt or (lambda sec: ""))
-        if epochfmt is None:                                # nothing to convert with: as written
-            for t in target["embedded_times"]:
-                t["shown"] = t["wall"]
+        if view:
+            embedded_todo.append((target, view))
 
-    for n_e, e in enumerate(entries, 1):
-        progress.step("hashing and publishing cached files", n_e, len(entries))
+    def hashed(paths):
+        """``("ok", (md5, sha256, head, total))`` or ``("err", error)`` — never raises."""
+        try:
+            return "ok", _hash_stream(paths)
+        except OSError as error:
+            return "err", error
+
+    def hash_entry(e):
+        """Every read this entry needs, done ahead of the loop below and on several threads: the
+        reading and hashing are independent per entry; publishing and naming are not, and stay in
+        the loop, in its order."""
         if not e["on_disk"]["found"]:
-            continue
+            return None
         paths, _single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
+        kids = []
+        for ch in e["children"]:
+            cpaths = child_ondisk_paths(e["cache_key"], ch.get("name"), scfull, scparts)
+            kids.append((cpaths, hashed(cpaths) if cpaths else None))
+        return paths, (hashed(paths) if paths else None), kids
+
+    for n_e, (e, pre) in enumerate(zip(entries, parallel.ordered_map(hash_entry, entries)), 1):
+        progress.step("hashing and publishing cached files", n_e, len(entries))
+        if pre is None:
+            continue
+        paths, main_hash, kid_hashes = pre
         if paths:
-            try:
-                e["ondisk_md5"], e["ondisk_sha256"], head, total = _hash_stream(paths)
-            except OSError as error:
-                logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {error}")
+            status, value = main_hash
+            if status == "ok":
+                e["ondisk_md5"], e["ondisk_sha256"], head, total = value
+            else:
+                logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {value}")
                 head, total = b"", 0
             e["ondisk_bytes"] = total
             ext = guess_media(head)
@@ -863,16 +883,15 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 
         # bundle children: each is its own file with its own type
         kids = []
-        for ch in e["children"]:
-            cpaths = child_ondisk_paths(e["cache_key"], ch.get("name"), scfull, scparts)
+        for ch, (cpaths, kid_hash) in zip(e["children"], kid_hashes):
             if not cpaths:
                 continue
             kid = {"name": ch.get("name"), "paths": cpaths}
-            try:
-                kid["md5"], kid["sha256"], head, total = _hash_stream(cpaths)
-            except OSError as error:
-                logger.debug(f"Could not read bundle child {ch.get('name')}: {error}")
+            status, value = kid_hash
+            if status != "ok":
+                logger.debug(f"Could not read bundle child {ch.get('name')}: {value}")
                 continue
+            kid["md5"], kid["sha256"], head, total = value
             kid["bytes"] = total
             kid["type"] = guess_media(head)
             _kkind, _kext, kid["label"], kid["encrypted"] = sniff.classify(head, total)
@@ -894,6 +913,16 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                 e["view_ext"] = best["type"]
                 e["view_note"] = (f"bundle child {best['name']} ({best['type']}) — "
                                   f"{best.get('note', '')}")
+
+    # what each published file says about itself — reading headers only, independent per file
+    def extract(job):
+        return media_meta.extract(os.path.join(files_dir, os.path.basename(job[1])))
+    for (target, _view), meta in zip(embedded_todo, parallel.ordered_map(extract, embedded_todo)):
+        target["embedded"] = meta
+        target["embedded_times"] = report_ui.file_time_rows(meta, epochfmt or (lambda sec: ""))
+        if epochfmt is None:                                # nothing to convert with: as written
+            for t in target["embedded_times"]:
+                t["shown"] = t["wall"]
 
 
 # A chat claim's EXTERNAL_KEY is "<type>:<conversation id>:<message id>:<part>[:…]" — e.g.

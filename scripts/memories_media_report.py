@@ -58,6 +58,7 @@ from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
+from scripts.data import poster_frame
 from scripts.data import sniff
 from scripts.data import media_meta
 from scripts.data import device_fs
@@ -71,6 +72,7 @@ from scripts import gallery_search
 from scripts import cloud_memories
 from scripts import memory_leads
 from scripts import progress
+from scripts import parallel
 from scripts import memory_backlinks
 
 logger = logging.getLogger(__name__)
@@ -1269,8 +1271,12 @@ def index_sccontent(app):
         parts (``<cache_key>_<start>-<end>``). These must be concatenated in offset order before
         decrypting — the same reconstruction parseSnapvideos writes to ``SnapFixedVideos`` (but
         those stay encrypted; here we rebuild and decrypt from the parts directly).
+
+    Three reports ask for this in one run, and a large cache holds tens of thousands of files, so the
+    listing is kept (:data:`_SC_INDEX`) and handed out again while no folder of it has changed — a
+    folder's modification time moves whenever a file is added to it, removed or renamed. Each caller
+    gets its own copy of the lists.
     """
-    full, parts = {}, {}
     folders = []
     for pat in ("Documents/com.snap.file_manager_*_SCContent_*",
                 "Library/Caches/com.snap.file_manager_*_SCContent_*"):
@@ -1278,20 +1284,32 @@ def index_sccontent(app):
     if android_layout.is_app_dir(app):
         # the Android app keeps the same folders under files/native_content_manager/
         folders += android_layout.scan(app)[1]
-    for d in folders:
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            fp = os.path.join(d, name)
-            if not os.path.isfile(fp):
-                continue
-            mo = _SC_SPLIT_RE.match(name)
-            if mo:
-                start = int(mo.group(2)) if mo.group(2) is not None else 0
-                parts.setdefault(mo.group(1).lower(), []).append((start, fp))
-            else:
-                full.setdefault(name, []).append(fp)
-    return full, parts
+    folders = [d for d in folders if os.path.isdir(d)]
+    stamp = tuple((d, os.stat(d).st_mtime_ns) for d in folders)
+    kept = _SC_INDEX.get(os.path.abspath(app))
+    if kept is None or kept[0] != stamp:
+        full, parts = {}, {}
+        for d in folders:
+            # scandir rather than listdir + isfile: the same names in the same order, without a
+            # second system call per file to ask whether it is one
+            with os.scandir(d) as listing:
+                for item in listing:
+                    if not item.is_file():
+                        continue
+                    name, fp = item.name, os.path.join(d, item.name)
+                    mo = _SC_SPLIT_RE.match(name)
+                    if mo:
+                        start = int(mo.group(2)) if mo.group(2) is not None else 0
+                        parts.setdefault(mo.group(1).lower(), []).append((start, fp))
+                    else:
+                        full.setdefault(name, []).append(fp)
+        kept = _SC_INDEX[os.path.abspath(app)] = (stamp, (full, parts))
+    full, parts = kept[1]
+    return {k: list(v) for k, v in full.items()}, {k: list(v) for k, v in parts.items()}
+
+
+#: index_sccontent's listings: app folder -> (folders and their mtimes, (full, parts)).
+_SC_INDEX = {}
 
 
 # "<cache_key>_<start>-<end>": the byte range a shard covers. index_sccontent's _SC_SPLIT_RE only
@@ -1570,21 +1588,10 @@ def _quiet_stderr():
         yield
 
 
-# How many frames to try before giving up on a poster. Partially cached video decodes at the start
-# and fails after that, so the frame we want is always within the first few reads; the bound is
-# what stops a badly damaged file from being decoded end to end for a thumbnail.
-_POSTER_MAX_READS = 60
-
-
-def _first_decodable(cap, limit):
-    """The first frame that decodes, reading forward from the current position. None if none does."""
-    for _ in range(limit):
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            return frame
-        if not ok:                                         # stream ended / unrecoverable
-            return None
-    return None
+# The frame itself is cut by scripts/data/poster_frame.py, which a thumbnail worker imports on its
+# own; these names stay for the callers that have always used them here.
+_POSTER_MAX_READS = poster_frame.POSTER_MAX_READS
+_first_decodable = poster_frame.first_decodable
 
 
 def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=True):
@@ -1605,49 +1612,11 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=T
     ``quiet`` redirects fd 2 for the duration to keep FFmpeg's chatter out of the console. That
     redirect is **process-global and not thread-safe**, so a caller that runs this concurrently — or
     that walks away from a call still inside it — corrupts stderr for the whole process. The worker
-    passes ``quiet=False`` because its stderr already belongs to the parent.
+    calls :mod:`scripts.data.poster_frame` without it, because its stderr already belongs to the
+    parent.
     """
-    for var in ("OPENCV_LOG_LEVEL", "OPENCV_FFMPEG_LOGLEVEL", "OPENCV_VIDEOIO_DEBUG"):
-        os.environ.setdefault(var, "OFF" if "LOG_LEVEL" in var else "0")
-    try:
-        import cv2
-    except Exception as error:
-        logger.debug(f"cv2 unavailable, cannot generate poster: {error}")
-        return False
-    try:
-        frame = None
-        with (_quiet_stderr() if quiet else contextlib.nullcontext()):
-            cap = cv2.VideoCapture(video_path)
-            try:
-                if complete:
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
-                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-                    if fps and frames:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES,
-                                min(int(fps * at_seconds), max(int(frames) - 1, 0)))
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        frame = _first_decodable(cap, _POSTER_MAX_READS)
-                else:
-                    frame = _first_decodable(cap, _POSTER_MAX_READS)
-            finally:
-                cap.release()
-        if frame is None:
-            return False
-        # imencode + a plain write, not cv2.imwrite: on Windows imwrite goes through the ANSI
-        # API, so a destination path holding any character outside the system codepage makes
-        # it return False and write nothing -- the poster is lost with no error, for a run
-        # whose only sin was a case folder with an accent in it.
-        ok, buffer = cv2.imencode(os.path.splitext(out_path)[1] or ".jpg", frame)
-        if not ok:
-            return False
-        with open(out_path, "wb") as fh:
-            fh.write(buffer.tobytes())
-        return True
-    except Exception as error:
-        logger.debug(f"poster generation failed for {video_path}: {error}")
-        return False
+    return poster_frame.generate_poster(video_path, out_path, at_seconds, complete,
+                                        quiet_ctx=_quiet_stderr if quiet else None)
 
 
 # Extensions sniff.guess_media returns for something that holds no video frames. An audio recording
@@ -1898,10 +1867,13 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
 
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
     addressed = keyed + unkeyed
-    for done, (sid, m) in enumerate(addressed, 1):
-        progress.step("decrypting SCContent media", done, len(addressed))
-        if done % 2000 == 0:
-            logger.info(f"  SCContent: {done}/{len(addressed)} memories")
+
+    def decode(item):
+        """Locate, read, decrypt and hash one Memory's SCContent media — nothing that depends on
+        another Memory, so it runs on several threads (``parallel.ordered_map``). What is
+        published, and under which name, is decided by the loop below in ``addressed`` order: the
+        first Memory to recover some bytes names the file, exactly as before."""
+        sid, m = item
         has_key = bool(m["key"] and m["iv"])
         targets = []                                       # (role, cache_key, addressing basis)
         url_fields = {"full": "ZMEDIADOWNLOADURL", "overlay": "ZOVERLAYDOWNLOADURL",
@@ -1941,7 +1913,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                          + f", and points at CACHE_KEY {ck}.")
                 targets.append(("rendered" if context == 26 else "full", ck, basis))
 
-        seen = set()
+        seen, found = set(), []
         for role, cache_key, addr_basis in targets:
             if cache_key in seen:
                 continue
@@ -1978,6 +1950,17 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                 write_bytes = stripped
                 hashes = ([("no padding", *_hashes(stripped)), ("with padding", *_hashes(padded))]
                           if has_pad else [("", *_hashes(stripped))])
+            found.append((role, cache_key, addr_basis, write_bytes, hashes, ext, fulls, pparts,
+                          complete, why_incomplete))
+        return found
+
+    for done, ((sid, m), found) in enumerate(
+            zip(addressed, parallel.ordered_map(decode, addressed)), 1):
+        progress.step("decrypting SCContent media", done, len(addressed))
+        if done % 2000 == 0:
+            logger.info(f"  SCContent: {done}/{len(addressed)} memories")
+        for (role, cache_key, addr_basis, write_bytes, hashes, ext, fulls, pparts, complete,
+             why_incomplete) in found:
             entry = _save_media(outdir, f"{sid}_{role}_{cache_key[:8]}.{ext}", write_bytes,
                                 published)
             source = (f"SCContent (rebuilt from {len(pparts)} parts)"

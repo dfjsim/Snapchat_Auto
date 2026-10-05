@@ -51,6 +51,7 @@ from scripts import app_version
 from scripts import partial_report
 from scripts import memory_backlinks
 from scripts import progress
+from scripts import parallel
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -1042,6 +1043,45 @@ def _stream_hashes(path):
     return md5.hexdigest(), sha.hexdigest(), total
 
 
+def _read_cache_file(full, rel, key_info):
+    """Everything :func:`build_entries` learns from one file's bytes — read, hashed, decoded, its
+    embedded metadata — and nothing that depends on any other file. ``None`` when it cannot be read.
+
+    Pure, so :func:`build_entries` runs it on several threads (``parallel.ordered_map``) and merges
+    the results in walk order exactly as it did when it read the files one after another.
+    """
+    try:
+        size = os.path.getsize(full)
+    except OSError:
+        return None
+    name = os.path.basename(rel)
+    if size > MAX_DECODE_BYTES:
+        md5, sha, _total = _stream_hashes(full)
+        raw, payload, steps = b"", None, [f"{_fmt_bytes(size)} — too large to decode here; "
+                                          f"hashed in chunks and left as stored."]
+        kind, ext = sniff_content(_read(full, 16))
+    else:
+        raw = _read(full)
+        md5, sha = _hashes(raw) if raw else ("", "")
+        payload, kind, ext, steps = decode_payload(raw, key_info.get("key"), key_info.get("iv"))
+    if payload is None:
+        content, cmd5, csha = raw, md5, sha
+    elif payload is raw:
+        content, cmd5, csha = payload, md5, sha
+    else:
+        content = payload
+        cmd5, csha = _hashes(payload)
+    # Read from the RECOVERED bytes — a decrypted payload has no file of its own yet — or from the
+    # file on disk when it was too large to read whole (the header is all the reader needs).
+    embedded = None
+    if kind == "media":
+        embedded = (media_meta.extract(full) if size > MAX_DECODE_BYTES
+                    else media_meta.extract_bytes(content, name))
+    return {"size": size, "name": name, "md5": md5, "sha": sha, "steps": steps, "kind": kind,
+            "ext": ext, "content": content, "cmd5": cmd5, "csha": csha, "embedded": embedded,
+            "recovered": payload is not None, "decoded": payload is not None and payload is not raw}
+
+
 def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=None,
                   device_mtimes=None, fs_records=None):
     """One entry per file under Library/Caches, deduplicated by recovered content.
@@ -1055,45 +1095,25 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
     by_content, stats = {}, {"files": 0, "bytes": 0, "decoded": 0, "failed": 0}
     # the file's own timestamps, in the run's timezone — the same formatter the claims go through
     epochfmt = (lambda seconds: ms_fmt(int(seconds) * 1000)) if ms_fmt else (lambda seconds: "")
-    for full, rel in walk_caches(app):
-        try:
-            size = os.path.getsize(full)
-        except OSError:
+    files = list(walk_caches(app))
+    # Read, hash and decode on several threads; merge here, in walk order, as before.
+    read = parallel.ordered_map(lambda fr: _read_cache_file(fr[0], fr[1], key_info), files)
+    for n_file, ((full, rel), got) in enumerate(zip(files, read), 1):
+        progress.step("reading and decoding Library/Caches files", n_file, len(files))
+        if got is None:
             continue
+        size, name = got["size"], got["name"]
+        md5, sha, steps, kind, ext = got["md5"], got["sha"], got["steps"], got["kind"], got["ext"]
+        content, cmd5, csha, embedded = got["content"], got["cmd5"], got["csha"], got["embedded"]
         stats["files"] += 1
         stats["bytes"] += size
-        progress.step("reading and decoding Library/Caches files", stats["files"])
-        name = os.path.basename(rel)
-
-        if size > MAX_DECODE_BYTES:
-            md5, sha, _total = _stream_hashes(full)
-            raw, payload, steps = b"", None, [f"{_fmt_bytes(size)} — too large to decode here; "
-                                              f"hashed in chunks and left as stored."]
-            kind, ext = sniff_content(_read(full, 16))
-        else:
-            raw = _read(full)
-            md5, sha = _hashes(raw) if raw else ("", "")
-            payload, kind, ext, steps = decode_payload(raw, key_info.get("key"), key_info.get("iv"))
-
-        if payload is None:
+        if not got["recovered"]:
             stats["failed"] += 1
-            content, cmd5, csha = raw, md5, sha
-        else:
-            content = payload
-            if payload is raw:
-                cmd5, csha = md5, sha
-            else:
-                stats["decoded"] += 1
-                cmd5, csha = _hashes(payload)
+        elif got["decoded"]:
+            stats["decoded"] += 1
 
         category, cat_note = classify(rel, kind, ext)
         url = decode_cache_key_url(name)
-        # Read from the RECOVERED bytes — a decrypted payload has no file of its own yet — or from the
-        # file on disk when it was too large to read whole (the header is all the reader needs).
-        embedded = None
-        if kind == "media":
-            embedded = (media_meta.extract(full) if size > MAX_DECODE_BYTES
-                        else media_meta.extract_bytes(content, name))
         copy = {
             "path": full, "rel": rel, "name": name, "bytes": size,
             "raw_md5": md5, "raw_sha256": sha,
@@ -1117,8 +1137,8 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
                 "cat_note": cat_note, "steps": steps, "copies": [],
                 "name": name, "rel": rel, "url": url,
                 "inner_url": inner_bolt_url(url),
-                "decoded": payload is not None and payload is not raw,
-                "recovered": payload is not None,
+                "decoded": got["decoded"],
+                "recovered": got["recovered"],
                 "embedded": embedded,
                 "embedded_times": report_ui.file_time_rows(embedded, epochfmt),
                 "tsaf": tsaf_fields(content) if kind == "tsaf" else [],

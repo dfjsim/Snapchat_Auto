@@ -89,6 +89,14 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   looks like a crash; and the end of every run — one that failed included — logs how long each stage
   took. A retrieval from Snapchat's servers logs its long waits, and its item numbers start at 1.
   See [docs/progress_and_performance.md](docs/progress_and_performance.md).
+- **The same reports in less time** — `scripts/parallel.py`. Reading, hashing and decoding cached
+  files (Library/Caches, cache_controller) and decrypting Memories run on several threads, with every
+  naming and de-duplication decision still taken in the original order, so the reports are
+  byte-identical; the SCContent listing is taken once per run. **Thumbnails** are cut by several
+  workers at once, kept in the run folder's `.thumbnail_cache/` by the video's SHA-256 (the same video
+  is decoded once per run folder), and no longer stop after ten minutes: the run window can skip them,
+  and a headless run can set `--thumbnail-minutes`. A packaged build starts a thumbnail worker without
+  loading the GUI and the parsers.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**

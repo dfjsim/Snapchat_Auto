@@ -8,6 +8,7 @@ the examiner their report.
 
 Every input is synthetic. No extraction data is required or used.
 """
+import glob
 import os
 import subprocess
 import sys
@@ -242,3 +243,98 @@ def test_an_audio_container_is_still_grouped_as_media():
     kind, ext, label, encrypted = sniff.classify(head, 1859)
     assert (kind, ext, encrypted) == ("media", "m4a", False)
     assert label == "m4a"
+
+
+# ------------------------------------------- several workers, a cache by content, and a Skip
+
+WRITES_A_FRAME = """
+import os, sys, time
+for line in sys.stdin:
+    src, dst = line.rstrip("\\n").split("\\t")[:2]
+    sys.stdout.write("START %s\\n" % src); sys.stdout.flush()
+    time.sleep(0.4)
+    with open(dst, "wb") as fh:
+        fh.write(b"FRAME-OF-" + open(src, "rb").read()[:8])
+    with open(dst + ".pid", "w") as mark:              # one file per decode: no shared log
+        mark.write(str(os.getpid()))
+    sys.stdout.write("OK %s\\n" % src); sys.stdout.flush()
+"""
+
+
+def _frame_worker(monkeypatch, tmp_path):
+    spawned = []
+
+    def spawn():
+        proc = subprocess.Popen(_fake_worker(tmp_path, WRITES_A_FRAME), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                bufsize=1)
+        spawned.append(proc)
+        return proc
+    monkeypatch.setattr(poster_worker, "_spawn", spawn)
+    return spawned
+
+
+def _decodes(tmp_path):
+    """{pid of the worker} for every frame a fake worker cut."""
+    return [open(p).read() for p in glob.glob(str(tmp_path / "*.pid"))]
+
+
+def _videos(tmp_path, contents):
+    paths = []
+    for n, data in enumerate(contents):
+        path = tmp_path / f"v{n}.mp4"
+        path.write_bytes(data)
+        paths.append(str(path))
+    return paths
+
+
+def test_several_workers_decode_at_once(monkeypatch, tmp_path):
+    spawned = _frame_worker(monkeypatch, tmp_path)
+    videos = _videos(tmp_path, [bytes([n]) * 32 for n in range(4)])
+    started = time.monotonic()
+    results, _ = poster_worker.run_jobs([(v, v + ".jpg", False) for v in videos], workers=4)
+    assert all(results[v] for v in videos)
+    assert len(set(_decodes(tmp_path))) > 1 and len(spawned) == 4   # the work was shared out
+    assert time.monotonic() - started < 4 * 0.4 + 3            # not one after the other
+
+
+def test_a_frame_is_cut_once_per_video_and_reused_from_the_cache(monkeypatch, tmp_path):
+    _frame_worker(monkeypatch, tmp_path)
+    cache = tmp_path / "cache"
+    poster_worker.set_cache_dir(str(cache))
+    try:
+        same, other = _videos(tmp_path, [b"A" * 32, b"B" * 32])
+        twin = str(tmp_path / "twin.mp4")
+        open(twin, "wb").write(b"A" * 32)                     # the same bytes under another name
+        results, _ = poster_worker.run_jobs([(same, same + ".jpg", False),
+                                             (twin, twin + ".jpg", False),
+                                             (other, other + ".jpg", False)], workers=2)
+        assert results == {same: True, twin: True, other: True}
+        assert open(twin + ".jpg", "rb").read() == open(same + ".jpg", "rb").read()
+        assert len(_decodes(tmp_path)) == 2                   # the twin was not decoded again
+        assert len(os.listdir(cache)) == 2
+        # a later pass — another report, a partial run — copies from the cache and starts nothing
+        monkeypatch.setattr(poster_worker, "_spawn",
+                            lambda: (_ for _ in ()).throw(AssertionError("a worker was started")))
+        again = str(tmp_path / "again.jpg")
+        results, _ = poster_worker.run_jobs([(same, again, False)])
+        assert results == {same: True} and open(again, "rb").read().startswith(b"FRAME-OF-A")
+        # a frame cut for a complete video is a different frame, and is not taken from it
+        assert not poster_worker._cache_keys([(same, same, again, True)], str(cache))[same] \
+            in {name[:-4] for name in os.listdir(cache)}
+    finally:
+        poster_worker.set_cache_dir(None)
+
+
+def test_skipped_from_the_run_window_nothing_more_is_attempted(monkeypatch, tmp_path):
+    from scripts import progress
+    spawned = _frame_worker(monkeypatch, tmp_path)
+    videos = _videos(tmp_path, [bytes([n]) * 32 for n in range(3)])
+    progress.start_run(heartbeat=False)
+    progress.request_skip(poster_worker.SKIP_KEY)
+    try:
+        results, _ = poster_worker.run_jobs([(v, v + ".jpg", False) for v in videos])
+    finally:
+        progress.start_run(heartbeat=False)                    # forget the skip
+        progress.finish_run()
+    assert results == {} and not spawned                       # not attempted, never "undecodable"

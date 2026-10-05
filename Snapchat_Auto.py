@@ -1,4 +1,13 @@
 import sys
+
+# Re-entry as a thumbnail worker (scripts/data/poster_worker.py): a packaged build has no interpreter
+# to run it with, so the program starts itself with this flag — once per worker, and again after every
+# video that hangs the decoder. It needs none of the imports below, and importing the GUI and the
+# parsers made every one of those restarts seconds slower. main() still handles the flag as well.
+if len(sys.argv) > 1 and sys.argv[1].lstrip("-/").lower() in ("poster-worker", "posterworker"):
+    from scripts.data import poster_worker as _poster_worker
+    sys.exit(_poster_worker.main(sys.argv[2:]))
+
 import FreeSimpleGUI as sg
 from scripts import ParseSnapchat_iOS
 from scripts import ParseSnapchat_Android
@@ -652,6 +661,9 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     logger.info(f"Run folder: {run_folder}")
     # stages, a "still working" line into every long silence, and the timing summary at the end
     progress.start_run()
+    # frames cut from cached video, kept by the video's hash so no run in this folder cuts one twice
+    from scripts.data import poster_worker
+    poster_worker.set_cache_dir(os.path.join(run_folder, ".thumbnail_cache"))
 
     try:
         if os_mode == "ios":
@@ -857,6 +869,9 @@ def print_usage():
           "  --hash-zip yes          Also record the extraction ZIP's MD5 and SHA-256. Off by\n"
           "                          default: tens of GB is a long read, and it is the database\n"
           "                          hashes that bind what the reports contain.\n"
+          "  --thumbnail-minutes <n> Stop each pass that cuts thumbnails out of cached video\n"
+          "                          after n minutes (videos not reached are listed without one,\n"
+          "                          as not attempted). No limit by default.\n"
           "  --legacy-reports yes    Also produce the two superseded reports (the single-page\n"
           "                          Communications report and the legacy Memories / My Eyes Only\n"
           "                          report). Off by default: the Conversations, Contacts and\n"
@@ -985,6 +1000,7 @@ def print_usage():
 # idiom requires — hence `--dry-run yes` rather than a bare `--dry-run`.
 _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz": True,
                 "padding": True, "tile-server": True, "run-name": True, "hash-zip": True,
+                "thumbnail-minutes": True,
                 # a partial run: the same pipeline, rendering only the rows a selection names
                 "selection": True, "relations": True, "case-ref": True, "unresolved": True,
                 "sources-mismatch": True, "version-mismatch": True, "no-reuse": True,
@@ -1259,6 +1275,15 @@ def run_cli(args):
             print(f"Snapchat Auto: {error}")
             return 2
 
+    if values.get("thumbnail-minutes"):
+        # a headless run has no Skip button: a limit on each thumbnail pass is how it keeps one short
+        try:
+            minutes = float(values["thumbnail-minutes"])
+        except ValueError:
+            print("Snapchat Auto: --thumbnail-minutes takes a number of minutes")
+            return 2
+        from scripts.data import poster_worker
+        poster_worker.set_budget(minutes * 60 if minutes > 0 else None)
     try:
         folder = run(zip_path=zip_path, keychain=keychain,
                      workdir=values.get("workdir", "."), os_mode=os_mode, padding=padding,

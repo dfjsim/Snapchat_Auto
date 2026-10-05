@@ -58,7 +58,10 @@ Memories / My Eyes Only.
 - Progress: `scripts/progress.py` — GUI-free stages (`progress.stage`), steps inside them
   (`progress.step`, `Counter`), a *still working* heartbeat into every 30 s silence of the log, and a
   per-stage timing summary at the end of a run. Bracket a new long stage and step through any loop
-  that can run for minutes. See [progress_and_performance.md](docs/progress_and_performance.md).
+  that can run for minutes. `scripts/parallel.py` (`ordered_map`) runs independent per-file work on
+  threads and returns it **in order** — whatever names, de-duplicates or publishes stays in the
+  caller's loop, so the reports stay byte-identical. See
+  [progress_and_performance.md](docs/progress_and_performance.md).
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,
@@ -73,7 +76,9 @@ Memories / My Eyes Only.
   [hidpi_scaling.md](docs/hidpi_scaling.md).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
   `Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
-  thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
+  thumbnails, in killable subprocesses (a few at once, frames cached by the video's SHA-256 in the run
+  folder, no time limit — the run window skips) because one cached video in six hangs the decoder for
+  good —
   `protobuf_wire.py`, the schema-less protobuf reader every decode shares, and `snap_session.py`, the
 snap editor's session record in `userPreferences/pref.docobjects` (which CACHE_KEY a context-34 claim's
 snap is held in; carved versions kept only when a claim corroborates them) —
