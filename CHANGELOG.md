@@ -83,6 +83,13 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   with *incl. inode changed* — ticked by default — here and in the Memories index's own Time filter:
   copying or acquiring a file can set that time.
 
+- **A run says where it is** — `scripts/progress.py`. The pipeline reports its stages and the count
+  inside each one (*decrypting SCContent media, 340 of 1,320*); whenever nothing has been logged for 30
+  seconds a *still working* line names the stage, the step and the count, so a long stage no longer
+  looks like a crash; and the end of every run — one that failed included — logs how long each stage
+  took. A retrieval from Snapchat's servers logs its long waits, and its item numbers start at 1.
+  See [docs/progress_and_performance.md](docs/progress_and_performance.md).
+
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
   `scripts/data/keychain.py` (GPL-3.0-or-later) is replaced by `scripts/data/ufed_keychain.py`, written

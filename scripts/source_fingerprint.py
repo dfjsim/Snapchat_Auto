@@ -38,6 +38,7 @@ import logging
 from datetime import datetime, timezone
 
 from scripts import app_version
+from scripts import progress
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +91,18 @@ def _hashes(path):
     """``(md5, sha256, bytes)`` of a file in one pass."""
     md5, sha = hashlib.md5(), hashlib.sha256()
     total = 0
+    try:
+        size_mb = os.path.getsize(path) >> 20
+    except OSError:
+        size_mb = None
+    label = f"hashing {os.path.basename(path)} (MB)"
     with open(path, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
             md5.update(block)
             sha.update(block)
             total += len(block)
+            if size_mb and size_mb > 64:                    # only a file worth a count
+                progress.step(label, total >> 20, size_mb)
     return md5.hexdigest(), sha.hexdigest(), total
 
 

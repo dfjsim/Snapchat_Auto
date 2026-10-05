@@ -14,6 +14,7 @@ import plistlib
 from io import BytesIO
 
 from scripts.data import device_fs
+from scripts import progress
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +306,8 @@ def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
     roots, renamed, mtimes, fs = {}, {}, {}, {}
     written = failed = hash_checked = 0
     hash_mismatch = []
-    for rel in sorted(chosen):
+    for n_done, rel in enumerate(sorted(chosen), 1):
+        progress.step("extracting the app's files", n_done, len(chosen))
         _rank, name, area, archive_root, info = chosen[rel]
         root = root_of(rel)
         stats = roots.setdefault(root, {"area": area, "files": 0, "bytes": 0,
@@ -544,7 +546,8 @@ Rename the folder and run again to extract Snapchat data from zip
             extracted_infos = []
             caches_bytes = sanitized = 0
             try:
-                for i in files_in_zip:
+                for n_seen, i in enumerate(files_in_zip, 1):
+                    progress.step("reading the archive", n_seen, len(files_in_zip))
                     if not _in_snapchat(i):
                         continue
                     if wanted(i, files_to_extract):

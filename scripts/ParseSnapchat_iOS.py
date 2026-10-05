@@ -26,6 +26,7 @@ from scripts import report_ui
 from scripts import source_fingerprint
 from scripts import partial_report
 from scripts import selection_file
+from scripts import progress
 import math
 import logging
 import numpy as np
@@ -1866,7 +1867,8 @@ def _index_stages(partial, report_dir, args):
     stages = {}
     for label, build in builders:
         try:
-            stage = build()
+            with progress.stage(f"{label} — index"):
+                stage = build()
         except Exception as Error:
             logger.error(f"{label} report failed while indexing: {Error}")
             continue
@@ -1893,15 +1895,17 @@ def _render_partial(partial, report_dir, args, stages):
     stage = stages.get("Conversations")
     if stage is not None:
         try:
-            _report, conv_index = conversations_report.render(stage, closure=closure, prov=prov)
+            with progress.stage("Conversations — render"):
+                _report, conv_index = conversations_report.render(stage, closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"Conversations report failed: {Error}")
 
     stage = stages.get("Contacts")
     if stage is not None:
         try:
-            contacts_report.render(stage, args["ct"]["outdir"], conv_index=conv_index,
-                                   closure=closure, prov=prov)
+            with progress.stage("Contacts — render"):
+                contacts_report.render(stage, args["ct"]["outdir"], conv_index=conv_index,
+                                       closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"Contacts report failed: {Error}")
 
@@ -1912,7 +1916,8 @@ def _render_partial(partial, report_dir, args, stages):
         if stage is None:
             continue
         try:
-            module.render(stage, closure=closure, prov=prov)
+            with progress.stage(f"{label} — render"):
+                module.render(stage, closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"{label} report failed: {Error}")
 
@@ -2082,7 +2087,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # them into its pages and the examiner's selection file can carry a copy. A later partial run
     # checks that copy against the extraction it is given, and refuses to reuse anything a different
     # build produced. See scripts/source_fingerprint.py.
-    sources = source_fingerprint.collect(source_artifacts, zip_path=zip_path, hash_zip=hash_zip)
+    with progress.stage("Hashing the sources" + (" and the ZIP" if hash_zip else "")):
+        sources = source_fingerprint.collect(source_artifacts, zip_path=zip_path, hash_zip=hash_zip)
     source_fingerprint.write_sources(report_dir, sources)
     n_found = sum(1 for r in sources["artifacts"].values() if r.get("present"))
     logger.info(f"Sources: {n_found} of {len(sources['artifacts'])} artifact(s) present, digest "
@@ -2157,13 +2163,19 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # in memory, so this only cleans up after a run made by a previous version.
     if os.path.exists("test.plist"):
         os.remove("test.plist")
+    chat_stage = progress.begin("Chats (arroyo.db, cache claims, attachments)")
+    progress.step("reading messages")
     chats_df = getChats(arroyo[0])
+    progress.step("naming senders")
     chats_df = fixSenders(chats_df, friends_df, df_snapchatter)
+    progress.step("reading cache claims")
     cache_df = getCache(cacheController[0])
     all_claims_df = cache_df.copy()                            # before mergeCache filters it
     content_df = getContentmanager(contentmanager)
     cache_df = mergeCache(cache_df, content_df)
+    progress.step("matching messages to cache claims")
     cache_arroyo_df = getCacheArroyo(arroyo[0], cache_df)
+    progress.step("media saved in chat")
     persistent_df = getSCPersistentMedia()
     global persistent_cache_keys
     # Matched against *all* claims, not the merged frame: mergeCache keeps only claims whose
@@ -2171,6 +2183,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # saved video needs — a chat video is a bundle, and the file named after its CACHE_KEY is the
     # small CHILDREN descriptor (the video itself is a child file).
     persistent_cache_keys = mapPersistentMediaToCacheKeys(all_claims_df, persistent_df)
+    progress.step("merging chats with cache files")
     final_df = mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df)
     final_df = final_df.drop_duplicates()
     final_df = final_df.sort_values(by=['Client Conversation ID', 'Server Message ID'])
@@ -2307,6 +2320,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                                           SCContentFolder[0] if SCContentFolder else "",
                                           out_dir=report_dir + "/LocalMemories_legacy")
 
+    progress.end(chat_stage)
+
     # The arguments both paths use, built once. A partial run calls each report's index() and then its
     # render(); a full run calls main(), which is the two in sequence. Assembling the arguments in one
     # place is what stops the two paths drifting on some argument nobody thought to pass twice.
@@ -2373,19 +2388,22 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
 
     try:
         from scripts import conversations_report
-        _report, conv_index = conversations_report.main(**args["conv"])
+        with progress.stage("Conversations"):
+            _report, conv_index = conversations_report.main(**args["conv"])
     except Exception as Error:
         logger.error(f"Conversations report failed: {Error}")
 
     # Contacts report: one table of every contact, linked to that contact's conversation page.
     try:
         from scripts import contacts_report
-        contacts_report.main(conv_index=conv_index, **args["ct"])
+        with progress.stage("Contacts"):
+            contacts_report.main(conv_index=conv_index, **args["ct"])
     except Exception as Error:
         logger.error(f"Contacts report failed: {Error}")
 
     #final_df.to_excel("test.xlsx")
-    legacy_memories_report()
+    with progress.stage("Legacy Memories"):
+        legacy_memories_report()
     if not legacy_wanted:
         # The parser stages chat attachments in that folder whether or not the legacy report is
         # wanted, and the Conversations report hard-links what it needs out of it — so the bytes
@@ -2400,7 +2418,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         from scripts import memories_media_report
         # Application is the extracted ".../ExtractedData/Application" folder; its parent is the
         # archive root, so source paths in the report show as "/Application/<UUID>/Documents/...".
-        memories_media_report.main(**args["mem"])
+        with progress.stage("Memories"):
+            memories_media_report.main(**args["mem"])
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
@@ -2410,7 +2429,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # the links between the two are two-way.
     try:
         from scripts import cache_media_report
-        cache_media_report.main(**args["cm"])
+        with progress.stage("Library/Caches"):
+            cache_media_report.main(**args["cm"])
     except Exception as Error:
         logger.error(f"Cached media report failed: {Error}")
 
@@ -2419,7 +2439,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # those so it can read the manifests they wrote.
     try:
         from scripts import cache_controller_report
-        cache_controller_report.main(**args["cc"])
+        with progress.stage("cache_controller"):
+            cache_controller_report.main(**args["cc"])
     except Exception as Error:
         logger.error(f"cache_controller report failed: {Error}")
     #return user_scoped_id

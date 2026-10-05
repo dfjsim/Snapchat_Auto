@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
+from scripts import progress
 from scripts.data import sqlite_open, media_meta, arroyo_content
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, contact_anchor,
@@ -373,7 +374,8 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         logger.warning(f"Conversations: the message frame has no '{COL_CONV}' column "
                        f"({columns}) — no conversation can be built from it")
         return by_conv, {"dropped": 0, "skipped_conv": len(msg_df)}
-    for _index, row in msg_df.iterrows():
+    for n_row, (_index, row) in enumerate(msg_df.iterrows(), 1):
+        progress.step("building messages", n_row, len(msg_df))
         conv_id = cell(row.get(COL_CONV))
         if not _UUID_RE.match(conv_id):
             # The legacy report drops these too: without a conversation id of the expected shape

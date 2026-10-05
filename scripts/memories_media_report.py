@@ -70,6 +70,7 @@ from scripts import offline_maps
 from scripts import gallery_search
 from scripts import cloud_memories
 from scripts import memory_leads
+from scripts import progress
 from scripts import memory_backlinks
 
 logger = logging.getLogger(__name__)
@@ -1898,6 +1899,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
     addressed = keyed + unkeyed
     for done, (sid, m) in enumerate(addressed, 1):
+        progress.step("decrypting SCContent media", done, len(addressed))
         if done % 2000 == 0:
             logger.info(f"  SCContent: {done}/{len(addressed)} memories")
         has_key = bool(m["key"] and m["iv"])
@@ -2013,6 +2015,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                 f"{len(keyed)} key(s)")
     n_packs = 0
     for done, (folder, by_item) in enumerate(cm_folders, 1):
+        progress.step("matching caching-media packs to keys", done, len(cm_folders))
         if done % 500 == 0:
             logger.info(f"  caching-media: {done}/{len(cm_folders)} folder(s), {n_packs} file(s)")
         # Probe with the first two plaintext blocks only. Every acceptance test in decrypt_pack

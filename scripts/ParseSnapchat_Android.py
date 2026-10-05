@@ -31,6 +31,7 @@ import pandas as pd
 
 from scripts import android_layout
 from scripts import source_fingerprint
+from scripts import progress
 from scripts import ParseSnapchat_iOS as shared
 from scripts.data import sqlite_open
 
@@ -682,8 +683,9 @@ def main(extracted_root, keychain="", padding="both", tz="local", report_dir=Non
     if survey:
         logger.info(f"Layout survey (structure only, no content): {survey}")
 
-    sources = source_fingerprint.collect(_source_artifacts(layout, keychain), zip_path=zip_path,
-                                         hash_zip=hash_zip)
+    with progress.stage("Hashing the sources" + (" and the ZIP" if hash_zip else "")):
+        sources = source_fingerprint.collect(_source_artifacts(layout, keychain), zip_path=zip_path,
+                                             hash_zip=hash_zip)
     source_fingerprint.write_sources(report_dir, sources)
     n_found = sum(1 for r in sources["artifacts"].values() if r.get("present"))
     logger.info(f"Sources: {n_found} of {len(sources['artifacts'])} artifact(s) present, digest "
@@ -703,33 +705,37 @@ def main(extracted_root, keychain="", padding="both", tz="local", report_dir=Non
     staging = os.path.join(report_dir, "_chat_attachments")
     conv_index = {}
     try:
-        msg_df = read_messages(layout, owner, friends_df, staging)
+        with progress.stage("Chats (arroyo.db, cache claims, attachments)"):
+            msg_df = read_messages(layout, owner, friends_df, staging)
         if msg_df is not None:
             from scripts import conversations_report
-            _report, conv_index = conversations_report.main(
-                msg_df=msg_df, friends_df=friends_df, group_df=pd.DataFrame({}),
-                outdir=os.path.join(report_dir, "Conversations"),
-                cachefiles_dir=os.path.join(staging, "cacheFiles") + "/",
-                arroyo=layout.db("arroyo"), tz=tz, owner_user_id=owner["user_id"],
-                owner_username=owner["username"], cache_key_for=chat_cache_key,
-                report_dir=report_dir, primary=None, identifiers=identifiers)
+            with progress.stage("Conversations"):
+                _report, conv_index = conversations_report.main(
+                    msg_df=msg_df, friends_df=friends_df, group_df=pd.DataFrame({}),
+                    outdir=os.path.join(report_dir, "Conversations"),
+                    cachefiles_dir=os.path.join(staging, "cacheFiles") + "/",
+                    arroyo=layout.db("arroyo"), tz=tz, owner_user_id=owner["user_id"],
+                    owner_username=owner["username"], cache_key_for=chat_cache_key,
+                    report_dir=report_dir, primary=None, identifiers=identifiers)
     except Exception as error:                                 # noqa: BLE001
         logger.error(f"Conversations report failed: {error}", exc_info=True)
 
     try:
         from scripts import contacts_report
-        contacts_report.main(friends_df, os.path.join(report_dir, "Contacts"), conv_index=conv_index,
-                             owner_user_id=owner["user_id"], owner_username=owner["username"],
-                             friends_source=FRIENDS_SOURCE, tz=tz, report_dir=report_dir,
-                             primary=None, identifiers=identifiers, account=account,
-                             snapchatters=[])
+        with progress.stage("Contacts"):
+            contacts_report.main(friends_df, os.path.join(report_dir, "Contacts"),
+                                 conv_index=conv_index, owner_user_id=owner["user_id"],
+                                 owner_username=owner["username"], friends_source=FRIENDS_SOURCE,
+                                 tz=tz, report_dir=report_dir, primary=None,
+                                 identifiers=identifiers, account=account, snapchatters=[])
     except Exception as error:                                 # noqa: BLE001
         logger.error(f"Contacts report failed: {error}", exc_info=True)
 
     if legacy_reports:
         try:
             from scripts import getCacheAndroid
-            getCacheAndroid.main(layout.app, os.path.join(report_dir, "Communications_legacy"))
+            with progress.stage("Legacy Communications"):
+                getCacheAndroid.main(layout.app, os.path.join(report_dir, "Communications_legacy"))
         except Exception as error:                             # noqa: BLE001
             logger.error(f"Legacy Communications report failed: {error}", exc_info=True)
     else:
@@ -739,16 +745,19 @@ def main(extracted_root, keychain="", padding="both", tz="local", report_dir=Non
 
     try:
         from scripts import memories_android_report
-        memories_android_report.main(layout, outdir=os.path.join(report_dir, "Memories"), tz=tz,
-                                     padding=padding, tile_server=tile_server,
-                                     report_dir=report_dir)
+        with progress.stage("Memories"):
+            memories_android_report.main(layout, outdir=os.path.join(report_dir, "Memories"), tz=tz,
+                                         padding=padding, tile_server=tile_server,
+                                         report_dir=report_dir)
     except Exception as error:                                 # noqa: BLE001
         logger.error(f"Memories report failed: {error}", exc_info=True)
 
     try:
         from scripts import cache_controller_report
-        cache_controller_report.main(layout.app, outdir=os.path.join(report_dir, "CacheController"),
-                                     tz=tz, src_root=layout.root, report_dir=report_dir)
+        with progress.stage("cache_controller"):
+            cache_controller_report.main(layout.app,
+                                         outdir=os.path.join(report_dir, "CacheController"),
+                                         tz=tz, src_root=layout.root, report_dir=report_dir)
     except Exception as error:                                 # noqa: BLE001
         logger.error(f"cache_controller report failed: {error}", exc_info=True)
 

@@ -27,6 +27,7 @@ import shutil
 from dataclasses import dataclass, field
 
 from scripts import cloud_download as cd
+from scripts import progress
 
 logger = logging.getLogger(__name__)
 
@@ -435,10 +436,17 @@ def cloud_phase(memories, run_folder, request, decrypt_sccontent):
 
 
 def _log_event(event):
+    if event.total:
+        progress.step("retrieving from Snapchat's servers",
+                      event.done + event.failed + event.skipped, event.total)
     if event.kind in ("item_done", "item_failed", "item_skipped"):
         job = event.job
-        logger.info(f"  [{event.done + event.failed + event.skipped}/{event.total}] "
+        # the counts are those before this item, so the item itself is one more
+        logger.info(f"  [{event.done + event.failed + event.skipped + 1}/{event.total}] "
                     f"{job.snap_id} {job.role}: {event.text}")
+    elif event.kind == "wait" and event.wait_s and event.wait_s >= 20:
+        # a long pace or back-off wait is otherwise a silence in the log
+        logger.info(f"  waiting {event.wait_s:.0f} s: {event.text}")
     elif event.kind == "item_start" and event.eta_s:
         if (event.done + event.failed) % 10 == 0:
             logger.info(f"  … about {event.eta_s / 60:.0f} min to go at this pace")

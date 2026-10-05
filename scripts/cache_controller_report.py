@@ -46,6 +46,7 @@ from scripts.data import sqlite_open
 from scripts.data import sniff
 from scripts.data import snap_session
 from scripts import memory_leads
+from scripts import progress
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.data import device_fs
 from scripts.memories_media_report import (
@@ -829,7 +830,8 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
             for t in target["embedded_times"]:
                 t["shown"] = t["wall"]
 
-    for e in entries:
+    for n_e, e in enumerate(entries, 1):
+        progress.step("hashing and publishing cached files", n_e, len(entries))
         if not e["on_disk"]["found"]:
             continue
         paths, _single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
@@ -1012,7 +1014,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
 
     entries = []
     all_keys = set(by_key) | set(tomb_by_key)
-    for key in all_keys:
+    for n_key, key in enumerate(all_keys, 1):
+        progress.step("reading cache entries", n_key, len(all_keys))
         clist = by_key.get(key, [])
         meta = meta_by_key.get(key, {})
         children = parse_children(meta.get("CHILDREN"))

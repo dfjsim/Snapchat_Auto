@@ -12,6 +12,7 @@ from scripts import partial_report
 from scripts import global_search
 from scripts import cloud_refresh
 from scripts import hidpi
+from scripts import progress
 import os
 import json
 import logging
@@ -649,13 +650,17 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     run_folder = os.path.abspath(".")
     add_log_file(".")
     logger.info(f"Run folder: {run_folder}")
+    # stages, a "still working" line into every long silence, and the timing summary at the end
+    progress.start_run()
 
     try:
         if os_mode == "ios":
             logger.info("You chose iOS")
-            extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
+            with progress.stage("Extraction"):
+                extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
             if not os.path.exists("SnapFixedVideos"):
-                parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
+                with progress.stage("SnapFixedVideos"):
+                    parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
             else:
                 logger.info("Found SnapFixedVideos folder, skipping that step")
             # A partial extract gets its own folder. Overwriting the reports the examiner ticked rows
@@ -687,16 +692,19 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 return run_folder
             # Write the report index BEFORE the pause, so index.html exists when the "press any
             # key" prompt appears (previously the pause lived inside the parser and blocked this).
-            if partial is None:
-                write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
-                index_path = "index.html"
-            else:
-                # inside the extract, not beside it: the folder is the deliverable, so it carries its
-                # own index, its own provenance and its own manifest and can be handed over as it is
-                write_index(reports_subdir, ".", zip_path=zip_path, keychain_path=keychain,
-                            closure=partial.closure, prov=partial.prov)
-                index_path = os.path.join(reports_subdir, "index.html")
+            with progress.stage("Index and search page"):
+                if partial is None:
+                    write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
+                    index_path = "index.html"
+                else:
+                    # inside the extract, not beside it: the folder is the deliverable, so it carries
+                    # its own index, its own provenance and its own manifest and can be handed over as
+                    # it is
+                    write_index(reports_subdir, ".", zip_path=zip_path, keychain_path=keychain,
+                                closure=partial.closure, prov=partial.prov)
+                    index_path = os.path.join(reports_subdir, "index.html")
             logger.info(f"Report index: {os.path.abspath(index_path)}")
+            progress.finish_run()
             if pause:
                 os.system("pause")
         else:
@@ -705,16 +713,21 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 # the selection machinery is built on the iOS report set; refusing is honest, an
                 # extract that quietly ignored the selection would not be
                 raise LookupError("partial reports (--selection) are not available for Android yet")
-            extracted_root = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
+            with progress.stage("Extraction"):
+                extracted_root = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
             ParseSnapchat_Android.main(extracted_root, keychain, padding=padding, tz=tz,
                                        report_dir="./Reports", tile_server=tile_server,
                                        zip_path=os.path.abspath(zip_path) if zip_path else "",
                                        hash_zip=hash_zip, legacy_reports=legacy_reports)
-            write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain, platform="android")
+            with progress.stage("Index and search page"):
+                write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain,
+                            platform="android")
             logger.info(f"Report index: {os.path.abspath('index.html')}")
+            progress.finish_run()
             if pause:
                 os.system("pause")
     finally:
+        progress.finish_run()               # a run that stopped early still says where its time went
         os.chdir(started)
     return run_folder
 

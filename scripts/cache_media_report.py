@@ -50,6 +50,7 @@ from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
 from scripts import memory_backlinks
+from scripts import progress
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -1061,6 +1062,7 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             continue
         stats["files"] += 1
         stats["bytes"] += size
+        progress.step("reading and decoding Library/Caches files", stats["files"])
         name = os.path.basename(rel)
 
         if size > MAX_DECODE_BYTES:
@@ -1856,7 +1858,8 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     memory_packs = load_memory_packs(ldir)
     memory_content = (load_memory_content(ldir) or {}).get("by_sha256") or {}
     chat_by_key, chat_by_message = load_chat_links(ldir)
-    for entry in entries:
+    for n_entry, entry in enumerate(entries, 1):
+        progress.step("linking files to the other reports", n_entry, len(entries))
         entry["links"] = attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size,
                                    mem_index, memory_pages, chat_by_key, chat_by_message,
                                    packs=memory_packs, content=memory_content)
