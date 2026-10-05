@@ -6,6 +6,47 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [1.9.0-beta.2] — 2026-10-05
+
+### Added
+- **Search all reports by date** — `scripts/global_search.py`. A **date / time window** (between two
+  moments, or within ± N of one) finds rows by when, alone or with the words, which a row must then
+  match as well. Every report's rows now carry the times they show — the Contacts, cache_controller and
+  Library/Caches rows newly (claims, last read, the device's created / modified / read times, a media
+  file's own zoned times). The device's **inode-change** times can be left out with *incl. inode
+  changed* — ticked by default — here and in the Memories index's own Time filter: copying or acquiring
+  a file can set that time.
+- **A run says where it is** — `scripts/progress.py`. The pipeline reports its stages and the count
+  inside each one (*decrypting SCContent media, 340 of 1,320*); whenever nothing has been logged for 30
+  seconds a *still working* line names the stage, the step and the count, so a long stage no longer
+  looks like a crash; and the end of every run — one that failed included — logs how long each stage
+  took. A retrieval from Snapchat's servers logs its long waits, and its item numbers start at 1.
+  See [docs/progress_and_performance.md](docs/progress_and_performance.md).
+- **The same reports in less time** — `scripts/parallel.py`. Reading, hashing and decoding cached
+  files (Library/Caches, cache_controller) and decrypting Memories run on several threads, with every
+  naming and de-duplication decision still taken in the original order, so the reports are
+  byte-identical; the SCContent listing is taken once per run. **Thumbnails** are cut by several
+  workers at once, kept in the run folder's `.thumbnail_cache/` by the video's SHA-256 (the same video
+  is decoded once per run folder), and no longer stop after ten minutes: the run window can skip them,
+  and a headless run can set `--thumbnail-minutes`. A packaged build starts a thumbnail worker without
+  loading the GUI and the parsers.
+- **The run window** — `scripts/run_window.py`. A run started from the GUI happens behind a window
+  showing the stages done with their times, the step and count of the one running, how long since
+  anything was logged, the log with its warnings and errors, and at the end *Open report* / *Open
+  folder*; *Skip thumbnails* while thumbnails are cut. A retrieval from Snapchat's servers during the
+  run shows its progress and controls (pace, Pause, Stop) in the same window instead of its own, and
+  no longer waits for that window to be closed before the run goes on.
+
+### Fixed
+- **Chat parsing took the last match wherever there were several, and took hours on a large phone.**
+  `fixSenders`, `getCacheArroyo` and `mergeCacheChats` compared every message with every friend and
+  every cache claim, each match overwriting the one before. They are lookups now, and each choice is
+  stated: a user id with several names shows all of them (« / »); a share or sticker takes its media
+  before its thumbnail; a message naming a key claimed twice takes this account's claim; each is
+  logged with a count when it happens. `getSCPersistentMedia` no longer rebuilds its table after every
+  file. Identical output on the test devices, where none of these cases occurs.
+  See [docs/report_communications.md](docs/report_communications.md#when-a-value-has-several-candidates).
+
 ## [1.9.0-beta.1] — 2026-10-02
 
 ### Added
@@ -76,33 +117,7 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   reports* link beside each report's search box. It is each report's own search (its rows' search text,
   `|` for either) on its own `data/index.js`, so the counts agree; each hit opens its row, *Open all*
   opens the report filtered to the same search. Written with every `index.html`, partial extracts
-  included. A **date / time window** (between two moments, or within ± N of one) finds rows by when,
-  alone or with the words: every report's rows now carry the times they show — the Contacts,
-  cache_controller and Library/Caches rows newly (claims, last read, the device's created / modified /
-  read times, a media file's own zoned times). The device's **inode-change** times can be left out
-  with *incl. inode changed* — ticked by default — here and in the Memories index's own Time filter:
-  copying or acquiring a file can set that time.
-
-- **A run says where it is** — `scripts/progress.py`. The pipeline reports its stages and the count
-  inside each one (*decrypting SCContent media, 340 of 1,320*); whenever nothing has been logged for 30
-  seconds a *still working* line names the stage, the step and the count, so a long stage no longer
-  looks like a crash; and the end of every run — one that failed included — logs how long each stage
-  took. A retrieval from Snapchat's servers logs its long waits, and its item numbers start at 1.
-  See [docs/progress_and_performance.md](docs/progress_and_performance.md).
-- **The same reports in less time** — `scripts/parallel.py`. Reading, hashing and decoding cached
-  files (Library/Caches, cache_controller) and decrypting Memories run on several threads, with every
-  naming and de-duplication decision still taken in the original order, so the reports are
-  byte-identical; the SCContent listing is taken once per run. **Thumbnails** are cut by several
-  workers at once, kept in the run folder's `.thumbnail_cache/` by the video's SHA-256 (the same video
-  is decoded once per run folder), and no longer stop after ten minutes: the run window can skip them,
-  and a headless run can set `--thumbnail-minutes`. A packaged build starts a thumbnail worker without
-  loading the GUI and the parsers.
-- **The run window** — `scripts/run_window.py`. A run started from the GUI happens behind a window
-  showing the stages done with their times, the step and count of the one running, how long since
-  anything was logged, the log with its warnings and errors, and at the end *Open report* / *Open
-  folder*; *Skip thumbnails* while thumbnails are cut. A retrieval from Snapchat's servers during the
-  run shows its progress and controls (pace, Pause, Stop) in the same window instead of its own, and
-  no longer waits for that window to be closed before the run goes on.
+  included.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
@@ -122,14 +137,6 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   shipped before. The README no longer says LICENSE is unmodified.
 
 ### Fixed
-- **Chat parsing took the last match wherever there were several, and took hours on a large phone.**
-  `fixSenders`, `getCacheArroyo` and `mergeCacheChats` compared every message with every friend and
-  every cache claim, each match overwriting the one before. They are lookups now, and each choice is
-  stated: a user id with several names shows all of them (« / »); a share or sticker takes its media
-  before its thumbnail; a message naming a key claimed twice takes this account's claim; each is
-  logged with a count when it happens. `getSCPersistentMedia` no longer rebuilds its table after every
-  file. Identical output on the test devices, where none of these cases occurs.
-  See [docs/report_communications.md](docs/report_communications.md#when-a-value-has-several-candidates).
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
   database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both
   readings from staged copies through `sqlite_open`, so a cache file named through a URL the `-wal`
