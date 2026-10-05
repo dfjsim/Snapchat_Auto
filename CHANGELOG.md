@@ -97,6 +97,12 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   is decoded once per run folder), and no longer stop after ten minutes: the run window can skip them,
   and a headless run can set `--thumbnail-minutes`. A packaged build starts a thumbnail worker without
   loading the GUI and the parsers.
+- **The run window** — `scripts/run_window.py`. A run started from the GUI happens behind a window
+  showing the stages done with their times, the step and count of the one running, how long since
+  anything was logged, the log with its warnings and errors, and at the end *Open report* / *Open
+  folder*; *Skip thumbnails* while thumbnails are cut. A retrieval from Snapchat's servers during the
+  run shows its progress and controls (pace, Pause, Stop) in the same window instead of its own, and
+  no longer waits for that window to be closed before the run goes on.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**

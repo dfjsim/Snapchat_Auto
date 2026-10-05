@@ -2272,30 +2272,37 @@ def main(args):
 
     cloud = None
     if values.get("cloud_run") and cloud_request is not None:
-        from scripts import cloud_gui
         cloud = cloud_request
-        cloud.runner = cloud_gui.progress_runner(_cloud_ui(), cloud)
-    try:
-        run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
-            os_mode="ios" if values["os_ios"] else "android",
-            padding=PADDING_MAP.get(values.get("padding"), "both"),
-            tz=_map_timezone(values.get("timezone")),
-            tile_server=values.get("tile_server", "").strip(),
-            pause=True, partial=partial,
-            legacy_reports=bool(values.get("legacy_reports")), cloud=cloud)
-    except (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection, LookupError) as error:
+    # The run happens behind the run window (scripts/run_window.py): its stages, the count inside
+    # the current one, the log, and — during a retrieval — the servers' progress and controls, which
+    # the window drives itself rather than opening a window of its own.
+    from scripts import run_window
+    _folder, error = run_window.run_in_window(
+        _cloud_ui(), run,
+        dict(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
+             os_mode="ios" if values["os_ios"] else "android",
+             padding=PADDING_MAP.get(values.get("padding"), "both"),
+             tz=_map_timezone(values.get("timezone")),
+             tile_server=values.get("tile_server", "").strip(),
+             pause=False, partial=partial,
+             legacy_reports=bool(values.get("legacy_reports")), cloud=cloud),
+        title=f"Snapchat Auto v{get_version()} — processing", formatter=formatter)
+    if isinstance(error, (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection,
+                          LookupError)):
         # A refused partial run reaches here. Without this it left a traceback on the console and
         # **nothing in the log**, so the examiner saw a run that simply stopped: the reason has to be
         # in the log next to the run it belongs to, and in front of the person who asked for it.
         logger.error(str(error))
         sg.popup_error(f"The partial report was not built.\n\n{error}",
                        title="Partial report refused", keep_on_top=True)
-        os.system("pause")
-    except extract_zip.SnapchatNotFound as error:
+    elif isinstance(error, extract_zip.SnapchatNotFound):
         # the same reasoning: an extraction without the app is an answer, and it belongs in the log
         logger.error(str(error))
         sg.popup_error(str(error), title="Snapchat not found", keep_on_top=True)
-        os.system("pause")
+    elif isinstance(error, SystemExit):
+        logger.error(f"The run ended itself (exit code {error.code}) — see the log above")
+    elif error is not None:
+        logger.error("The run failed", exc_info=error)
 
 
 if __name__ == '__main__':

@@ -31,6 +31,33 @@ The pipeline reports to one GUI-free module, which does not know who listens:
 With no run started the calls still work (they update the state nobody reads), so a report module
 used on its own, and the tests, are unaffected. Nothing here touches a report.
 
+## The run window (`scripts/run_window.py`)
+
+A run started from the GUI no longer leaves the examiner with only the console. The window closes the
+settings as before, and the run happens on a worker thread behind a window that shows, four times a
+second:
+
+* the **stages** done, each with its time (✗ for one an error stopped), and the one running;
+* the **step** inside it with its count and a bar when the count has a total, and — once nothing has
+  been logged for ten seconds — how long it has been, so a slow step reads as slow rather than dead;
+* the **log** as it is written, with a count of warnings and errors;
+* while a retrieval from Snapchat's servers runs, **its** progress, the request in flight or the wait
+  and why, the pace with *Apply*, and *Pause / Resume / Stop*. The retrieval no longer opens a window
+  of its own (`run_window.cloud_runner`): the engine runs on the run's thread, its events reach this
+  window through a queue, and this window drives its `Control`. Its old window waited to be closed
+  before the run went on; this one does not wait;
+* **Skip thumbnails** while thumbnails are being cut (it stops every thumbnail pass left in the run);
+* at the end, **Open report** and **Open folder**. Closing the window while the run is going asks
+  first, then ends the program: a pipeline cannot be stopped half-way into a state worth continuing.
+
+Only the window's thread touches the window. The pipeline never does — it reports to
+`scripts/progress.py`, to the log, and to the retrieval's event queue — which is why the retrieval's
+own window had to go: it was drawn by the thread that ran it. Whatever the run raised is handed back
+to the caller (`run_in_window` returns it), `SystemExit` included, so a refused partial run or an
+extraction without the app is still explained in a dialog and in the log. A retrieval for an existing
+run folder (*Cloud download for an existing run…*) still uses its own progress window: no pipeline
+runs there.
+
 ## The same work in less time
 
 Measured first: a warm re-run of the test devices spent most of its time reading, hashing and

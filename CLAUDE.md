@@ -60,8 +60,10 @@ Memories / My Eyes Only.
   per-stage timing summary at the end of a run. Bracket a new long stage and step through any loop
   that can run for minutes. `scripts/parallel.py` (`ordered_map`) runs independent per-file work on
   threads and returns it **in order** — whatever names, de-duplicates or publishes stays in the
-  caller's loop, so the reports stay byte-identical. See
-  [progress_and_performance.md](docs/progress_and_performance.md).
+  caller's loop, so the reports stay byte-identical. `scripts/run_window.py` is the GUI's view of all
+  of it: the run on a worker thread behind a window of stages, counts, the log, the retrieval's controls
+  and *Skip thumbnails*. **Nothing reachable from `run()` may touch a window** — report through
+  `progress`, the log or a queue. See [progress_and_performance.md](docs/progress_and_performance.md).
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,
