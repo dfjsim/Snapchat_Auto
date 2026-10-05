@@ -455,7 +455,7 @@ def test_the_marker_is_absent_from_a_full_report():
 
 
 @needs_node
-def test_inode_change_times_join_the_window_only_when_ticked():
+def test_inode_change_times_join_the_window_while_ticked():
     rows = [_row("A", ts=[100]), _row("B", ts=[900])]
     rows[1][5]["tc"] = [100]
     script = ("VALUES.tmode='range';VALUES.tfrom='1970-01-01T00:00';VALUES.tto='1970-01-01T00:05';"

@@ -880,9 +880,9 @@ def ts_key(text):
     return int(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
 
 
-#: The device filesystem times a row's ``ts`` carries. The inode-change time goes to ``tc`` instead
-#: and is searched only when the examiner asks for it (``time_filter(ctime=True)``): the acquisition
-#: itself can set it, and some archives carry a placeholder there.
+#: The device filesystem times a row's ``ts`` carries. The inode-change time goes to ``tc`` instead,
+#: which a control built with ``time_filter(ctime=True)`` matches unless its box is unticked: the
+#: acquisition itself can set that time, and some archives carry a placeholder there.
 FS_TIME_KINDS = ("btime", "mtime", "atime")
 
 
@@ -925,8 +925,9 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row", ctime=F
     entered is read as a wall clock and compared against `ts_key` values, so it means the time as
     the report displays it, in the run's timezone — see `ts_key`.
 
-    ``ctime`` adds a box that brings the device's inode-change times (a row's ``tc``) into the
-    window; they are left out unless it is ticked, because the acquisition itself can set them.
+    ``ctime`` adds a box for the device's inode-change times (a row's ``tc``). It starts ticked —
+    they are matched, as other tools match them — and unticking it leaves them out, because the
+    acquisition itself can set them.
     """
     scope_html = ""
     if scopes:
@@ -967,15 +968,16 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row", ctime=F
         f'title="The moment to search around."></span>'
         + scope_html
         + (f'<label class="tfc" title="{html.escape(CTIME_HINT)}"><input type="checkbox" '
-           f'id="{prefix}ctime" onchange="flt()">incl. inode changed{info_icon(CTIME_HINT)}</label>'
+           f'id="{prefix}ctime" checked onchange="flt()">incl. inode changed'
+           f'{info_icon(CTIME_HINT)}</label>'
            if ctime else ""))
 
 
 CTIME_HINT = (
     "Also match the device's inode-change times (when a file's owner, mode, name or links last "
-    "changed). They are left out unless this is ticked: copying or acquiring a file can set that "
-    "time, so a window around the extraction would otherwise match files for a reason that has "
-    "nothing to do with what the device's user did, and some archives store a placeholder there.")
+    "changed) — on by default. Untick to leave them out: copying or acquiring a file can set that "
+    "time, so a window around the extraction can match files for a reason that has nothing to do "
+    "with what the device's user did, and some archives store a placeholder there.")
 
 
 TIME_CSS = """
@@ -1013,8 +1015,8 @@ function scTimeWin(p){
  var mult={m:60,h:3600,d:86400}[scFv(p+'unit')||'h']||3600;
  return {a:at-n*mult,b:at+n*mult};}
 
-/* A row's time keys for the window: its `ts`, and its inode-change times (`tc`) only when the
-   control's own box asks for them (time_filter(ctime=True)). */
+/* A row's time keys for the window: its `ts`, and its inode-change times (`tc`) while the
+   control's own box is ticked (time_filter(ctime=True); it starts ticked). */
 function scTimeList(p,m){
  var c=document.getElementById(p+'ctime'),l=(m&&m.ts)||[];
  return (c&&c.checked&&m&&m.tc)?l.concat(m.tc):l;}
@@ -1041,7 +1043,7 @@ function scTimeReset(p){
  var n=document.getElementById(p+'n');if(n)n.value='1';
  var u=document.getElementById(p+'unit');if(u)u.value='h';
  var s=document.getElementById(p+'scope');if(s)s.selectedIndex=0;
- var c=document.getElementById(p+'ctime');if(c)c.checked=false;
+ var c=document.getElementById(p+'ctime');if(c)c.checked=true;      /* back to its default */
  scTimeMode(p,true);}
 """
 

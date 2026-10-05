@@ -123,8 +123,8 @@ For that every report's rows carry the times they show as `ts` keys (`ts_keys`; 
 `ct`/`mt`): the Memories and message rows always did, and the Contacts (first and last activity),
 cache_controller (each claim's creation, the last read, the device's created / modified / read times
 of the file — `report_ui.fs_times` — and a media file's own times where it states its zone) and
-Library/Caches rows (the same, per copy) now do; the inode-change times in `tc`, matched only when the
-page's *incl. inode changed* box is ticked. A row with no readable time does not match a window, as in the reports, and a report whose rows
+Library/Caches rows (the same, per copy) now do; the inode-change times in `tc`, matched while the
+page's *incl. inode changed* box is ticked (the default). A row with no readable time does not match a window, as in the reports, and a report whose rows
 record none is named as not searched by date rather than as having no match. *Open all* is not offered
 while a window is set: the link carries the words only, and would open more than the page found.
 
@@ -216,12 +216,13 @@ says that clearing the filter brings it back. The keys cover **every** timestamp
 the ones only its detail shows, which is the point: a capture time is findable without knowing which
 column holds it.
 
-**The device's inode-change time is opt-in** (`time_filter(..., ctime=True)`, `scTimeList`). A row
-carries it in `tc`, apart from its other times in `ts` (`report_ui.FS_TIME_KINDS`, `fs_times`), and a
-control built with `ctime=True` adds an *incl. inode changed* box that brings `tc` into the window.
-Copying or acquiring a file can set that time, and some archives store a placeholder there, so a window
-around the extraction would match files for a reason that has nothing to do with what the device's
-user did. The Memories index and the search over every report offer the box; it starts unticked.
+**The device's inode-change time can be left out** (`time_filter(..., ctime=True)`, `scTimeList`).
+A row carries it in `tc`, apart from its other times in `ts` (`report_ui.FS_TIME_KINDS`, `fs_times`),
+and a control built with `ctime=True` adds an *incl. inode changed* box that brings `tc` into the
+window. It starts **ticked**, so the window matches what other tools match; unticking it leaves those
+times out — copying or acquiring a file can set that time, and some archives store a placeholder there,
+so a window around the extraction can match files for a reason that has nothing to do with what the
+device's user did. The Memories index and the search over every report offer the box.
 
 **A conversation's two kinds of time are kept apart** (`scConvTimes`). `ct` is the conversation's own
 first/last activity — which for a conversation holding no message comes from the app's chat feed and

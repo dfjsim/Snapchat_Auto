@@ -370,8 +370,8 @@ DATE_HINT = (
     "above (a row must then match both). The times are every one a row shows: a Memory's capture and "
     "save times, a message's, a conversation's activity, a contact's first and last activity, a cached "
     "file's claims, last read and the device's own record of when it was created, modified and read, and "
-    "what a media file says about itself where it states its zone. The device's inode-change times "
-    "only when «incl. inode changed» is ticked.")
+    "what a media file says about itself where it states its zone, and the device's inode-change "
+    "times while «incl. inode changed» is ticked (the default).")
 
 
 def page_html(srcs, *, closure=None, prov=None, not_searched=()):

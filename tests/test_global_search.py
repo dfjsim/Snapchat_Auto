@@ -245,7 +245,7 @@ def test_the_page_searches_by_date_and_names_reports_with_no_times(folder):
 
 
 @needs_node
-def test_inode_change_times_only_when_asked_for(folder):
+def test_inode_change_times_are_matched_unless_left_out(folder):
     report_ui.write_rows(os.path.join(folder, "CacheController", "data"), [
         [f"ck-{CK1}", ["", "Other", CK1], CK1, {}, None,
          {"ts": [_key("2024-01-01 00:00:00")], "tc": [_key("2024-03-10 08:30:00")]}]])
@@ -264,7 +264,7 @@ def test_inode_change_times_only_when_asked_for(folder):
         return json.loads(proc.stdout)["results"]
     assert f"ck-{CK1}" not in run(False)
     assert f"ck-{CK1}" in run(True)
-    assert 'id="gctime"' in doc and "incl. inode changed" in doc
+    assert 'id="gctime" checked' in doc and "incl. inode changed" in doc   # on by default
 
 
 def test_a_memorys_inode_change_time_is_kept_apart():
