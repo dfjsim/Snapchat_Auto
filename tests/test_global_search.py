@@ -242,3 +242,42 @@ def test_the_page_searches_by_date_and_names_reports_with_no_times(folder):
     assert "openall" not in out["results"]                     # a link would carry the words only
     # the fixture's other reports record no time at all: said so, not "no match"
     assert "Not searched by date: Contacts, Conversations, Cache controller" in out["results"]
+
+
+@needs_node
+def test_inode_change_times_only_when_asked_for(folder):
+    report_ui.write_rows(os.path.join(folder, "CacheController", "data"), [
+        [f"ck-{CK1}", ["", "Other", CK1], CK1, {}, None,
+         {"ts": [_key("2024-01-01 00:00:00")], "tc": [_key("2024-03-10 08:30:00")]}]])
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    env = dict(os.environ, SC_ROOT=folder, SC_HASH="")
+
+    def run(ticked):
+        proc = subprocess.run(
+            [NODE, "-"], input=_DOM + "el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+            f"el('gto').value='2024-03-10T09:00';el('gctime').checked={str(ticked).lower()};"
+            f"vm.runInThisContext({json.dumps(script)});SCS_run('');"
+            "console.log(JSON.stringify({results:el('results').innerHTML}));",
+            text=True, encoding="utf-8", capture_output=True, env=env)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)["results"]
+    assert f"ck-{CK1}" not in run(False)
+    assert f"ck-{CK1}" in run(True)
+    assert 'id="gctime"' in doc and "incl. inode changed" in doc
+
+
+def test_a_memorys_inode_change_time_is_kept_apart():
+    from scripts import memories_media_report as mr
+    m = {"times": {"ZCREATETIMEUTC": "2024-03-10 08:30:00 UTC"}, "entry_times": {},
+         "media_files": [{"out": "x.mp4", "src_fs": [("p", {"mtime": 1})],
+                          "device_summary": ([("modified", "2024-03-11 09:00:00 UTC", "", ["mtime"]),
+                                              ("inode changed", "2024-03-12 10:00:00 UTC", "",
+                                               ["ctime"]),
+                                              ("accessed / inode changed",
+                                               "2024-03-13 11:00:00 UTC", "", ["atime", "ctime"])],
+                                             [])}]}
+    keys = mr._memory_time_keys(m)
+    assert keys["tc"] == [_key("2024-03-12 10:00:00")]           # an inode change and nothing else
+    assert _key("2024-03-13 11:00:00") in keys["ts"]             # also an access: stays searchable
+    assert _key("2024-03-12 10:00:00") not in keys["ts"]

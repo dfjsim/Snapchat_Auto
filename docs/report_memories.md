@@ -375,6 +375,12 @@ inside one. Its detail says so in place of the timestamps, and clearing the filt
 carved Memory whose media *does* carry an `mvhd` time or whose cache file has a recorded mtime is
 findable by those, with the expansion stating that no database time exists.
 
+The device's **inode-change** times are matched only when the control's *incl. inode changed* box is
+ticked. They are kept in a row's `tc` rather than its `ts` (`_memory_time_keys`; a device line that is
+also another kind of time — "accessed / inode changed" — stays in `ts`), because copying or acquiring a
+file can set that time and a window around the extraction would otherwise return Memories for that
+reason alone.
+
 ### Snapchat's servers — what a retrieval would add, and what one did
 
 Every Memory is classed by `cloud_memories.candidate` as *media missing* (no full copy on the device),

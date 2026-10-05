@@ -1003,6 +1003,13 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
     return links
 
 
+def _tc_of(copies):
+    """``{"tc": [...]}`` — the inode-change times of every copy, when there are any."""
+    keys = report_ui.ts_keys(*[t for c in copies for t in report_ui.fs_times(
+        [c.get("fs")], c.get("_epochfmt") or (lambda seconds: ""), kinds=("ctime",))])
+    return {"tc": keys} if keys else {}
+
+
 def _root_uuid_warning(entry):
     """The warning a root-level filename UUID must always carry."""
     if "/" in entry["rel"] or not _UUID_RE.search(entry["name"]):
@@ -1557,7 +1564,9 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
                  *[c.get("mtime") for c in e["copies"]],
                  *[t for c in e["copies"] for t in report_ui.fs_times(
                      [c.get("fs")], c.get("_epochfmt") or (lambda seconds: ""))],
-                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")])},
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")]),
+             # the device's inode-change times, apart: searched only when asked for
+             **_tc_of(e["copies"])},
         ])
     report_ui.write_rows(data_dir, rows)
 

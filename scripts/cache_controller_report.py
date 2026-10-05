@@ -1317,6 +1317,14 @@ def _leads_html(entry, rel_prefix, closure=None):
             "<th>file time vs Memory time (Memory minus file)</th></tr>" + "".join(rows) + "</table>")
 
 
+def _tc(records, epochfmt):
+    """``{"tc": [...]}`` — the inode-change times of device records, when there are any (paid per
+    row, so absent rather than empty). See report_ui.FS_TIME_KINDS."""
+    keys = report_ui.ts_keys(*report_ui.fs_times(records, epochfmt or (lambda seconds: ""),
+                                                 kinds=("ctime",)))
+    return {"tc": keys} if keys else {}
+
+
 def _signed(seconds):
     """A difference as the leads show it; tenths under ten seconds, where "−0 s" would hide them.
 
@@ -2100,7 +2108,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
                  *(e.get("ondisk_mtimes") or {}).values(),
                  *report_ui.fs_times((e.get("ondisk_fs") or {}).values(),
                                      e.get("_epochfmt") or (lambda seconds: "")),
-                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")])},
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")]),
+             # the device's inode-change times, apart: searched only when asked for
+             **_tc((e.get("ondisk_fs") or {}).values(), e.get("_epochfmt"))},
         ])
     report_ui.write_rows(data_dir, rows)
 

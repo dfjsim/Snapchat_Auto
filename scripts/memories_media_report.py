@@ -2740,6 +2740,26 @@ def _memory_times(m):
     return out
 
 
+def _memory_time_keys(m):
+    """``{"ts": [...], "tc": [...]}`` — the time filter's keys for one Memory: every timestamp it
+    has (``_memory_times``), with the device's inode-change times apart in ``tc``. A device line
+    shows one instant under every kind that shares it, so only a line that is an inode change and
+    nothing else goes to ``tc``; ``tc`` is left out when empty."""
+    ctime_only = []
+    for f in m.get("media_files") or []:
+        if f.get("generated"):
+            continue
+        lines, _attrs = f.get("device_summary") or ([], [])
+        ctime_only += [shown for _labels, shown, _note, kinds in lines if list(kinds) == ["ctime"]]
+    rest = [value for _label, value, _src in _memory_times(m)]
+    for shown in ctime_only:
+        if shown in rest:
+            rest.remove(shown)
+    ts = report_ui.ts_keys(*rest)
+    tc = [key for key in report_ui.ts_keys(*ctime_only) if key not in set(ts)]
+    return {"ts": ts, **({"tc": tc} if tc else {})}
+
+
 def _device_time_rows(f):
     """The device filesystem's timestamps of one recovered file as ``(label, value, source)`` rows.
 
@@ -4388,7 +4408,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  # Every timestamp this Memory has, as the wall clock the report displays (see
                  # report_ui.ts_key) — including the columns only the detail shows, which is the
                  # point: a capture time is findable without knowing which column holds it.
-                 "ts": report_ui.ts_keys(*(value for _label, value, _src in _memory_times(m))),
+                 # The inode-change times are kept apart (`tc`) and matched only when the
+                 # control's box asks for them — see report_ui.FS_TIME_KINDS.
+                 **_memory_time_keys(m),
                  # The row this one is folded behind — on the lead too, pointing at itself, so one
                  # field answers "which group is this row in". Omitted for a Memory that is a group
                  # of one: there is nothing to fold, and every byte here is paid per row.
@@ -4580,7 +4602,8 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'{report_ui.info_icon(memory_leads.memory_basis())} '
            f'<select id="pcf" onchange="flt()"><option value="">any</option>'
            f'<option id="pcfy" value="y">with a possible cached file</option></select></label>'
-           + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
+           + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT,
+                                   ctime=True)
            + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
            f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
            f'{report_ui.info_icon(FOLD_CONTROL_HINT)}</label>'
@@ -4641,7 +4664,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
            '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!cl||m.cl===cl)&&(!pc||m.pcf===pc)'
            '&&(!me||(me==="tag"?m.stag==="y":m.meta===me))'
-           '&&scTimeHit(scTimeWin("t"),m.ts)'
+           '&&scTimeHit(scTimeWin("t"),scTimeList("t",m))'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
            'selectedOnly:scSelOnly,'
            'selCount:scSelCount,'

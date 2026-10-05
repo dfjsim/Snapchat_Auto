@@ -79,7 +79,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   included. A **date / time window** (between two moments, or within ± N of one) finds rows by when,
   alone or with the words: every report's rows now carry the times they show — the Contacts,
   cache_controller and Library/Caches rows newly (claims, last read, the device's created / modified /
-  read times, a media file's own zoned times).
+  read times, a media file's own zoned times). The device's **inode-change** times are matched only
+  when *incl. inode changed* is ticked, here and in the Memories index's own Time filter — copying or
+  acquiring a file can set that time — so the Memories filter no longer matches on it by default.
 
 ### Changed
 - **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**

@@ -452,3 +452,16 @@ def test_the_marker_is_absent_from_a_full_report():
                folded=False)
 
     assert "pulled" not in out[0]["html"]
+
+
+@needs_node
+def test_inode_change_times_join_the_window_only_when_ticked():
+    rows = [_row("A", ts=[100]), _row("B", ts=[900])]
+    rows[1][5]["tc"] = [100]
+    script = ("VALUES.tmode='range';VALUES.tfrom='1970-01-01T00:00';VALUES.tto='1970-01-01T00:05';"
+              "var w=scTimeWin('t');"
+              "report({off:ROWS.filter(function(r){return scTimeHit(w,scTimeList('t',r[5]));}).length});"
+              "VALUES.tctime=true;"
+              "report({on:ROWS.filter(function(r){return scTimeHit(w,scTimeList('t',r[5]));}).length});")
+    off, on = _run(rows, script)
+    assert off == {"off": 1} and on == {"on": 2}

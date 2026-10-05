@@ -880,14 +880,20 @@ def ts_key(text):
     return int(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
 
 
-def fs_times(records, epochfmt):
-    """The displayed times of device filesystem records (``device_fs``) — created, modified, last
-    read — for a row's ``ts`` list, so a cached file is found by when the device touched it. Not the
-    inode-change time: the acquisition itself can set it, and some archives carry a placeholder."""
+#: The device filesystem times a row's ``ts`` carries. The inode-change time goes to ``tc`` instead
+#: and is searched only when the examiner asks for it (``time_filter(ctime=True)``): the acquisition
+#: itself can set it, and some archives carry a placeholder there.
+FS_TIME_KINDS = ("btime", "mtime", "atime")
+
+
+def fs_times(records, epochfmt, kinds=FS_TIME_KINDS):
+    """The displayed times of device filesystem records (``device_fs``) — by default created,
+    modified and last read — for a row's time keys, so a file is found by when the device touched
+    it. ``kinds=("ctime",)`` gives the inode-change times, for ``tc``."""
     from scripts.data import device_fs                     # local, as in device_fs_html
     out = []
     for rec in records or ():
-        for field in ("btime", "mtime", "atime"):
+        for field in kinds:
             if rec and rec.get(field) is not None:
                 out.append(device_fs.format_ns(rec[field], epochfmt))
     return out
@@ -906,7 +912,7 @@ def ts_keys(*texts):
 _TIME_UNITS = (("m", "minutes"), ("h", "hours"), ("d", "days"))
 
 
-def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
+def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row", ctime=False):
     """The shared date/time window control: *any time*, *between* two points, or *within ± N of* one.
 
     ``prefix`` namespaces the element ids so a page can carry more than one (the Conversations index
@@ -918,6 +924,9 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
     Both inputs are ``datetime-local``, which needs no library and works on ``file://``. What is
     entered is read as a wall clock and compared against `ts_key` values, so it means the time as
     the report displays it, in the run's timezone — see `ts_key`.
+
+    ``ctime`` adds a box that brings the device's inode-change times (a row's ``tc``) into the
+    window; they are left out unless it is ticked, because the acquisition itself can set them.
     """
     scope_html = ""
     if scopes:
@@ -956,13 +965,24 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
         f'<span class="tfsep">of</span>'
         f'<input type="datetime-local" id="{prefix}at" step="1" oninput="flt()" '
         f'title="The moment to search around."></span>'
-        + scope_html)
+        + scope_html
+        + (f'<label class="tfc" title="{html.escape(CTIME_HINT)}"><input type="checkbox" '
+           f'id="{prefix}ctime" onchange="flt()">incl. inode changed{info_icon(CTIME_HINT)}</label>'
+           if ctime else ""))
+
+
+CTIME_HINT = (
+    "Also match the device's inode-change times (when a file's owner, mode, name or links last "
+    "changed). They are left out unless this is ticked: copying or acquiring a file can set that "
+    "time, so a window around the extraction would otherwise match files for a reason that has "
+    "nothing to do with what the device's user did, and some archives store a placeholder there.")
 
 
 TIME_CSS = """
  .tfl{white-space:nowrap} .tfg{display:inline-flex;align-items:center;gap:5px}
  .tfg input[type=datetime-local]{font-size:12px} .tfg input[type=number]{width:64px;font-size:12px}
  .tfsep{color:#777;font-size:12px} .tfscope{white-space:nowrap}
+ .tfc{white-space:nowrap;font-weight:400;display:inline-flex;align-items:center;gap:3px}
  /* the member of a folded group whose timestamp matched the window */
  .mhit{background:#fff6d9;box-shadow:0 0 0 2px #e6c983 inset;border-radius:5px}
 """
@@ -993,6 +1013,12 @@ function scTimeWin(p){
  var mult={m:60,h:3600,d:86400}[scFv(p+'unit')||'h']||3600;
  return {a:at-n*mult,b:at+n*mult};}
 
+/* A row's time keys for the window: its `ts`, and its inode-change times (`tc`) only when the
+   control's own box asks for them (time_filter(ctime=True)). */
+function scTimeList(p,m){
+ var c=document.getElementById(p+'ctime'),l=(m&&m.ts)||[];
+ return (c&&c.checked&&m&&m.tc)?l.concat(m.tc):l;}
+
 /* A row matches when any of its timestamps is inside the window. No timestamps means no match: a
    row we cannot place in time may not be presented as one that falls in the window asked for. */
 function scTimeHit(win,list){
@@ -1015,6 +1041,7 @@ function scTimeReset(p){
  var n=document.getElementById(p+'n');if(n)n.value='1';
  var u=document.getElementById(p+'unit');if(u)u.value='h';
  var s=document.getElementById(p+'scope');if(s)s.selectedIndex=0;
+ var c=document.getElementById(p+'ctime');if(c)c.checked=false;
  scTimeMode(p,true);}
 """
 

@@ -216,24 +216,26 @@ function SCS_convTitle(key,page){
    if((conv.rows[i][1]||[]).join('').indexOf(needle)>=0)return SCQ.label(conv.rows[i],[2,4]);}
  return 'Conversation '+key;}
 function SCS_run(q){
- var ts=SCQ.terms(q),win=scTimeWin('g');
+ var ts=SCQ.terms(q),win=scTimeWin('g'),tc=document.getElementById('gctime'),
+     extra=(tc&&tc.checked)?['tc']:[];
  if(!ts.length&&!win){SCS_res=null;document.getElementById('results').innerHTML='';
   document.getElementById('summary').innerHTML='';return;}
  SCS_load(function(){
-  var res={ts:ts,q:q,win:win,groups:[],total:0};
+  var res={ts:ts,q:q,win:win,extra:extra,groups:[],total:0};
   SC_SRC.forEach(function(src){
    var g={src:src,parts:[],n:0,missing:false,timed:false};
    SCS_items.forEach(function(it){
     if(it.src!==src)return;
     if(it.missing)g.missing=true;
-    if(SCQ.timed(it.rows,src.times))g.timed=true;
-    var h=SCQ.hits(it.rows,ts,win,src.times);
+    var fields=src.times.concat(extra);
+    if(SCQ.timed(it.rows,fields))g.timed=true;
+    var h=SCQ.hits(it.rows,ts,win,fields);
     if(h.length){g.parts.push({it:it,hits:h});g.n+=h.length;}});
    res.total+=g.n;res.groups.push(g);});
   SCS_res=res;SCS_more={};SCS_draw();});}
 function SCS_hitHtml(it,i,ts,win){
  var r=it.rows[i],sn=ts.length?SCQ.snippet(r[2],ts):null,
-     at=win?SCQ.inWindow(SCQ.times(r,it.src.times),win):null;
+     at=win?SCQ.inWindow(SCQ.times(r,it.src.times.concat(SCS_res.extra)),win):null;
  return '<li><a target="'+SCS_esc(it.src.tab)+'" href="'+SCS_esc(it.page)+'#'+
   encodeURIComponent(r[0])+'">'+SCS_esc(SCQ.label(r,it.src.cells))+'</a>'+
   (sn?'<div class="snip">'+SCS_esc(sn.pre)+'<mark>'+SCS_esc(sn.hit)+'</mark>'+SCS_esc(sn.post)+
@@ -368,7 +370,8 @@ DATE_HINT = (
     "above (a row must then match both). The times are every one a row shows: a Memory's capture and "
     "save times, a message's, a conversation's activity, a contact's first and last activity, a cached "
     "file's claims, last read and the device's own record of when it was created, modified and read, and "
-    "what a media file says about itself where it states its zone.")
+    "what a media file says about itself where it states its zone. The device's inode-change times "
+    "only when «incl. inode changed» is ticked.")
 
 
 def page_html(srcs, *, closure=None, prov=None, not_searched=()):
@@ -389,7 +392,7 @@ def page_html(srcs, *, closure=None, prov=None, not_searched=()):
         '<input type="search" id="gq" autofocus oninput="SCS_typed()" '
         'placeholder="CACHE_KEY, snap id, hash, file name, URL, user id, words of a message…">'
         '<button type="submit">&#128270; Search</button></form>'
-        f'<div class="gtime">{report_ui.time_filter("g", label="Date / time", noun="row", hint=DATE_HINT)}'
+        f'<div class="gtime">{report_ui.time_filter("g", label="Date / time", noun="row", hint=DATE_HINT, ctime=True)}'
         '</div>'
         '<div class="how">The search each report&#39;s own box runs, over every report at once: it '
         'matches the identifiers, hashes, file names, URLs, message text and timestamps each row is '
