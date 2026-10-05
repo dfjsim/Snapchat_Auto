@@ -36,6 +36,31 @@ The join key between a message and the cache is the **`EXTERNAL_KEY`**, which re
    inside an `EXTERNAL_KEY`. Only a share of that kind can match this way — see
    [the body kinds](#what-a-row-is-its-content-type-and-its-body).
 
+### When a value has several candidates
+
+These joins used to be loops of every message against every friend and every claim, each overwriting
+the last: the value a message ended up with came from whichever candidate matched **last**, which the
+database's row order decided, and on a phone with hundreds of thousands of messages the loops took
+hours. They are lookups now (`_id_key`, `_names_by_id`, dictionaries keyed by user id, by
+`(conversation, message)` and by `EXTERNAL_KEY`), and where there is more than one candidate the
+choice is stated — and logged with a count when it happens:
+
+* **A sender's name** (`fixSenders`): a user id the friends data gives under several names is shown
+  under **all** of them, separated by « / », in the order the data holds them. The friends list wins
+  over the Snapchatters the app merely cached, and a sender is matched on the user id only.
+* **A share's or a sticker's file** (`getCacheArroyo`, `_share_claim_order`): of the claims whose key
+  contains the item's id, the media comes **before its thumbnail**, then the order cache_controller.db
+  lists them in. A local message reference already took the *first* claim of its exact key, and still
+  does.
+* **A message whose content is a claim's `EXTERNAL_KEY`** (`mergeCacheChats`): when several claims share
+  the key — two accounts on one phone — **this account's** claim is taken, then the first in
+  cache_controller.db's order.
+* A message arroyo lists twice (its `-wal` and its checkpointed reading) still takes the later row, as
+  before: the two are versions of one message, not two candidates.
+
+On the four test devices none of these cases occurs, and the reports are byte-identical to what the
+loops produced.
+
 `getCache` reads claims with `MEDIA_CONTEXT_TYPE IN (2, 3, 19)` (chat-media contexts) for the
 logged-in `USER_ID`; `mergeCache` merges in the `contentManagerDb` rows and **copies each matched
 `CACHE_KEY` file into `cacheFiles/`**. `path_to_image_html` then renders it (video/image/sticker)

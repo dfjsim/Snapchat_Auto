@@ -122,6 +122,14 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   shipped before. The README no longer says LICENSE is unmodified.
 
 ### Fixed
+- **Chat parsing took the last match wherever there were several, and took hours on a large phone.**
+  `fixSenders`, `getCacheArroyo` and `mergeCacheChats` compared every message with every friend and
+  every cache claim, each match overwriting the one before. They are lookups now, and each choice is
+  stated: a user id with several names shows all of them (« / »); a share or sticker takes its media
+  before its thumbnail; a message naming a key claimed twice takes this account's claim; each is
+  logged with a count when it happens. `getSCPersistentMedia` no longer rebuilds its table after every
+  file. Identical output on the test devices, where none of these cases occurs.
+  See [docs/report_communications.md](docs/report_communications.md#when-a-value-has-several-candidates).
 - **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
   database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both
   readings from staged copies through `sqlite_open`, so a cache file named through a URL the `-wal`

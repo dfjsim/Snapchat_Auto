@@ -917,18 +917,30 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
                 array2.append(lista)
         except:
             pass
-        for index, row in df_messages.iterrows():
-            sender = row["sender_id"]
-            found = False
-            for item in array:
-                if sender == item[0]:
-                    df_messages.loc[index, "sender_id"] = item[1]
-                    #logger.info(item)
-                    found = True
-            if not found:
-                for i in array2:
-                    if sender in i:
-                        df_messages.loc[index, "sender_id"] = i[1]
+        # One lookup per sender instead of every message against every friend. A user id the
+        # friends list gives under more than one name is shown under all of them, in the order the
+        # list holds them: it used to be shown under whichever row happened to come last, and the
+        # others were simply lost. The friends list wins over the Snapchatters the app cached.
+        friend_names, cached_names = _names_by_id(array), _names_by_id(array2)
+        several = 0
+        names_for_messages = []
+        for sender in df_messages["sender_id"].tolist():
+            got = friend_names.get(_id_key(sender)) or cached_names.get(_id_key(sender))
+            if not got:
+                names_for_messages.append(sender)
+                continue
+            several += len(got) > 1
+            names_for_messages.append(got[0] if len(got) == 1
+                                      else " / ".join(str(name) for name in got))
+        try:                                           # the column keeps the dtype it had
+            df_messages["sender_id"] = pd.Series(names_for_messages, index=df_messages.index,
+                                                 dtype=df_messages["sender_id"].dtype)
+        except (TypeError, ValueError):
+            df_messages["sender_id"] = pd.Series(names_for_messages, index=df_messages.index,
+                                                 dtype=object)
+        if several:
+            logger.warning(f"{several} message(s) were sent by a user id the friends data gives "
+                           f"more than one name for; they show every name, separated by « / »")
         # The people an app event names ("X deleted a chat message", "X was added to the group")
         # are user ids in its description. `message_body` keeps them as they are — the id is the
         # one identifier that never changes, and the Conversations report names each one from the
@@ -955,6 +967,36 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
     return df_messages
 
 
+def _id_key(value):
+    """A user id as a lookup key: the same value ``==`` matched before, never a NaN."""
+    try:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        hash(value)
+        return value
+    except TypeError:
+        return None
+
+
+def _names_by_id(pairs):
+    """``{user id: [name, …]}`` from ``[[user id, name], …]``, each name once, in the order given."""
+    out = {}
+    for uid, name in pairs:
+        key = _id_key(uid)
+        if key is None:
+            continue
+        names = out.setdefault(key, [])
+        if name not in names:
+            names.append(name)
+    return out
+
+
+#: A shared item's cache claims, in preference order when one message matches several: the media
+#: itself before its thumbnail; then the order cache_controller.db lists them in.
+def _share_claim_order(claims):
+    return sorted(claims, key=lambda claim: "thumbnail" in claim[0].lower())
+
+
 def getCacheArroyo(arroyo, cache_df):
     cache_df = cache_df.reset_index()
     logger.info("Getting cache files from " + ntpath.basename(arroyo))
@@ -971,55 +1013,47 @@ def getCacheArroyo(arroyo, cache_df):
 
     df_arroyo, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
 
+    # Each claim once, in cache_controller.db's order: the first claim of an exact EXTERNAL_KEY (what
+    # a local message reference names), and every claim for the substring match a share needs.
+    claims = [(str(ek), ck) for ek, ck in zip(cache_df["EXTERNAL_KEY"], cache_df["CACHE_KEY"])]
+    first_by_key = {}
+    for ek, ck in claims:
+        first_by_key.setdefault(ek, ck)
+    several = 0
     for index, row in df_arroyo.iterrows():
-        
+
         if row["local_message_references"] != None:
             data = row['local_message_references']
-            if isinstance(data, bytes):
-                with open("temp.plist", 'wb') as temp:
-                    temp.write(data[8:])
-            else:
+            if not isinstance(data, bytes):
                 continue
             try:
-                with open('temp.plist', 'rb') as data:
-                    plist = ccl_bplist.load(data)
-                    data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
+                plist = ccl_bplist.load(BytesIO(data[8:]))
+                data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
                 data = re.search(".*[A-F0-9-]{36}", data1['MEDIA_ID'])
+                if data and data.group() in first_by_key:
+                    df_arroyo.loc[index, 'message_content'] = first_by_key[data.group()]
+            except Exception:
+                pass
 
-                try:
-                    index1 = cache_df.index[cache_df['EXTERNAL_KEY'] == data.group()].values[0]
-                    index1 = int(index1)
-                    cache_key = cache_df.iloc[index1]['CACHE_KEY']
-                    df_arroyo.loc[index, 'message_content'] = cache_key
-                except Exception as Error:
-                    pass
-
-            except Exception as error:
-                #logger.error(error, index)
-                pass
-                
-        elif row["content_type"] == 5:
+        elif row["content_type"] in (3, 5):
+            # a Sticker (5) or Shared content (3): the media id inside it, within a claim's key
             try:
-                data = row["message_content"]
-                message,typedef = blackboxprotobuf.decode_message(data)
-                message_found = (message['4']['4']['4']['1']['2'])
-                message_found = message_found.decode()
-                for cache_index, cache_row in cache_df.iterrows():
-                    if message_found in cache_row["EXTERNAL_KEY"]:
-                        df_arroyo.loc[index, 'message_content'] = cache_row["CACHE_KEY"]
-            except:
-                pass
-        elif row["content_type"] == 3:
-            try:
-                data = row["message_content"]
-                message,typedef = blackboxprotobuf.decode_message(data)
-                message_found = (message['4']['4']['5']['5']['1'])
-                message_found = message_found.decode()
-                for cache_index, cache_row in cache_df.iterrows():
-                    if message_found in cache_row["EXTERNAL_KEY"]:
-                        df_arroyo.loc[index, 'message_content'] = cache_row["CACHE_KEY"]
-            except:
-                pass
+                message, _typedef = blackboxprotobuf.decode_message(row["message_content"])
+                found = (message['4']['4']['4']['1']['2'] if row["content_type"] == 5
+                         else message['4']['4']['5']['5']['1']).decode()
+            except Exception:
+                continue
+            matches = _share_claim_order([(ek, ck) for ek, ck in claims if found in ek])
+            if not matches:
+                continue
+            # One file is the message's attachment: the media before its thumbnail, then the
+            # database's order — it used to be whichever claim came last.
+            df_arroyo.loc[index, 'message_content'] = matches[0][1]
+            several += len(matches) > 1
+    if several:
+        logger.info(f"{several} shared item(s) or sticker(s) match more than one cached file: the "
+                    f"media is shown with the message (rather than its thumbnail); every one of the "
+                    f"files is in the cache_controller report")
     
     if os.path.exists("temp.plist"):
         os.remove("temp.plist")
@@ -1555,26 +1589,50 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     # row — which is why the Conversations report still screens it.
     if 'message_content' in chats_df.columns and 'message_text' not in chats_df.columns:
         chats_df['message_text'] = chats_df['message_content']
-    for index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
-        for index_chat, row_chat in chats_df.iterrows():
-            if row_chat['client_conversation_id'] == row_arroyo['client_conversation_id'] and \
-                    row_chat['server_message_id'] == row_arroyo['server_message_id']:
-                if not isinstance(row_arroyo['message_content'], float) and not isinstance(row_arroyo['message_content'], bytes):
-                    chats_df.loc[index_chat, 'message_content'] = row_arroyo['message_content']
-                    if row_arroyo["content_type"] not in [3,5]:
-                        chats_df.loc[index_chat, 'content_type'] = 'local_message_reference'
-                else:
-                    continue
+    # Each message's rows looked up by (conversation, message) instead of scanning every chat row
+    # for every arroyo row. Applied in arroyo's order, so a message arroyo lists twice (its -wal and
+    # its checkpointed reading) takes the later row, as it did.
+    chat_rows = {}
+    for index_chat, conv, smid in zip(chats_df.index, chats_df['client_conversation_id'],
+                                      chats_df['server_message_id']):
+        key = (_id_key(conv), _id_key(smid))
+        if None not in key:
+            chat_rows.setdefault(key, []).append(index_chat)
+    for _index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
+        content = row_arroyo['message_content']
+        if isinstance(content, (float, bytes)):
+            continue
+        key = (_id_key(row_arroyo['client_conversation_id']), _id_key(row_arroyo['server_message_id']))
+        for index_chat in chat_rows.get(key, ()):
+            chats_df.loc[index_chat, 'message_content'] = content
+            if row_arroyo["content_type"] not in [3, 5]:
+                chats_df.loc[index_chat, 'content_type'] = 'local_message_reference'
 
     #Ändrar external_key i message_content till cache_key för att kunna ersätta med fil
-    test = cache_df.to_dict(orient='list')
-    for index, row in chats_df.iterrows():
-        dict_index = 0
-        for i in test['EXTERNAL_KEY']:
-            if row["message_content"] == i:
-                chats_df.loc[index, 'message_content'] = test['CACHE_KEY'][dict_index]
-                chats_df.loc[index, 'content_type'] = 'Unknown .1020'
-            dict_index += 1
+    # A message whose content is a claim's EXTERNAL_KEY takes that claim's CACHE_KEY. When several
+    # claims share the key (two accounts on the phone, say), this account's claim is taken, then the
+    # first in cache_controller.db's order — it used to be whichever came last.
+    users = cache_df["USER_ID"].tolist() if "USER_ID" in cache_df.columns else [""] * len(cache_df)
+    by_key = {}
+    for ek, ck, user in zip(cache_df['EXTERNAL_KEY'], cache_df['CACHE_KEY'], users):
+        if _id_key(ek) is not None:
+            by_key.setdefault(ek, []).append((ck, str(user or "")))
+    several = 0
+    for index, content in zip(chats_df.index, chats_df["message_content"].tolist()):
+        claims = by_key.get(_id_key(content)) if _id_key(content) is not None else None
+        if not claims:
+            continue
+        if len({ck for ck, _user in claims}) > 1:
+            several += 1
+            mine = [ck for ck, user in claims if uuid and user == uuid]
+            chosen = (mine or [ck for ck, _user in claims])[0]
+        else:
+            chosen = claims[0][0]
+        chats_df.loc[index, 'message_content'] = chosen
+        chats_df.loc[index, 'content_type'] = 'Unknown .1020'
+    if several:
+        logger.info(f"{several} message(s) name a cached file claimed more than once: this account's "
+                    f"claim is shown, else the first in cache_controller.db")
 
     #cache_df_v2 = pd.DataFrame(columns=['CACHE_KEY', 'TYPE', 'client_conversation_id', 'server_message_id'])
     tmp_dict = {'CACHE_KEY': [], 'TYPE': [], 'client_conversation_id': [],
@@ -1819,6 +1877,8 @@ def getSCPersistentMedia():
             
             # tmp_dict = {'CACHE_KEY': file, 'TYPE': file_split[0], 'client_conversation_id': file_split[1],
                         # 'server_message_id': file_split[2], 'SERVER_MESSAGE_ID_PART': file_split[3]}
+    # built once, from the whole list — it was rebuilt after every file
+    if files:
         persistent_df = pd.DataFrame.from_dict(tmp_dict)
 
     return persistent_df
