@@ -6,6 +6,14 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [Unreleased]
+
+### Changed
+- **The build no longer warns that FreeSimpleGUI imports pydoc.** `Snapchat_Auto.py` carries
+  `# nuitka-project: --noinclude-pydoc-mode=allow`, which Nuitka reads for the portable EXE and the
+  MSI alike: pydoc stays in the build (leaving it out breaks `import FreeSimpleGUI`) and the warning
+  goes.
+
 ## [1.9.0-beta.2] — 2026-10-05
 
 ### Added

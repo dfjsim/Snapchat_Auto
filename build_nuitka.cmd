@@ -17,7 +17,9 @@ rem before anything else. Nothing extra to bundle - but do not remove that flag,
 rem video would start a copy of the GUI.
 
 rem The anti-bloat plugin warns that FreeSimpleGUI imports pydoc (its __init__.py, line 15).
-rem Leave it be. That import is at module scope and unguarded, so excluding it
+rem Snapchat_Auto.py answers it with "# nuitka-project: --noinclude-pydoc-mode=allow", which keeps
+rem pydoc in the build and stops the warning, for this EXE and the MSI alike. Never "nofollow":
+rem that import is at module scope and unguarded, so excluding it
 rem (--noinclude-custom-mode=pydoc:nofollow) produces a build whose GUI dies on
 rem "import FreeSimpleGUI" - verified by making pydoc unimportable and loading the toolkit.
 rem There is also nothing to win: of the 33 modules pydoc pulls in, 29 are already bundled for

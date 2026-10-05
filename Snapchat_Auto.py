@@ -1,3 +1,8 @@
+# nuitka-project: --noinclude-pydoc-mode=allow
+# FreeSimpleGUI imports pydoc at module scope, for an SDK help browser this app never opens, and Nuitka's
+# anti-bloat plugin warns about it on every build. "allow" keeps pydoc in the build — leaving it out
+# breaks "import FreeSimpleGUI" — and only stops the warning. Nuitka reads the line above from this
+# file, so the portable EXE (build_nuitka.cmd) and the MSI (uv run build) both get it.
 import sys
 
 # Re-entry as a thumbnail worker (scripts/data/poster_worker.py): a packaged build has no interpreter
