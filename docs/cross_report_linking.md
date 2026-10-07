@@ -101,6 +101,7 @@ happened to name. Built with `report_ui.find_fragment`; see
 | cache_controller | Cached media | the entry's `CACHE_KEY` | it matches ≥ 2 `Library/Caches` files |
 | Cached media | cache_controller | every linked `CACHE_KEY` | the file matches ≥ 2 cache entries |
 | Memories (detail) | Cached media | the pack's item hash | always — a pack is many chunk files |
+| cache_controller | Memories | every listing Memory's snap id | the file is an asset of a filter ≥ 2 Memories' overlay records list |
 
 A single-target link stays a plain `#anchor`, which highlights the row it lands on.
 
@@ -144,6 +145,44 @@ Tried in priority order; the first that matches wins, and the icon records which
    rules 1-4 wins over it. The snap editor's working copy of a snap later saved to Memories is the case
    it was built for: on a test device the working copies that are a Memory's media link this way
    without any retrieval.
+
+### cache_controller → Memory: an asset of a filter its overlay record lists
+
+Not one of the rules above, and never the Memory's media. A Memory's overlay record —
+`ZGALLERYSNAPDETAIL.ZOVERLAY`, the row whose `ZSNAP` is the Memory's `Z_PK`, an NSKeyedArchiver archive
+of `SOJUGallerySnapOverlay` (see
+[report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) — lists the
+snap's geofilters, and three fields of a geofilter hold a URL: `imageUrl`,
+`arSegmentation.sky.replacementSkyUrl` and `geofilterMarkups[j].displayParameters.font`. A claim whose
+`EXTERNAL_KEY` is one of those URLs is a cached asset of a listed filter
+(`cache_controller_report._overlay_links_for`, reading `scripts/data/snap_overlay.py`):
+
+* **The whole URL, by one rule** (`snap_overlay.normalise_url`): an http(s) URL, its scheme lower-cased,
+  one empty trailing `?` or `#` dropped — some claim keys are the record's URL with an empty query added
+  — and nothing else changed: nothing unquoted (both sides store base64 padding as `%3D`), no case
+  change of host, path or query. An id inside the URL is not enough: the same last path segment recurs
+  under other hosts and paths, and one `mo=` / `bo=` value under other ids. A re-fetch of the same
+  asset under another `uc=` is therefore a missed link, never a wrong one.
+* **Not the shared address.** A geofilter whose `imageUrlParams` dictionary has entries (the Bitmoji
+  filters) gives one shared address as its `imageUrl`, the image being in the parameters: that URL is
+  never an asset. The rule lives in `snap_overlay.filter_assets`, not in a caller.
+* **Listed, not shown to be used.** The record commonly lists several geofilters and names the selected
+  one separately (`filters.geoFilterSelectedId` / `geoFilterSelectedIds`, often none), so a listed
+  filter is not shown to be on the Memory. The chip says *filter listed* — *filter selected* only when
+  the record names that filter's `idValue` — and the "?" says what the record names, and states the
+  Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE`, to compare with the Memory's own overlay entry.
+* **Any account.** Neither the claim's context nor its account is restricted: on a device with two
+  accounts, one account's claim can be an asset the other account's Memories list. The link is made,
+  and its "?" and the detail's claim cell say the claim is another account's.
+* **A relation of its own.** It is `entry["filter_memories"]`, never `entry["memory"]`: not counted as
+  linked to a Memory, never a lead, never decrypted with the Memory's key, its own `Filter` value of the
+  Linked filter, its own partial-report edge (`EDGE_MEMORY_FILTER_ASSET`; relations `mem_filter_assets`
+  and `cache_filter_memories`, both off by default). An entry linked to a Memory as its media is not
+  linked to the same Memory again this way. One asset is commonly listed for many Memories, so several
+  are one dashed `#find=` chip, and the detail lists each Memory with its own "?".
+
+Both reports read the record through the same module and match by the same rule, so the Memory's page
+lists the same files (see below) without a manifest passing between them.
 
 ### Which `EXTERNAL_KEY` shapes name a Memory
 
@@ -190,6 +229,13 @@ exactly that case. The Memory's MemData identifiers are looked up the same way (
 mirror of rule 4, under the same rule: an id another Memory records too is not used. Both are used, not one instead of the other — a Memory has several cached files
 and only some of the claims name it by `ZSNAPID`. Every hit is still confirmed by the file
 decrypting, so the id match selects candidates rather than asserting the association.
+
+A Memory's page also lists the cached assets of the filters its overlay record lists — found by
+`collect_media` through `index_claim_urls`, with the whole-URL rule above — in a section of its own
+after Media files, *Cached assets of filters listed with this Memory — not its media*, each linking to
+`#ck-<CACHE_KEY>`. They are not media files of the Memory, nothing is decrypted for them, and they are
+not among the cache keys a selection names the Memory by (`_cache_tokens`). On a page several Memories
+share, each asset is given under the Memory whose record lists it.
 
 Note that this list also feeds `carve_deleted_memories`: a claimed UUID with **no** `ZGALLERYSNAP`
 row is a candidate deleted Memory. Indexing a shape that is not a Memory claim therefore does not
@@ -304,7 +350,8 @@ Contacts → Memories → CacheMedia → cache_controller**. That matters:
   how a contact row links to a conversation page and shows its message count;
 * the **cache_controller** report reads the chat manifest (`Conversations/cache_links.json`, else
   the legacy one) and the two manifests the Memories report just wrote (`memory_pages.json`,
-  `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index.
+  `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index (its
+  overlay records included).
 
 * the **CacheMedia** report (everything under `Library/Caches` that `cache_controller.db` does
   *not* index) runs before cache_controller and writes `CacheMedia/by_cache_key.json`, which

@@ -458,10 +458,10 @@ The GUI converts its dialog into the CLI's own `--relations` spec and parses it 
 code (`partial_report.parse_relations` / `parse_policy`). That round trip is a test: two front ends that
 can drift are two different tools.
 
-### What `recommended` follows, and two defaults worth explaining
+### What `recommended` follows, and the defaults worth explaining
 
 `Relation.default` in `partial_report.RELATIONS` is the single source of the `recommended` preset, so the
-CLI, the GUI dialog and `describe()` cannot disagree about it. Two are set the way they are on purpose:
+CLI, the GUI dialog and `describe()` cannot disagree about it. These are set the way they are on purpose:
 
 * **`conv_messages` is off.** A conversation can hold thousands of messages, and ticking the conversation
   asks for the conversation — its detail page, its participants, its activity — not for every message in
@@ -472,6 +472,15 @@ CLI, the GUI dialog and `describe()` cannot disagree about it. Two are set the w
   sender's permanent user id and takes the anchor from `contact_link_index`, the same row every other
   report links that person by — a message whose sender id was not recovered links to no contact rather
   than to one matched on a name.
+* **`mem_filter_assets` and `cache_filter_memories` are off.** They follow the cache_controller report's
+  *filter listed* link (`EDGE_MEMORY_FILTER_ASSET`): a cached file whose claim key is the URL of an asset
+  — filter image, sky image, font — of a geofilter a Memory's overlay record
+  (`ZGALLERYSNAPDETAIL.ZOVERLAY`) lists. That file is not the Memory's media, the record lists filters it
+  does not name as selected, and one asset is commonly listed with many Memories — so ticking a Memory
+  does not bring the assets of every filter its record lists, nor ticking a font every Memory whose
+  record lists it. `mem_cache` / `cache_memory` never follow this edge. Either way, a link whose other
+  end the extract does not hold is marked by `xref`, as every cross-report link is. See
+  [cross_report_linking.md](cross_report_linking.md#cache_controller--memory-an-asset-of-a-filter-its-overlay-record-lists).
 
 `transitive` follows **only the relations that are switched on** — the enabled list is computed once and
 each pass reuses it. That does not make it a safe default, because the recommended set already contains a

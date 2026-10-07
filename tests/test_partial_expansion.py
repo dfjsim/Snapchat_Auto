@@ -359,10 +359,31 @@ def test_the_paired_relations_share_one_edge_in_opposite_directions():
     by_key = {r.key: r for r in pr.RELATIONS}
     for forward, backward in [("mem_cache", "cache_memory"),
                               ("cache_message", "msg_cache"),
-                              ("participants", "contact_conversations")]:
+                              ("participants", "contact_conversations"),
+                              ("mem_filter_assets", "cache_filter_memories")]:
         a, b = by_key[forward], by_key[backward]
         assert a.edge == b.edge, (forward, backward)
         assert (a.src, a.dst) == (b.dst, b.src), (forward, backward)
+
+
+def test_the_filter_asset_relations_are_off_unless_asked_and_never_the_media_edge():
+    """An asset of a filter a Memory's overlay record lists is not its media, and one asset is listed
+    with many Memories: neither direction is followed by default, and following a Memory to its
+    media does not follow this edge."""
+    for key in ("mem_filter_assets", "cache_filter_memories"):
+        assert pr.parse_relations("recommended")[key] is False
+        assert pr.parse_relations("all")[key] is True
+    indexes = {"mem": Index("mem"), "cc": Index("cc")}
+    indexes["mem"].add("mem-X", snap="X")
+    indexes["cc"].add("ck-Y", key="Y")
+    # recorded by cache_controller, as its index does; found from the Memory's end
+    indexes["cc"].link(pr.EDGE_MEMORY_FILTER_ASSET, "ck-Y", "mem", "mem-X")
+    sel = {"schema": 2, "selections": {"mem": {"mem-X": 1}}}
+    for relations, pulled in ((pr.PRESETS["recommended"], False),
+                              ({**pr.PRESETS["recommended"], "mem_filter_assets": True}, True)):
+        closure = pr.expand(indexes, pr.resolve(indexes, sel),
+                            {**pr.default_options(), "relations": dict(relations)})
+        assert ("ck-Y" in closure.included["cc"]) is pulled
 
 
 def test_an_edge_recorded_either_way_round_is_found_from_both_ends():

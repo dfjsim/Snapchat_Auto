@@ -17,7 +17,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   `claim_link_survey_<stamp>.json`. It finds, in one run on a case, the claim kinds a link rule is
   missing for. A second section does the same for every file under `Library/Caches` whose path carries
   a UUID (`filtered-<UUID>.mp4` …), looked up in every database of the extraction.
-  `protobuf_wire.values_with_paths` lists every value of a message with its field path.
+  `protobuf_wire.values_with_paths` lists every value of a message with its field path. A claim keyed
+  by the URL of an asset of a filter a Memory's overlay record lists has a status of its own, `Memory:
+  listed in its filter record`, by the cache_controller report's own `_overlay_links_for`.
   See [docs/claim_link_survey.md](docs/claim_link_survey.md).
 - **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
   Conversations reports.
@@ -41,6 +43,22 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 - **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
   a Story, a preference or a Memory can hold the id a claim carries. A hit in a message the server never
   numbered says so, and an owner username in a key's `<USERNAME>~` position is masked out of the shapes.
+- **A cached filter asset links to the Memories whose overlay record lists it — never as their media** —
+  `scripts/data/snap_overlay.py`, `cache_controller_report._overlay_links_for`. A Memory's
+  `ZGALLERYSNAPDETAIL.ZOVERLAY` (scdb-27, plain on both storage schemas) is an NSKeyedArchiver archive
+  listing the snap's geofilters with the URLs of their image, sky image and font. A cache_controller
+  claim keyed by exactly one of those URLs — the whole URL, query included (`snap_overlay.normalise_url`)
+  — now links to each Memory whose record lists it: a dashed *filter listed* chip (*filter selected*
+  only when the record names that filter), one `#find=` chip for several Memories, a detail section, a
+  *Linked* option and a header count, each written only when there is such a link. The record lists
+  filters it does not name as selected, so nothing says a filter is on the Memory, and the link is never
+  the Memory link: not counted as one, never decrypted with its key, never a lead. A claim of another
+  account than the Memory's is linked and says so; a Bitmoji filter's shared address is never an asset.
+  The Memory's page lists the same files under *Cached assets of filters listed with this Memory — not
+  its media* (`memories_media_report.index_claim_urls`, `_filter_assets_html`), on a shared page each
+  under the Memory that lists it. `scripts/data/keyed_archive.py` is a new strict NSKeyedArchiver
+  resolver, which `decode_memdata` now uses too. See [docs/report_memories.md](docs/report_memories.md) and
+  [docs/cross_report_linking.md](docs/cross_report_linking.md).
 
 ### Fixed
 - **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`
@@ -89,6 +107,12 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   this build no longer has is dropped instead of making the run refuse its own `--relations` spec.
 
 ### Changed
+- **Two partial-report relations for the filter-asset link, both off by default** —
+  `partial_report.EDGE_MEMORY_FILTER_ASSET`: `mem_filter_assets` (the cached assets of the filters a
+  selected Memory's overlay record lists) and `cache_filter_memories` (every Memory whose record lists a
+  selected cache entry's asset). The file is not the Memory's media and one asset is listed with many
+  Memories, so neither is followed unless asked, and `mem_cache` / `cache_memory` never follow this
+  edge. See [docs/report_partial.md](docs/report_partial.md).
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
   3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required

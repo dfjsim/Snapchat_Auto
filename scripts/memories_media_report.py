@@ -37,7 +37,6 @@ import shutil
 import hashlib
 import sqlite3
 import logging
-import plistlib
 import subprocess
 import contextlib
 import uuid as uuid_mod
@@ -55,6 +54,8 @@ from Crypto.Cipher import AES
 from PIL import Image
 
 from scripts.data import ccl_bplist
+from scripts.data import keyed_archive
+from scripts.data import snap_overlay
 from scripts.data import sqlite_open
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -603,46 +604,32 @@ def decode_memdata(blob):
     it does not parse: the caller then shows the blob's size, as for any other blob. The uuid is
     upper-cased, the case every other identifier in these reports is matched in.
     """
-    if not isinstance(blob, (bytes, bytearray)) or bytes(blob[:8]) != b"bplist00":
+    root = keyed_archive.unarchive(blob)                   # None: not an archive at all
+    if root is None:
         return None
-    try:
-        archive = plistlib.loads(bytes(blob))
-        objects = archive["$objects"]
-        root = objects[archive["$top"]["root"].data]
-    except Exception:                                      # noqa: BLE001 - not an archive
-        return None
-
-    def deref(ref):
-        return objects[ref.data] if isinstance(ref, plistlib.UID) else ref
-
-    def class_of(obj):
-        try:
-            return deref(obj["$class"])["$classname"]
-        except Exception:                                  # noqa: BLE001
-            return None
 
     def record(obj, slot):
-        if not isinstance(obj, dict) or class_of(obj) != MEMDATA_RECORD:
+        if keyed_archive.class_name(obj) != MEMDATA_RECORD:
             raise ValueError("not a MemData record")
-        raw = deref(obj.get("uuid"))
+        raw = obj.get("uuid")
         if isinstance(raw, dict) and isinstance(raw.get("NS.uuidbytes"), bytes):
             raw = raw["NS.uuidbytes"]                      # an NSUUID rather than a string
         ident = (uuid_mod.UUID(bytes=raw) if isinstance(raw, bytes) and len(raw) == 16
                  else uuid_mod.UUID(str(raw)))
-        created, kind = deref(obj.get("creationTimeMs")), deref(obj.get("entryType"))
+        created, kind = obj.get("creationTimeMs"), obj.get("entryType")
         return {"slot": slot, "uuid": str(ident).upper(),
                 "created_ms": created if isinstance(created, int) and created > 0 else None,
                 "entry_type": kind if isinstance(kind, int) else None}
 
     try:
-        name = class_of(root)
+        name = keyed_archive.class_name(root)
         if name == MEMDATA_RECORD:
             return [record(root, "")]
         if name == MEMDATA_CONTAINER:
             out = []
             for slot, _label in MEMDATA_SLOTS:
-                target = deref(root.get(slot)) if slot in root else None
-                if target is not None and target != "$null":
+                target = root.get(slot)                    # None: absent, or $null
+                if target is not None:
                     out.append(record(target, slot))
             return out
     except (ValueError, TypeError, AttributeError):
@@ -765,6 +752,7 @@ def _bare_memory(snap_id, profile):
         "prior_rows": [],
         "memdata": [],
         "raw_times": {}, "cloud_files": [],
+        "filter_assets": [],                               # no overlay record without a row
     }
 
 
@@ -961,6 +949,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                               **entry_raw.get(entry_pk, {})),
             # media retrieved from Snapchat's servers — never mixed into media_files
             "cloud_files": [],
+            # the asset URLs of the geofilters its overlay record lists (snap_overlay) — never media
+            "filter_assets": [],
         }
         if has_zenc and r.get("ZENCRYPTION"):
             try:
@@ -986,6 +976,16 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             except Exception as error:
                 logger.debug(f"ZENCRYPTION decode failed for {snap}: {error}")
         memories[snap] = m
+
+    # The overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY): the asset URLs of the geofilters it lists. The
+    # cache_controller report matches claims against them with the same rule (scripts/data/
+    # snap_overlay.py); collect_media finds the cached ones. Not media of the Memory, and no keychain.
+    for rec in snap_overlay.read_overlays(views):
+        m = memories.get(rec["snap_id"])
+        if m is not None:
+            m["filter_assets"] = rec["assets"]
+            m["filter_record"] = {"geofilters": rec["geofilters"], "selected": rec["selected"],
+                                  "wal": rec["wal"]}
 
     scdb_wal = dict(views.info)
     views.close()
@@ -1481,14 +1481,10 @@ def index_cache_controller(app):
     return out
 
 
-def index_claim_uuids(app):
-    """Every UUID in any CACHE_FILE_CLAIM EXTERNAL_KEY: ``{UPPER(uuid): [(cache_key, context)]}``.
-
-    Unlike :func:`index_cache_controller` this does not care about the claim's shape: it is how a
-    Memory's MemData identifiers (:func:`decode_memdata`) find the claims that carry them, whatever
-    those claims look like. Both readings of the database, like every other read here.
-    """
-    out = {}
+def index_claims(app):
+    """``(index_claim_uuids, index_claim_urls)`` from one read of every CACHE_FILE_CLAIM — both
+    readings of every ``cache_controller.db``, like every other read here."""
+    uuids, urls = {}, {}
     for db in cache_controller_paths(app):
         claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
         for c in claims:
@@ -1497,9 +1493,34 @@ def index_claim_uuids(app):
                 continue
             for mo in _UUID_RE.finditer(str(ek)):
                 pair = (ck, c.get("MEDIA_CONTEXT_TYPE"))
-                if pair not in out.setdefault(mo.group(0).upper(), []):
-                    out[mo.group(0).upper()].append(pair)
-    return out
+                if pair not in uuids.setdefault(mo.group(0).upper(), []):
+                    uuids[mo.group(0).upper()].append(pair)
+            key = snap_overlay.normalise_url(str(ek))
+            if key:
+                claim = (ck, c.get("MEDIA_CONTEXT_TYPE"), c.get("USER_ID") or "", str(ek))
+                if claim not in urls.setdefault(key, []):
+                    urls[key].append(claim)
+    return uuids, urls
+
+
+def index_claim_uuids(app):
+    """Every UUID in any CACHE_FILE_CLAIM EXTERNAL_KEY: ``{UPPER(uuid): [(cache_key, context)]}``.
+
+    Unlike :func:`index_cache_controller` this does not care about the claim's shape: it is how a
+    Memory's MemData identifiers (:func:`decode_memdata`) find the claims that carry them, whatever
+    those claims look like. Both readings of the database, like every other read here.
+    """
+    return index_claims(app)[0]
+
+
+def index_claim_urls(app):
+    """Every claim whose EXTERNAL_KEY is an http(s) URL, by that URL as
+    ``snap_overlay.normalise_url`` gives it: ``{url: [(cache_key, context, USER_ID, EXTERNAL_KEY)]}``.
+
+    It is how the asset URLs a Memory's overlay record lists find their cached files — the same match
+    the cache_controller report makes from the other end (``_overlay_links_for``).
+    """
+    return index_claims(app)[1]
 
 
 def all_cache_keys(app):
@@ -1816,7 +1837,7 @@ def _add_posters(memories, outdir, published):
 
 
 def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None,
-                  claim_uuids=None):
+                  claim_uuids=None, claim_urls=None):
     """Decrypt SCContent + caching-media for all memories; write files, fill m['media_files'].
 
     SCContent files are located two ways: by ``SHA256(url token)[:16]`` (CDN-downloaded media)
@@ -1854,8 +1875,15 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     for sid, m in memories.items():
         for rec in m.get("memdata") or []:
             memdata_owners.setdefault(rec["uuid"], set()).add(sid)
-    if claim_uuids is None:
-        claim_uuids = index_claim_uuids(app)
+    if claim_uuids is None or claim_urls is None:
+        uuids, urls = index_claims(app)
+        claim_uuids = uuids if claim_uuids is None else claim_uuids
+        claim_urls = urls if claim_urls is None else claim_urls
+    # The cached assets of the geofilters each Memory's overlay record lists: a claim whose key is
+    # the asset's URL. Shown on the Memory's page apart from its media, never decrypted or published.
+    for m in memories.values():
+        m["filter_cached"] = [dict(asset, claims=claim_urls[asset["key"]])
+                              for asset in m.get("filter_assets") or () if asset["key"] in claim_urls]
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
@@ -3837,12 +3865,100 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           {''.join(mem_blocks)}
           <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
           <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
-          <div class="sect">Media files</div>{files_table}
+          <div class="sect">Media files</div>{files_table}{_filter_assets_html(members, cc_prefix, closure)}
           {_backlinks_placeholder(members)}
           {_leads_placeholder(members, closure)}
           {_cloud_html(members, media_prefix, cc_prefix, closure)}
         </div>
       </div>"""
+
+
+FILTER_ASSETS_PAGE_BASIS = (
+    "cache_controller entries whose claim EXTERNAL_KEY is exactly a URL this Memory's overlay record "
+    "(scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, an NSKeyedArchiver archive of "
+    "SOJUGallerySnapOverlay) gives an asset of one of its listed geofilters: the filter image, the "
+    "sky image or the font of its text. The whole URL is compared, query included, never an id "
+    "inside it. The record lists the snap's geofilters and names the selected one separately "
+    "(filters.geoFilterSelectedId / geoFilterSelectedIds), so a listed filter is not shown to be on "
+    "the Memory, and these files are not its media: they are not among the Media files above, and "
+    "none of them was decrypted. The cache_controller report makes the same match with the same rule "
+    "and links each file back here.")
+
+
+def account_matches(user_id, user_hash):
+    """Whether a claim's USER_ID is the account a userHash names (SHA-256 of the user id, as
+    ``map_userids`` derives it): True or False, or None when either is not known."""
+    if not user_id or not user_hash:
+        return None
+    hashes = {hashlib.sha256(u.encode()).hexdigest() for u in (user_id, user_id.lower())}
+    return str(user_hash).lower() in hashes
+
+
+def _filter_record_line(m, several):
+    """What a Memory's overlay record says about its geofilters: how many, and which it selects."""
+    rec = m.get("filter_record") or {}
+    named = []
+    for s in rec.get("selected") or ():
+        kind = ", ".join(bit for bit in (s.get("filter_type"), s.get("group")) if bit)
+        named.append(f"idValue {html.escape(s['filter_id'])}"
+                     + (f" ({html.escape(kind)})" if kind else ""))
+    sid = html.escape(m["snap_id"])
+    return ("<div class='mrefs'>"
+            + (f"<a href='#mem-{sid}' title='{sid}'>{sid[:8]}…</a>: " if several else "")
+            + f"The overlay record lists {rec.get('geofilters', 0)} geofilter(s); it names "
+            + (", ".join(named) if named else "none") + " as selected.</div>")
+
+
+def _filter_assets_html(members, cc_prefix="../../", closure=None):
+    """The cached assets of the geofilters these Memories' overlay records list; ``""`` when none.
+
+    Apart from Media files, and said to be. On a page several Memories share, each asset is given
+    under the Memory whose record lists it — a Snap column — rather than once for the group.
+    """
+    listing = [m for m in members if m.get("filter_cached")]
+    if not listing:
+        return ""
+    several = len(members) > 1
+    lines, rows = [], []
+    for m in listing:
+        lines.append(_filter_record_line(m, several))
+        sid = html.escape(m["snap_id"])
+        own = m.get("user_hash") or ""
+        for asset in m["filter_cached"]:
+            by_key = {}
+            for ck, context, user, ek in asset["claims"]:
+                by_key.setdefault(ck, []).append((context, user, ek))
+            kind = " · ".join(bit for bit in (asset.get("filter_type"), asset.get("group"),
+                                               f"idValue {asset['filter_id']}"
+                                               if asset.get("filter_id") else "") if bit)
+            for ck, claims in by_key.items():
+                link = report_ui.xref(
+                    f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                    f"CacheController_report.html#ck-{html.escape(ck)}\">🗄 {html.escape(ck)}</a>",
+                    [("cc", f"ck-{ck}")], closure=closure)
+                said = []
+                for context, user, ek in claims:
+                    said.append(f"context {html.escape(str(context))} · "
+                                f"<span class='mono'>{html.escape(ek)}</span>"
+                                + (" <span class='xscope'>another account&#39;s claim</span>"
+                                   if account_matches(user, own) is False else ""))
+                rows.append(
+                    "<tr>"
+                    + (f"<td class='mono'><a href='#mem-{sid}' title='{sid}'>{sid[:8]}…</a></td>"
+                       if several else "")
+                    + f"<td>{link}</td><td>{html.escape(asset['role'])}</td>"
+                    f"<td class='mono'>{html.escape(asset['field'])}"
+                    + (" <span class='unverified'>only in scdb-27 without its -wal</span>"
+                       if asset.get("wal") == sqlite_open.MAIN_ONLY else "")
+                    + f"</td><td>{html.escape(kind)}</td>"
+                    f"<td>{html.escape(snap_overlay.SELECTED_TEXT[asset.get('selected')])}</td>"
+                    f"<td>{'<br>'.join(said)}</td></tr>")
+    head = ("<tr>" + ("<th>Snap</th>" if several else "")
+            + "<th>Cached file</th><th>Asset</th><th>Where in the overlay record</th><th>Filter</th>"
+            "<th>Selected, per the record</th><th>Claim (context, EXTERNAL_KEY)</th></tr>")
+    return ("<div class='sect'>Cached assets of filters listed with this Memory — not its media"
+            + _info(FILTER_ASSETS_PAGE_BASIS) + "</div>" + "".join(lines)
+            + "<table class='files'>" + head + "".join(rows) + "</table>")
 
 
 def _backlinks_placeholder(members):

@@ -152,6 +152,17 @@ def test_the_device_record_of_a_cached_file_is_shown(run):
     assert "<b>created" not in detail and "<b>modified" in detail
 
 
+def test_the_cache_report_has_none_of_the_ios_filter_record_link(run):
+    """The overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY) is read on iOS only: the Android run's cache
+    report carries none of what a filter-record link adds, so it is what it was."""
+    _base, reports = run
+    page = open(reports / "CacheController" / "CacheController_report.html", encoding="utf-8").read()
+    for absent in ('value="Filter"', ".chip.mem.filt", "listed with a Memory"):
+        assert absent not in page, absent
+    assert all("Filter" not in row[5]["link"]
+               for row in _rows(reports / "CacheController" / "data" / "index.js"))
+
+
 def test_the_survey_carries_structure_and_no_values(run):
     base, _reports = run
     survey = json.loads((base / "android_survey.json").read_text(encoding="utf-8"))

@@ -17,10 +17,11 @@ this answers it for every claim at once, so one run on the case says which link 
 The result is grouped by the claim key's **shape**: the key with each id replaced by a placeholder
 (``<uuid>``, ``<hex32>``, ``<b64:13>``, ``<id>``, ``<n>``). Per shape and context it counts the
 claims the reports already tie to a message (by the file the chat join attached, or by the message
-the key names), the Memory-scoped keys, and those nothing ties; and for each id position in the
-shape, where in ``arroyo.db`` the same id was found — table, column, protobuf field, content_type,
-reading — and in how many rows each id occurs. An id found in one message, or a few, is what a link rule is
-written from; one found in every message of a conversation (the conversation's own id) is not. An
+the key names), the Memory-scoped keys, the asset URLs a Memory's overlay record lists, and those
+nothing ties; and for each id position in the shape, where in ``arroyo.db`` the same id was found —
+table, column, protobuf field, content_type, reading — and in how many rows each id occurs. An id
+found in one message, or a few, is what a link rule is written from; one found in every message of
+a conversation (the conversation's own id) is not. An
 untied key that names a conversation and a message is checked against every ``arroyo.db``: does one
 hold the message, does one hold the conversation, and was the claim made by the account one of them
 belongs to — which says whether a rule is missing, or whether no rule written from these databases
@@ -241,17 +242,22 @@ ROUTE_STATUS = {"file": "message: attached file", "key": "message: named in the 
                 "content": "message: id in the key"}
 
 
+#: The status of a claim whose key is the URL of an asset of a filter a Memory's overlay record lists.
+FILTER_STATUS = "Memory: listed in its filter record"
+
+
 def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, filter_urls=None,
                  items=None):
     """How the reports tie a claim to a message — computed by the cache_controller report's own
     ``_chat_links_for``, so the survey and the report cannot disagree — or that its key is a
     Memory's (a Memory-scoped shape, or a full-media key carrying a Memory's ZSNAPID, the two links
-    a key alone makes), or ``none``.
+    a key alone makes), or that a Memory's overlay record lists it as the URL of a filter's asset
+    (``filter_urls``, the ``overlay_urls`` of ``load_memory_index``, matched by the report's own
+    ``_overlay_links_for``), or ``none``. The first that applies, in that order.
 
-    ``filter_urls`` and ``items`` are accepted and not read yet: they are where the asset URLs a
-    Memory's filter record lists and the creative-tools items will come in, each by the report's own
-    rule, without another change to every caller."""
-    from scripts.cache_controller_report import _chat_links_for, _UUID_RE
+    ``items`` is accepted and not read yet: it is where the creative-tools items will come in, by
+    the report's own rule, without another change to every caller."""
+    from scripts.cache_controller_report import _chat_links_for, _overlay_links_for, _UUID_RE
     from scripts.memories_media_report import classify_snap_claim
     ek, ck = str(claim.get("EXTERNAL_KEY") or ""), str(claim.get("CACHE_KEY") or "")
     links = _chat_links_for([{"external_key": ek}], ck, by_key, by_message, chat_ids)
@@ -262,6 +268,9 @@ def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, fil
     mo = _UUID_RE.search(ek)
     if mo and claim.get("MEDIA_CONTEXT_TYPE") == 19 and mo.group(0).upper() in (snap_ids or {}):
         return "Memory: its snap id in the key"
+    if filter_urls and _overlay_links_for(
+            [{"external_key": ek, "user_id": str(claim.get("USER_ID") or "")}], filter_urls):
+        return FILTER_STATUS
     return "none"
 
 
@@ -295,16 +304,27 @@ def _apps(controllers):
     return out
 
 
-def _snap_ids(apps):
-    """Every Memory's ZSNAPID, from each app folder (:func:`_apps`)."""
+def _memory_keys(apps):
+    """``(snap_ids, filter_urls)`` from each app folder (:func:`_apps`), in one read: every Memory's
+    ZSNAPID, and the asset URLs of the geofilters every Memory's overlay record lists (iOS; the
+    Android index has none)."""
     from scripts.cache_controller_report import load_memory_index
-    out = {}
+    snap_ids, filter_urls = {}, {}
     for app in apps:
         try:
-            out.update(load_memory_index(app).get("snap_ids") or {})
+            index = load_memory_index(app)
         except Exception as error:                                 # noqa: BLE001 - optional
             logger.debug(f"--survey-claim-links: Memories not read for {app} ({error})")
-    return out
+            continue
+        snap_ids.update(index.get("snap_ids") or {})
+        for url, listed in (index.get("overlay_urls") or {}).items():
+            filter_urls.setdefault(url, []).extend(listed)
+    return snap_ids, filter_urls
+
+
+def _snap_ids(apps):
+    """Every Memory's ZSNAPID, from each app folder (:func:`_apps`)."""
+    return _memory_keys(apps)[0]
 
 
 #: The tables whose ``client_conversation_id`` says that arroyo.db holds a conversation. Each is
@@ -664,7 +684,7 @@ def survey(run_folder, progress=None):
     from scripts.cache_controller_report import load_chat_ids, load_chat_links
     by_key, by_message = load_chat_links(report_dir)
     chat_ids = load_chat_ids(report_dir, by_message)
-    snap_ids = _snap_ids(_apps(controllers))
+    snap_ids, filter_urls = _memory_keys(_apps(controllers))
     manifest = next((os.path.join(report_dir, r, "cache_links.json")
                      for r in ("Conversations", "Communications_legacy", "Communications")
                      if os.path.isfile(os.path.join(report_dir, r, "cache_links.json"))), None)
@@ -684,7 +704,8 @@ def survey(run_folder, progress=None):
             claims.append({"context": row.get("MEDIA_CONTEXT_TYPE"), "shape": shape,
                            "idents": idents, "_key": str(row.get("EXTERNAL_KEY") or ""),
                            "_user": str(row.get("USER_ID") or ""),
-                           "status": _link_status(row, by_key, by_message, chat_ids, snap_ids)})
+                           "status": _link_status(row, by_key, by_message, chat_ids, snap_ids,
+                                                  filter_urls=filter_urls)})
     progress(f"--survey-claim-links: {len(claims)} claim(s) in {len(controllers)} "
              f"cache_controller.db, chat links from {manifest or 'no Conversations report'}")
 

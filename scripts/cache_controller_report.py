@@ -45,6 +45,7 @@ from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
 from scripts.data import arroyo_content
+from scripts.data import snap_overlay
 from scripts.data import snap_session
 from scripts import memory_leads
 from scripts import progress
@@ -56,7 +57,7 @@ from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
-    cache_controller_paths, decode_memdata,
+    cache_controller_paths, decode_memdata, account_matches,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -287,12 +288,18 @@ def load_memory_index(app):
     a Memory records about itself (``ZGALLERYSNAP.ZMEMDATAIDS``, and its entry's
     ``ZGALLERYENTRY.ZMEMDATAID``; see ``memories_media_report.decode_memdata``). An entry's id is
     shared by every snap of that entry, so a caller links through one only when it names one snap.
+
+    And ``overlay_urls`` : {asset URL: [(ZSNAPID, user_hash, asset)]} — the URLs of the image, sky
+    image and font of every geofilter a Memory's overlay record (``ZGALLERYSNAPDETAIL.ZOVERLAY``)
+    lists, keyed by ``snap_overlay.normalise_url``. Not a link to the Memory's media: see
+    :func:`_overlay_links_for`. iOS only — the Android index has no such key, so callers ``.get`` it.
     """
     if android_layout.is_app_dir(app):
         # the Android app keeps its Memories in memories.db, not in a Core Data store
         from scripts import memories_android_report
         return memories_android_report.memory_index(app)
     snap_ids, url_keys, media_ids, snap_urls, memdata_ids = {}, {}, {}, {}, {}
+    overlay_urls = {}
     points = {}            # snap id -> {"kind", "points"}: what memory_leads compares files with
     for p in find_profiles(app):
         # Both readings, through sqlite_open like every other evidence database: staged copies, so
@@ -303,12 +310,18 @@ def load_memory_index(app):
             views = sqlite_open.open_views(p["scdb"])
             rows, _markers = sqlite_open.read_table(views, "ZGALLERYSNAP")
             entries, _markers = sqlite_open.read_table(views, "ZGALLERYENTRY")
+            overlays = snap_overlay.read_overlays(views)
         except (sqlite3.DatabaseError, OSError) as error:
             logger.debug(f"Could not read memory index from {p['scdb']}: {error}")
-            rows, entries = [], []
+            rows, entries, overlays = [], [], []
         finally:
             if views is not None:
                 views.close()
+        for rec in overlays:
+            for asset in rec["assets"]:
+                overlay_urls.setdefault(asset["key"], []).append(
+                    (rec["snap_id"], p["userHash"],
+                     dict(asset, has_overlay_image=rec["has_overlay_image"])))
         for row in rows:
             if not row.get("ZSNAPID"):
                 continue
@@ -330,7 +343,8 @@ def load_memory_index(app):
             if current:
                 points[sid] = _memory_points(row, entries)
     return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
-            "snap_urls": snap_urls, "memdata_ids": memdata_ids, "points": points}
+            "snap_urls": snap_urls, "memdata_ids": memdata_ids, "points": points,
+            "overlay_urls": overlay_urls}
 
 
 _COCOA = 978307200
@@ -382,6 +396,129 @@ def _memdata_link(clist, memdata_ids):
                     f"Memory {canonical} records about itself in {field} — an identifier stored "
                     f"in the Memory's own row, not a match by time or by content.")
     return None, None
+
+
+FILTER_LISTED_BASIS = (
+    "A Memory's overlay record (scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, an NSKeyedArchiver "
+    "archive of SOJUGallerySnapOverlay) lists the snap's geofilters, and a geofilter gives the URL of "
+    "its image, of its sky image and of the font of its text. A claim whose EXTERNAL_KEY is exactly "
+    "one of those URLs — the whole URL, query included, not an id inside it — is a cached asset of a "
+    "filter that Memory's record lists. The record names the selected geofilter separately "
+    "(filters.geoFilterSelectedId / geoFilterSelectedIds), and often names none, so a listed filter is "
+    "not shown to be on the Memory. This file is not the Memory's media: it is none of the Memory "
+    "links, is not counted as linked to a Memory, and is never decrypted with the Memory's key.")
+
+FILTER_MANY_LINK_BASIS = (
+    "This asset is listed in the overlay records of SEVERAL Memories, so the link opens the Memories "
+    "report filtered to those Memories' snap ids, with every matching row expanded, rather than "
+    "jumping to one of them. What you land on is the complete set — the search box shows the query "
+    "that produced it, and clearing it restores the full report.")
+
+FILTER_MANY_BASIS = (
+    "The same asset URL is listed in the overlay records of several Memories, under the same filter "
+    "or under different ones (a font, for one, can be shared by different filters). Each Memory's "
+    "own basis, with the filter (idValue) that lists the asset, is in this entry's detail.")
+
+#: How each answer of the record about the selected geofilter reads in an explanation.
+_SELECTED_SENTENCE = {True: "here it names this filter", False: "here it names another filter",
+                      None: "here it names none"}
+
+
+def _url_difference(ek, url):
+    """What differs between a claim key and the record's URL that :func:`snap_overlay.normalise_url`
+    makes the same — "" when they are the same text."""
+    a, b = str(ek or ""), str(url or "")
+    if a == b:
+        return ""
+    (scheme_a, _sep, rest_a), (scheme_b, _sep, rest_b) = a.partition("://"), b.partition("://")
+    bits = ["the letter case of its scheme"] if scheme_a != scheme_b else []
+    if rest_a != rest_b:
+        # the rule drops nothing but one empty "?" or "#", so a side it shortens ends with one
+        bits += [f"the empty \"{text[-1]}\" {whose} ends with"
+                 for text, whose in ((a, "the claim key"), (b, "the record"))
+                 if len(snap_overlay.normalise_url(text)) < len(text)]
+    return " and ".join(bits)
+
+
+def _filter_basis(ek, claim_user, sid, asset, same_account):
+    """The explanation of one link from a cache entry to a Memory whose overlay record lists it."""
+    differs = _url_difference(ek, asset["url"])
+    facts = [f"a {asset['filter_type']} geofilter" if asset.get("filter_type") else "a geofilter"]
+    facts += [f"carousel group {asset['group']}"] if asset.get("group") else []
+    facts += [f"idValue {asset['filter_id']}"] if asset.get("filter_id") else []
+    text = (f"The claim EXTERNAL_KEY \"{ek}\" is the URL"
+            + (f" \"{asset['url']}\" (the same URL but for {differs})" if differs else "")
+            + f" that Memory {sid}'s overlay record gives as the {asset['role']} of one of its "
+            f"geofilters: scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, the row whose ZSNAP is this "
+            f"Memory's Z_PK, an NSKeyedArchiver archive of SOJUGallerySnapOverlay, at "
+            f"{asset['field']} ({', '.join(facts)}). The record lists the snap's geofilters and names "
+            f"the selected one separately, in filters.geoFilterSelectedId / geoFilterSelectedIds: "
+            f"{_SELECTED_SENTENCE[asset.get('selected')]}.")
+    flag = asset.get("has_overlay_image")
+    if flag is not None:
+        text += (f" The Memory's own row has ZGALLERYSNAP.ZHASOVERLAYIMAGE = {flag}"
+                 + (" (it records an overlay image; the record does not say which listed filter, if "
+                    "any, is on it)." if flag else " (it records no overlay image)."))
+    text += (" So this cached file is an asset of a filter listed with the Memory. It is not the "
+             "Memory's media, and a listed filter is not shown to be on the Memory. This is an "
+             "exact match of the whole URL, not of an id inside it.")
+    if same_account is False:
+        text += (f" The claim was made by account {claim_user}, and this Memory is another "
+                 f"account's (its userHash is not SHA-256 of that USER_ID): the same asset URL, "
+                 f"cached by the claim's account.")
+    if asset.get("wal") == sqlite_open.MAIN_ONLY:
+        text += (" This overlay record is in scdb-27 only without its -wal: the write-ahead log has "
+                 "since changed or removed it.")
+    return text
+
+
+def _overlay_links_for(clist, overlay_urls, memory_pages=None, skip_sid=None):
+    """The Memories whose overlay record lists one of this entry's claim keys as an asset URL.
+
+    The one rule, which the survey (``--survey-claim-links``) calls too: a claim's EXTERNAL_KEY and a
+    URL the record gives an asset of a listed geofilter are the same URL by
+    ``snap_overlay.normalise_url`` — scheme, host, path and the whole query. An id inside the URL is
+    not enough (the same last path segment recurs under other hosts and paths, and one ``mo=`` /
+    ``bo=`` value under other ids), and the claim's context and account are not restricted: the
+    account is stated in the explanation instead. ``skip_sid`` is the Memory the entry already links
+    to as its media.
+
+    One link per Memory, by snap id: the field of the filter the record names as selected when one
+    of the matching fields is that filter's, else the record's first matching field; any others in
+    ``fields``; and the claim of the Memory's own account when the entry has one.
+    """
+    memory_pages = memory_pages or {}
+    found = {}                                     # snap id -> (user hash, [(claim, its key, asset)])
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        key = snap_overlay.normalise_url(ek)
+        if not key:
+            continue
+        for sid, user_hash, asset in overlay_urls.get(key) or ():
+            if sid != skip_sid:
+                found.setdefault(sid, (user_hash, []))[1].append((c, ek, asset))
+    links = []
+    for sid in sorted(found):
+        user_hash, hits = found[sid]
+        # the claim of the Memory's own account first, when the entry has one; then an asset of the
+        # filter the record names as selected (one asset can be listed under several filters, and the
+        # link's "selected" must be what the record says of any of them); else record order
+        hits.sort(key=lambda hit: (account_matches(hit[0].get("user_id") or "", user_hash) is False,
+                                   hit[2].get("selected") is not True))
+        claim, ek, asset = hits[0]
+        user = claim.get("user_id") or ""
+        same = account_matches(user, user_hash)
+        links.append({
+            "snap_id": sid, "user_hash": user_hash, "page": memory_pages.get(sid),
+            "role": asset["role"], "field": asset["field"],
+            "fields": list(dict.fromkeys(a["field"] for _c, _ek, a in hits
+                                         if a["field"] != asset["field"])),
+            "filter_id": asset.get("filter_id") or "", "filter_type": asset.get("filter_type") or "",
+            "group": asset.get("group") or "", "selected": asset.get("selected"),
+            "has_overlay_image": asset.get("has_overlay_image"), "wal": asset.get("wal"),
+            "external_key": ek, "claim_user": user, "cross_account": same is False,
+            "basis": _filter_basis(ek, user, sid, asset, same)})
+    return links
 
 
 def load_chat_links(report_dir):
@@ -1094,6 +1231,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     media_ids = mem_index["media_ids"]
     snap_urls = mem_index.get("snap_urls") or {}
     memdata_ids = mem_index.get("memdata_ids") or {}
+    overlay_urls = mem_index.get("overlay_urls") or {}
     # the id columns in the words the link's explanation uses (iOS: the Core Data columns)
     labels = mem_index.get("labels") or {"snap": "ZSNAPID", "media": "ZMEDIAID"}
     memory_pages = memory_pages or {}
@@ -1216,6 +1354,10 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
         chats = _chat_links_for(clist, key, chat_links, chat_by_message or {}, chat_ids)
+        # an asset of a filter a Memory's overlay record lists: a relation of its own, never the
+        # Memory link above (see FILTER_LISTED_BASIS)
+        filters = _overlay_links_for(clist, overlay_urls, memory_pages,
+                                     skip_sid=(memory or {}).get("snap_id"))
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
                        or {t["user_id"] for t in tomb_by_key.get(key, []) if t["user_id"]})
@@ -1254,6 +1396,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                         "scope_by_path": scope_by_path, "cross_scope": cross_scope},
             "memory": memory,
             "memory_basis": basis,
+            "filter_memories": filters,
             "content_proof": proofs,
             "chats": chats,
             "tombstones": tomb_by_key.get(key, []),
@@ -1668,6 +1811,41 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
                 f'title="open this Memory\'s own detail page" '
                 f'href="{rel_prefix}Memories/{_esc(page)}#mem-{_esc(sid)}">📄 detail</a>',
                 [("mem", f"mem-{sid}")], closure=closure, brief=compact))
+    # An asset of a filter a Memory's overlay record lists — dashed, and worded so it cannot be read
+    # as the Memory link above. One asset is commonly listed for many Memories, so several are ONE
+    # chip that opens the Memories report filtered to all of them (as the Library/Caches chip does).
+    filters = entry.get("filter_memories") or []
+    if len(filters) == 1:
+        fm = filters[0]
+        sid = fm["snap_id"]
+        chips.append(report_ui.xref(
+            f'<a class="chip mem filt" target="scauto_memories" '
+            f'title="an asset of a geofilter this Memory\'s overlay record lists — not the Memory\'s '
+            f'media" href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
+            f'🧠 Memory {_esc(sid[:8])}… · filter {"selected" if fm.get("selected") else "listed"}'
+            f'</a>', [("mem", f"mem-{sid}")], closure=closure, brief=compact)
+            + why(fm.get("basis")))
+        if fm.get("page"):
+            chips.append(report_ui.xref(
+                f'<a class="chip mem filt" target="scauto_memories" '
+                f'title="open this Memory\'s own detail page" '
+                f'href="{rel_prefix}Memories/{_esc(fm["page"])}#mem-{_esc(sid)}">📄 detail</a>',
+                [("mem", f"mem-{sid}")], closure=closure, brief=compact))
+    elif filters:
+        sids = [fm["snap_id"] for fm in filters]
+        # narrowed first, so the link does not open the Memories report filtered to rows it lacks
+        kept, dropped = report_ui.narrow(closure, "mem", sids, lambda s: f"mem-{s}")
+        shown = kept or sids
+        chips.append(report_ui.xref(
+            f'<a class="chip mem filt" target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html{report_ui.find_fragment(shown)}" '
+            f'title="open the Memories report filtered to the {len(shown)} Memories whose overlay '
+            f'record lists this asset, all expanded — not their media">'
+            f'🧠 {len(shown)} {"Memory" if len(shown) == 1 else "Memories"} · filter listed</a>',
+            [("mem", f"mem-{s}") for s in shown], closure=closure, brief=compact)
+            + why(FILTER_MANY_LINK_BASIS + " " + FILTER_MANY_BASIS
+                  + (f" {dropped} further Memory/Memories whose record lists it are not part of "
+                     f"this partial report." if kept and dropped else "")))
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
@@ -1861,6 +2039,46 @@ def _meta_prior_html(entry):
             + _info(META_PRIOR_BASIS) + "</div>" + "".join(out))
 
 
+def _filter_memories_html(entry, rel_prefix, closure=None):
+    """The Memories whose overlay record lists this file as an asset of a geofilter; ``""`` when none.
+
+    One row per Memory, each with its own "?" — the record, the field and what it says about the
+    selected filter differ from one Memory to the next.
+    """
+    rows = []
+    for fm in entry.get("filter_memories") or ():
+        sid = fm["snap_id"]
+        link = report_ui.xref(
+            f'<a target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">{_esc(sid)}</a>',
+            [("mem", f"mem-{sid}")], closure=closure)
+        if fm.get("page"):
+            link += " " + report_ui.xref(
+                f'<a target="scauto_memories" title="open this Memory\'s own detail page" '
+                f'href="{rel_prefix}Memories/{_esc(fm["page"])}#mem-{_esc(sid)}">📄</a>',
+                [("mem", f"mem-{sid}")], closure=closure)
+        where = _esc(fm["field"]) + "".join(f"<br>also {_esc(f)}" for f in fm.get("fields") or ())
+        kind = " · ".join(bit for bit in (fm.get("filter_type"), fm.get("group"),
+                                           f"idValue {fm['filter_id']}" if fm.get("filter_id") else "")
+                          if bit)
+        claim = (f"<span class='mono'>{_esc(fm['external_key'])}</span><br>"
+                 f"<span class='mono'>{_esc(fm['claim_user'])}</span>"
+                 + (" <span class='xscope'>another account&#39;s claim</span>"
+                    if fm.get("cross_account") else ""))
+        rows.append(f"<tr><td class='mono'>{link}{_wal_badge(fm.get('wal'))}{_info(fm['basis'])}</td>"
+                    f"<td>{_esc(fm['role'])}</td><td class='mono'>{where}</td>"
+                    f"<td>{_esc(kind)}</td>"
+                    f"<td>{_esc(snap_overlay.SELECTED_TEXT[fm.get('selected')])}</td>"
+                    f"<td>{claim}</td></tr>")
+    if not rows:
+        return ""
+    return ("<div class='sect'>Listed with a Memory&#39;s filters — not its media"
+            + _info(FILTER_LISTED_BASIS) + "</div>"
+            "<table class='sub'><tr><th>Memory</th><th>asset</th><th>where in the overlay record</th>"
+            "<th>filter</th><th>selected, per the record</th><th>claim (EXTERNAL_KEY, USER_ID)</th>"
+            "</tr>" + "".join(rows) + "</table>")
+
+
 def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     """Expandable detail block for one physical cache file."""
     e = entry
@@ -1915,6 +2133,9 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                                                   note="the authority recorded")) + "</div>"
                      "<table class='sub'><tr><th>Memory</th><th>role</th><th>compared</th>"
                      "<th>retrieved (UTC)</th><th>legal authority</th></tr>" + rows + "</table>")
+    filters = _filter_memories_html(e, rel_prefix, closure)
+    if filters:
+        parts.append(filters)
 
     # metadata grid — real CACHE_FILE_METADATA column names with descriptions in parentheses
     m = e["meta"]
@@ -2155,6 +2376,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     on_disk = sum(1 for e in entries if e["on_disk"]["found"])
     mem_linked = sum(1 for e in entries if e["memory"])
     chat_linked = sum(1 for e in entries if e["chats"])
+    # counted apart from mem_linked: an asset of a listed filter is not linked to a Memory's media
+    filter_linked = sum(1 for e in entries if e.get("filter_memories"))
     deleted = sum(1 for e in entries if e["tombstones"])
     xscope = sum(1 for e in entries if e["on_disk"].get("cross_scope"))
     orphans = sum(1 for e in entries if e.get("orphan"))
@@ -2189,6 +2412,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             linkbits.append("Memory")
         if e["chats"]:
             linkbits.append("Chat")
+        if e.get("filter_memories"):
+            linkbits.append("Filter")                      # not "Memory": the filter matches by indexOf
         is_xscope = bool(e["on_disk"].get("cross_scope"))
         users = ", ".join(u[:8] + "…" for u in e["users"])
         # cells carry as little markup as possible — per-column styling is in the CSS (.vc.cN),
@@ -2231,6 +2456,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             searchable += e["memory"].get("urls") or []
         for ch in e["chats"]:
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
+        # the Memories whose overlay record lists this asset, so their snap id finds it
+        searchable += [fm["snap_id"] for fm in e.get("filter_memories") or ()]
         for k in e.get("child_files") or []:
             searchable += [str(k.get("name") or ""), k.get("md5") or "", k.get("sha256") or ""]
             searchable += report_ui.embedded_search_terms(k.get("embedded"), k.get("embedded_times"),
@@ -2289,6 +2516,13 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             + vrows + "</table>")
 
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
+    # Written only when an entry has one, so a report with none is byte for byte what it was.
+    filter_css = "\n .chip.mem.filt{border-style:dashed}" if filter_linked else ""
+    filter_opt = ('<option value="Filter">filter listed with a Memory (not its media)</option>'
+                  if filter_linked else "")
+    filter_sum = (f'<div class="sum"><b>{filter_linked}</b> cached file(s) are an asset of a filter '
+                  f'listed with a Memory — not its media{_info(FILTER_LISTED_BASIS)}</div>'
+                  if filter_linked else "")
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Snapchat cache_controller.db</title>{report_ui.emoji_font_link(rel_prefix)}<style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
@@ -2346,7 +2580,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .chiprow>*{{flex:0 0 auto}} .chiprow .chip{{margin:0}}
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
    font-size:11px;text-decoration:none;font-weight:600}}
- .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}
+ .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}{filter_css}
  .chip.lead{{background:#fff;color:#6b5a00;border:1px dashed #c9a400;text-decoration:none}}
  .leadnote{{font-size:12px;color:#6b5a00;margin:2px 0 4px}}
  button.copyids{{font-size:11.5px;padding:2px 8px;border:1px solid #bcbcd0;border-radius:5px;
@@ -2397,7 +2631,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  {_info(ORPHAN_BASIS) if orphans else ''}</div>
  <div class="sum">Scope: {html.escape(_words(platform)["scope"])}</div>
  <div class="sum">Source: {html.escape(db_display)}</div>
- {figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
+ {filter_sum}{figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
 {banner}{report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
 <div class="toolbar">
@@ -2410,7 +2644,7 @@ with more than one target fills in here." oninput="flt()">
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
  <label>Linked <select id="link" onchange="flt()"><option value="">any</option>
    <option value="Memory">Memory</option><option value="Chat">Chat</option>
-   <option value="Possible">possible Memory (not proven)</option></select></label>
+   <option value="Possible">possible Memory (not proven)</option>{filter_opt}</select></label>
  <label title="Only files with an on-disk copy in a different account's SCContent scope than the claim">
    <input type="checkbox" id="xscope" onchange="flt()"> ⚠ cross-scope only</label>
  <label title="Measured from the bytes: high entropy and a length that is a multiple of the AES
@@ -2502,7 +2736,8 @@ scConsumeHash();
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, {"total": total, "on_disk": on_disk, "mem": mem_linked,
-                    "chat": chat_linked, "deleted": deleted, "orphans": orphans,
+                    "chat": chat_linked, "filter": filter_linked,
+                    "deleted": deleted, "orphans": orphans,
                     "wal_only": wal_only, "main_only": main_only,
                     "meta_changed": meta_changed, "encrypted": encrypted_total,
                     "encrypted_locked": encrypted_locked}
@@ -2610,7 +2845,9 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         # Only files nothing else accounts for: a category that names what the file is (a lens, a
         # story preview, a Discover video…) already says it is not a Memory's media.
         ctx19 = any(c.get("mct") == 19 for c in e["claims"])
-        if (e.get("memory") or e.get("chats") or not e["on_disk"]["found"]
+        # an asset of a filter a Memory's record lists is accounted for, though not as its media
+        if (e.get("memory") or e.get("chats") or e.get("filter_memories")
+                or not e["on_disk"]["found"]
                 or not (e["category"] in LEAD_CATEGORIES or (e["category"] == "Other" and ctx19))):
             continue
         kind = memory_leads.kind_of_ext(guess_media(_head_of(e["on_disk"]["paths"])))
@@ -2644,6 +2881,11 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         if e.get("memory"):
             sel.link(partial_report.EDGE_MEMORY_CACHE, row_id, "mem",
                      f"mem-{e['memory']['snap_id']}")
+        # an edge of its own, never EDGE_MEMORY_CACHE: following a Memory to its media must not
+        # bring the assets of every filter its record lists (relations mem_filter_assets and
+        # cache_filter_memories, both off by default)
+        for fm in e.get("filter_memories") or ():
+            sel.link(partial_report.EDGE_MEMORY_FILTER_ASSET, row_id, "mem", f"mem-{fm['snap_id']}")
         for chat in e.get("chats") or ():
             if chat.get("conversation_id") and chat.get("server_message_id"):
                 sel.link(partial_report.EDGE_MESSAGE_CACHE, row_id, "msg",
@@ -2724,6 +2966,9 @@ def render(stage, closure=None, prov=None):
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "
                 f"{stats['deleted']} deleted")
+    if stats.get("filter"):
+        logger.info(f"  {stats['filter']} an asset of a filter a Memory's overlay record lists "
+                    f"(ZGALLERYSNAPDETAIL.ZOVERLAY) — not the Memory's media, and not counted above")
     logger.info(f"  {stats['encrypted']} hold encrypted bytes (high entropy + AES block "
                 f"alignment), {stats['encrypted_locked']} of them with no key available; "
                 f"everything else on disk was identified by its magic bytes")

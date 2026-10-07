@@ -66,10 +66,13 @@ EDGE_MESSAGE_CACHE = "message_cache"               # cc  <-> msg
 EDGE_CACHE_CACHEMEDIA = "cache_cachemedia"         # cc  <-> cm
 EDGE_MEMORY_CACHEMEDIA = "memory_cachemedia"       # mem <-> cm
 EDGE_CACHEMEDIA_MESSAGE = "cachemedia_message"     # cm  <-> msg
+# A cached asset of a filter a Memory's overlay record lists. Its own edge, never EDGE_MEMORY_CACHE:
+# it is not the Memory's media, and one asset is commonly listed with many Memories.
+EDGE_MEMORY_FILTER_ASSET = "memory_filter_asset"   # mem <-> cc
 
 EDGES = (EDGE_CONV_MESSAGE, EDGE_CONV_PARTICIPANT, EDGE_MESSAGE_SENDER, EDGE_MEMORY_GROUP,
          EDGE_MEMORY_CACHE, EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA,
-         EDGE_CACHEMEDIA_MESSAGE)
+         EDGE_CACHEMEDIA_MESSAGE, EDGE_MEMORY_FILTER_ASSET)
 
 
 class Relation:
@@ -128,9 +131,24 @@ RELATIONS = (
              EDGE_MEMORY_CACHEMEDIA, "mem", "cm", False,
              "caching-media .pack chunks are not indexed by cache_controller.db; they are matched "
              "by the pack's item hash."),
+    # Off by default, both ways: an asset of a listed filter is not the Memory's media, the record
+    # lists filters it does not name as selected, and one asset is commonly listed with many Memories
+    # — following it would add every Memory that lists a common filter.
+    Relation("mem_filter_assets",
+             "The cached assets of the filters a selected Memory's overlay record lists",
+             EDGE_MEMORY_FILTER_ASSET, "mem", "cc", False,
+             "cache_controller entries whose claim EXTERNAL_KEY is exactly the URL of an asset "
+             "(filter image, sky image, font) of a geofilter listed in the Memory's "
+             "ZGALLERYSNAPDETAIL.ZOVERLAY. Not the Memory's media: the record lists the snap's "
+             "geofilters and names the selected one separately."),
     Relation("cache_memory", "The Memory a selected cache entry belongs to",
              EDGE_MEMORY_CACHE, "cc", "mem", True,
              "The same claim shapes as mem_cache, read in the other direction."),
+    Relation("cache_filter_memories",
+             "Every Memory whose overlay record lists a selected cache entry's asset",
+             EDGE_MEMORY_FILTER_ASSET, "cc", "mem", False,
+             "The same match as mem_filter_assets, read the other way. One asset is often listed "
+             "with many Memories."),
     Relation("cache_message", "The chat message a selected cache entry belongs to",
              EDGE_MESSAGE_CACHE, "cc", "msg", True,
              "The chat links of the entry: the file the chat report shows for a message, the "

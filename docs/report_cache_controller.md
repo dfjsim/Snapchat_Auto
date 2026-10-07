@@ -302,7 +302,10 @@ many have no key at all; a filter selects each group.
 tie-breaker): *Memory media / overlay / thumbnail* (`snap-*`/`g-media-`), *Chat media* (context
 2/3), *Lens*, *Preview*, *App install*, *Video / Discover* (`topvideo~`/`firstframe`/`video~`),
 *CDN media* (a bare `http(s)` URL), *Snap editor* (context 34 with a `<UUID>~<position>` key — below),
-else *Other*. The row's category is the most meaningful across its claims (Memory beats Other).
+else *Other*. The row's category is the most meaningful across its claims (Memory beats Other). A file
+that is an asset of a filter a Memory's overlay record lists keeps its category — *CDN media*, as a
+URL-keyed claim — because that link is a relation of its own, not a statement of what the file is (see
+[below](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
 
 ### Context 34 — the snap editor's working copy
 
@@ -367,6 +370,41 @@ as `data/memory_leads.js` (`memory_leads.write_script`, keyed by snap id, carryi
 Memories pages load that file with `<script src>` like their own data — `memory_leads.MEMORY_JS` draws
 the badge, the filter and the panel. A page whose folder has no such file, or one from another run, shows
 no lead. A partial extract's file names only the Memories the extract holds.
+
+## Assets of a filter listed with a Memory — not its media
+
+A Memory's overlay record (`scdb-27` `ZGALLERYSNAPDETAIL.ZOVERLAY`, read by `scripts/data/snap_overlay.py`;
+see [report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) lists the
+snap's geofilters with the URLs of their image, sky image and font. `load_memory_index` keeps those URLs
+(`overlay_urls`, iOS only), and an entry whose claim `EXTERNAL_KEY` is exactly one of them — the whole URL,
+by `snap_overlay.normalise_url` — gets `entry["filter_memories"]`: one link per listing Memory
+(`_overlay_links_for`; the rule in full is in [cross_report_linking.md](cross_report_linking.md)). On the
+corpus these are context-25 claims on WebP filter images, PNG sky images and TrueType fonts.
+
+* **The chip** is dashed and says *🧠 Memory … · filter listed* (*· filter selected* only when the record
+  names that filter as selected), or, when several Memories list the asset — common: the same asset URL
+  is listed in many Memories' records, sometimes under different filters — one *🧠 N Memories · filter
+  listed* chip that opens the Memories report filtered to all of them (its `#find=` is the listing
+  Memories' snap ids, not the entry's CACHE_KEY), narrowed in a partial extract to the Memories it holds.
+  When one record lists the asset under several filters, the link takes the selected filter's field if
+  the record names one, so the chip and the detail say what the Memory's own page says.
+* **The detail** has a section *Listed with a Memory's filters — not its media*: per Memory, the asset,
+  where in the record its URL sits (`filters.geoFilters[i]…`, and any other place the same record lists
+  it), the filter (type · carousel group · idValue), what the record says about it being selected (*yes*
+  / *no — the record names another filter* / *not recorded*), and the claim — flagged *another account's
+  claim* when its `USER_ID` is not the Memory's account. Each Memory's "?" quotes the record's field,
+  what it says of the selected filter and the Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE`.
+* **The Linked filter** gains *filter listed with a Memory (not its media)* (link value `Filter`), the
+  header a count line with its "?", the page a dashed-chip style — each written only when some entry has
+  such a link, so a report with none is byte for byte what it was. The run log gives the count on a line
+  of its own; it is not part of *linked to Memories*.
+* **Search** finds the entry by each listing Memory's snap id.
+
+None of it is the Memory link: `entry["memory"]` and the Memory rules 1–5 are untouched, the file is
+never decrypted with the Memory's key, and an entry with such a link is never a *Possible Memory* lead —
+the record accounts for the file. The partial-report edge is its own (`EDGE_MEMORY_FILTER_ASSET`, never
+`EDGE_MEMORY_CACHE`), followed only by the relations `mem_filter_assets` / `cache_filter_memories`, both
+off by default ([report_partial.md](report_partial.md)).
 
 ## Locating the bytes on disk
 
@@ -441,7 +479,10 @@ See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory**
 fallback), then byte-identity with a copy retrieved from Snapchat's servers (last; ☁ on the chip — see
 [cloud_download.md](cloud_download.md)); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
 and — so that every cache entry of a message links back, not only the file the chat report showed —
-by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
+by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`. Apart from all of
+these, **→ Memory, filter listed**: a claim key that is the URL of an asset of a geofilter a Memory's
+overlay record lists links to that Memory under a relation of its own, never as its media (see
+[above](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
 
 ## Android
 
@@ -453,7 +494,10 @@ Android app folder (`android_layout.is_app_dir`: a `databases/` folder and no `D
 it for both (`android_layout.scan`), `load_memory_index` reads the Memories from `memories.db`
 (`memories_android_report.memory_index`), and the few explanations that name a platform's columns take
 their words from `PLATFORM_WORDS` — `memories_snap._id` rather than `ZSNAPID`. Device paths are shown
-as `/data/data/com.snapchat.android/…`. See [snapchat_android.md](snapchat_android.md).
+as `/data/data/com.snapchat.android/…`. The overlay record a filter-asset link is made from is read on
+iOS only — its Android counterpart, if `memories.db` has one, was not examined — so the Android index has
+no `overlay_urls` and its report none of that link's chips, filter option or header line. See
+[snapchat_android.md](snapchat_android.md).
 
 ## Standalone use
 ```

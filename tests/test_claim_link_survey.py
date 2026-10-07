@@ -564,7 +564,54 @@ def test_a_full_media_key_carrying_a_memory_s_snap_id_counts_as_tied():
     assert survey._link_status(claim, {}, {}, None, snaps) == "Memory: its snap id in the key"
     assert survey._link_status(dict(claim, MEDIA_CONTEXT_TYPE=34), {}, {}, None, snaps) == "none"
     assert survey._link_status(claim, {}, {}, None, {}) == "none"
-    # the filter-record and creative-tools inputs are taken, by keyword, and change nothing yet
+    # the creative-tools input is taken, by keyword, and changes nothing yet; filter-record URLs
+    # change nothing for a key that is not one of them
     for status, snap_ids in (("Memory: its snap id in the key", snaps), ("none", {})):
         assert survey._link_status(claim, {}, {}, snap_ids=snap_ids, filter_urls={"x": 1},
                                    items={"x": 1}) == status
+
+
+FILTER_URL = "https://cf-st.example.net/d/AAAAAAAAAAAA?mo=QUJD%3D&uc=1"
+
+
+def _filter_urls(url=FILTER_URL):
+    asset = {"url": url, "key": url, "role": "filter image", "field": "filters.geoFilters[0].imageUrl",
+             "filter_id": "1", "filter_type": "STATIC", "group": "GEO_GROUP", "selected": None,
+             "wal": "main+wal", "has_overlay_image": 0}
+    return {url: [(CONV, "ab" * 32, asset)]}
+
+
+def test_a_key_a_memory_s_filter_record_lists_is_said_so_by_the_report_s_own_rule():
+    claim = {"EXTERNAL_KEY": FILTER_URL, "CACHE_KEY": "k", "MEDIA_CONTEXT_TYPE": 25,
+             "USER_ID": ACCT_A}
+    assert survey._link_status(claim, {}, {}, filter_urls=_filter_urls()) == survey.FILTER_STATUS
+    assert survey._link_status(claim, {}, {}) == "none"
+    for near_miss in (FILTER_URL.replace("uc=1", "uc=2"), FILTER_URL.replace("/d/", "/e/")):
+        assert survey._link_status(dict(claim, EXTERNAL_KEY=near_miss), {}, {},
+                                   filter_urls=_filter_urls()) == "none"
+    # the empty "?" a claim key can carry is the same URL, as in the report; a "?" that ends a query
+    # with something in it is part of that query, and is not
+    bare = "https://geofilter.example.net/png/synthetic-sky"
+    assert survey._link_status(dict(claim, EXTERNAL_KEY=bare + "?"), {}, {},
+                               filter_urls=_filter_urls(bare)) == survey.FILTER_STATUS
+    assert survey._link_status(dict(claim, EXTERNAL_KEY=FILTER_URL + "?"), {}, {},
+                               filter_urls=_filter_urls()) == "none"
+    # a message route comes first
+    record = {"conversation_id": CONV, "server_message_id": "7.0", "anchor": "m", "href": "x"}
+    assert survey._link_status(claim, {"k": [record]}, {}, filter_urls=_filter_urls()) == \
+        "message: attached file"
+
+
+def test_the_survey_reads_the_filter_records_of_the_app_folder(tmp_path):
+    import overlay_fixture as ofx
+    run = _run_folder(tmp_path)
+    app_dir = tmp_path / "run" / "ExtractedData" / "Application" / "APP"
+    ofx.scdb(str(app_dir), [(ofx.SNAP_A, ofx.overlay([ofx.geofilter("1", image=FILTER_URL)]), 0)])
+    conn = sqlite3.connect(str(app_dir / "Documents" / "global_scoped" / "cachecontroller"
+                               / "cache_controller.db"))
+    conn.execute("insert into CACHE_FILE_CLAIM values (?, 'k-filter', 25, ?)", (ACCT_A, FILTER_URL))
+    conn.commit()
+    conn.close()
+    payload = survey.survey(run, progress=lambda *_: None)
+    assert [s["status"] for s in payload["shapes"] if s["context"] == 25] == [
+        {survey.FILTER_STATUS: 1}]

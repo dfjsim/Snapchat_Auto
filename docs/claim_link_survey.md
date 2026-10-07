@@ -37,7 +37,12 @@ Run it on a run folder the full pipeline produced: the reports' own links are re
   cannot disagree: `message: attached file`, `message: named in the key`, `message: id in the key`
   (an id the message names its media by), `Memory-scoped key`, `Memory: its snap id in the key` (a
   full-media claim whose key carries a Memory's `ZSNAPID` — a Memory of the app folder the reports read
-  that `cache_controller.db` from, an iOS container or an Android app folder), or `none`.
+  that `cache_controller.db` from, an iOS container or an Android app folder), `Memory: listed in its
+  filter record` (a key that is the URL of an asset of a geofilter a Memory's overlay record,
+  `ZGALLERYSNAPDETAIL.ZOVERLAY`, lists — by the report's own `_overlay_links_for`, the whole URL; never
+  the Memory's media), or `none`. The first that applies, in that order. The record's URLs are still
+  found by the database scan below as `(text inside the blob)` of `scdb-27.sqlite3`, since a binary
+  plist is read there for its printable strings.
 * **The databases.** Every row of every table of every SQLite database of `ExtractedData/` (at most
   256 MB each — larger ones are listed as skipped), both readings. `arroyo.db` is what a link to a
   message reads; the others say what else holds an id — a Story, a preference, a Memory. For a claim,

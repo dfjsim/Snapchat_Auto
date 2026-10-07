@@ -424,6 +424,15 @@ matched on the **account name**, so dumps that export no `agrp` still work.
 | `ZWIDTH` / `ZHEIGHT` | full-media dimensions |
 | `ZHASLOCATION` | `1` if geolocation exists (coords live in `gallery.encrypteddb`) |
 | `ZENCRYPTION` | **new schema only** — `SCMemoriesSnapEncryption` bplist with `KEY`/`IV` |
+| `ZHASOVERLAYIMAGE` | `1` when the Memory records an overlay image |
+| `ZDETAIL` | the `Z_PK` of its `ZGALLERYSNAPDETAIL` row, when it has one (below) |
+
+`ZGALLERYSNAPDETAIL` (both schemas, plain — no keychain): `ZSNAP` is the Memory's `ZGALLERYSNAP.Z_PK`
+(`ZGALLERYSNAP.ZDETAIL` points back; at most one row per Memory, some have none), and `ZOVERLAY` is the
+Memory's overlay record, an NSKeyedArchiver archive of `SOJUGallerySnapOverlay` listing the snap's
+filters — the geofilters with the URLs of their image, sky image and font, and which one the record names
+as selected. `gallery.encrypteddb` holds no counterpart. Read by `scripts/data/snap_overlay.py`; see
+[report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay).
 
 ---
 

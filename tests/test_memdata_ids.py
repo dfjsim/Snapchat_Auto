@@ -27,9 +27,11 @@ def _container(snap=True, entry=True, uuid_as_bytes=False):
     objects = ["$null"]
     root = {"$class": None}
     objects.append(root)
+    objects.append({"$classname": "NSUUID", "$classes": ["NSUUID", "NSObject"]})
+    nsuuid = plistlib.UID(len(objects) - 1)
 
     def record(u, ms, kind):
-        value = {"NS.uuidbytes": uuid.UUID(u).bytes, "$class": plistlib.UID(0)} if uuid_as_bytes else u
+        value = {"NS.uuidbytes": uuid.UUID(u).bytes, "$class": nsuuid} if uuid_as_bytes else u
         objects.append(value)
         u_ref = plistlib.UID(len(objects) - 1)
         objects.append(ms)
@@ -79,7 +81,11 @@ def test_anything_else_stays_a_blob():
              {"$classname": "SomethingElse", "$classes": ["SomethingElse"]}]
     bad_uuid = ["$null", {"uuid": plistlib.UID(2), "$class": plistlib.UID(3)}, "not-a-uuid",
                 {"$classname": mr.MEMDATA_RECORD, "$classes": [mr.MEMDATA_RECORD]}]
-    for blob in (_archive(other), _archive(bad_uuid), b"bplist00garbage", b"\x00" * 40, None):
+    # a damaged class hierarchy — a dictionary where a class name belongs — is not read, nor raised
+    bad_classes = ["$null", {"uuid": plistlib.UID(2), "$class": plistlib.UID(3)}, SNAP_MD,
+                   {"$classname": mr.MEMDATA_RECORD, "$classes": [mr.MEMDATA_RECORD, {"x": 1}]}]
+    for blob in (_archive(other), _archive(bad_uuid), _archive(bad_classes), b"bplist00garbage",
+                 b"\x00" * 40, None):
         assert mr.decode_memdata(blob) is None
     assert mr._other_value("ZMEMDATAIDS", b"\x01" * 12, None) == "<blob 12 bytes>"
 

@@ -318,6 +318,56 @@ parse, as a string or an `NSUUID` — and the value cell then reads
 the size marker. The uuids are searchable, and each creation time is a row of the Memory's timestamps
 (tagged with its column and slot), so the time filter finds it.
 
+### The overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`)
+
+scdb-27 keeps at most one `ZGALLERYSNAPDETAIL` row per Memory (`Z_PK`, `Z_ENT`, `Z_OPT`, `ZSNAP`,
+`ZOVERLAY`): `ZSNAP` is the Memory's `ZGALLERYSNAP.Z_PK`, and `ZGALLERYSNAP.ZDETAIL` points back; some
+Memories have none. `ZOVERLAY` is not protobuf but an NSKeyedArchiver binary plist whose root is a
+`SOJUGallerySnapOverlay`. It is in the plain scdb-27 on both storage schemas — `gallery.encrypteddb`
+holds nothing like it — so no keychain is needed. `scripts/data/snap_overlay.py` reads it, through the
+strict keyed-archive resolver (`scripts/data/keyed_archive.py`, which `decode_memdata` uses too), and
+joins each record to its snap **inside each reading** of the database (`read_overlays`), so a record
+only the checkpointed reading holds is joined to that reading's snap row. A record of another layout —
+another root class, other field names — gives nothing, never a guess.
+
+The root's `filters` (`SOJUGalleryFilters`) holds lists of filters, each list beside a field of its own
+that names the selected one: `geoFilters` with `geoFilterSelectedId` / `geoFilterSelectedIds`,
+`visualFilters` with `visualFilterSelectedType`, `infoFilters` with `infoFilterSelectedType`,
+`contextFilters` with `contextFilterSelectedId`, `venueFilter` with `venueFilterSelected`, `streakFilter`
+with `streakFilterSelected`. A geofilter (`SOJUGalleryGeoFilter`) carries an `idValue`, a `type`, an
+`unlockableContentType`, a `carouselGroup` (`groupName`), an `imageUrlParams` dictionary, and three
+fields that hold a URL:
+
+| Field, in `filters.geoFilters[i]` | Asset |
+|---|---|
+| `imageUrl` | the filter image |
+| `arSegmentation.sky.replacementSkyUrl` | the sky image |
+| `geofilterMarkups[j].displayParameters.font` | the font of the filter's text |
+
+`arSegmentation.sky.blimpUrl` is read the same way when it holds a URL. A geofilter whose
+`imageUrlParams` has entries (the Bitmoji filters) gives one shared address as its `imageUrl`, the
+image being in the parameters, so that URL is never an asset.
+
+**A listed filter is not shown to be on the Memory.** A record commonly lists several geofilters and
+names the selected one in a field of its own — often none — so the reports say *listed*, and *selected* only
+where the record names that filter's `idValue`; never *used* or *applied*. Which listed filter, if any,
+is on the Memory's saved overlay the record does not say; `ZGALLERYSNAP.ZHASOVERLAYIMAGE` (in the
+snap's values) says whether the Memory has an overlay image at all. On the newest app versions examined
+the `geoFilters` list was empty, so on a current extraction this may rarely link anything.
+
+When a `cache_controller.db` claim's `EXTERNAL_KEY` is one of those URLs — the whole URL, by
+`snap_overlay.normalise_url` — the Memory's page gets a section after *Media files*: **Cached assets of
+filters listed with this Memory — not its media**. A line per Memory says how many geofilters its record
+lists and which one it names as selected; then a row per cached file: the 🗄 link to its cache entry,
+the asset, where in the record its URL sits, the filter (type · carousel group · idValue), what the
+record says about it being selected, and the claim (context, EXTERNAL_KEY, and *another account's
+claim* where the claim's `USER_ID` is not the Memory's account). On a page several Memories share, a
+Snap column says whose record lists each one. The files are not decrypted, are not the Memory's media,
+and are not in the index row, its search text or the cache keys a selection names the Memory by
+(`_cache_tokens`). The cache_controller report makes the same match from its side
+(`_overlay_links_for`); see [cross_report_linking.md](cross_report_linking.md). The rest of the record —
+the info filters, the venue filter, the captions — is not reported.
+
 ### Embedded metadata — what the file says about itself
 
 `scripts/data/media_meta.py` reads the metadata **inside** each recovered file, once per distinct
@@ -413,6 +463,11 @@ Below the table, *Library/Caches — files linked to this Memory* lists every ro
 and how — a pack decrypted with this Memory's key, a file keyed by its CDN URL, or one byte-identical
 to its media. That report renders after this one, so the list comes from its
 `CacheMedia/data/memory_links.js`, loaded at view time (`scripts/memory_backlinks.py`).
+
+Between the two, *Cached assets of filters listed with this Memory — not its media* lists the cache
+entries whose claim key is the URL of an asset of a geofilter the Memory's overlay record lists (see
+[the overlay record](#the-overlay-record-zgallerysnapdetailzoverlay)). They are files linked to the
+Memory, not files its media came from, and are kept out of the table above for that reason.
 
 ### Possible cached file — the cache_controller report's leads, from this side
 
@@ -552,7 +607,9 @@ the same treatment in the cache_controller report. See
 For each recovered media file whose `CACHE_KEY` is present in `cache_controller.db`
 (`all_cache_keys`), the file's "Source cache" cell shows a 🗄 link to
 `../CacheController/CacheController_report.html#ck-<CACHE_KEY>`. `.pack` files (not indexed there)
-get no such link. See [cross_report_linking.md](cross_report_linking.md).
+get no such link. A cached asset of a filter the Memory's overlay record lists links to its entry the
+same way, from its own section (see [the overlay record](#the-overlay-record-zgallerysnapdetailzoverlay)).
+See [cross_report_linking.md](cross_report_linking.md).
 
 ## Standalone use
 ```
