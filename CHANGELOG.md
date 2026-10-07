@@ -21,7 +21,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   by the URL of an asset of a filter a Memory's overlay record lists has a status of its own, `Memory:
   listed in its filter record`, by the cache_controller report's own `_overlay_links_for`, and so has
   one an item of a creative-tools store names, `creative-tools item (ctp__item_5)`, by
-  `ctp_items.match`.
+  `ctp_items.match`, and one whose key names a message no row is there for in a conversation the
+  Conversations report lists, `conversation: named in the key`, by `_conversation_links_for` — checked
+  right after the message routes.
   See [docs/claim_link_survey.md](docs/claim_link_survey.md).
 - **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
   Conversations reports.
@@ -39,7 +41,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   conversation it does not hold, claimed by another account, is one no rule written from that
   `arroyo.db` can tie — said only when every `arroyo.db` names its account. Every `arroyo.db` of the
   extraction is read, a table that will not read in either reading makes it unread rather than empty
-  (`_rows`), and a message the server never numbered counts as held by its `client_message_id`. A
+  (`_rows`), and so does a `-wal` beside a file that will not open without it (its checkpointed
+  reading was not read), and a message the server never numbered counts as held by its
+  `client_message_id`. A
   claim's snap id is looked up in the Memories of the app folder the reports read its
   `cache_controller.db` from (`_apps`), which on Android is not four folders above it.
 - **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
@@ -80,6 +84,27 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   sub-table and a `[ubyte]` vector (`table_field`, `bytes_field`, `string_field(…, table=)`), and
   `trace_ids.base64_bytes` moved to `scripts/data/base64_text.py`, still re-exported. See
   [docs/report_cache_controller.md](docs/report_cache_controller.md).
+- **A cached file whose claim names a message arroyo.db does not hold is tied to the conversation** —
+  `cache_controller_report._conversation_links_for`, `conversations_report.load_arroyo_messages`. A chat
+  claim's key (`<type>:<conversation>:<message>:<part>`) names a conversation as well as a message.
+  When no chat link reaches the message and the arroyo.db the run read holds no message of that number
+  in that conversation, in either reading — or, for a conversation the Conversations report lists, its
+  messages were not read, which the "?" says is not known — the entry is tied to the conversation,
+  never to a message: a dashed chip to the conversation's page when the Conversations report lists it,
+  otherwise a stated fact and a chip that filters the report to every entry naming the same
+  conversation (`#find=`). A message arroyo.db holds makes no tie. Each "?" says what that arroyo.db
+  holds of the conversation — that no conversation table names it only when they read in full — and,
+  when both are known, whether each claim's `USER_ID` is its account (`required_values` `USERID`): on a
+  phone with two accounts the second account's claims can name conversations and messages that
+  database need never have held, so no wording says "no longer". Counted apart from chat links (*tied
+  only to a conversation*), with a *Linked* option of its own (*no message row*), and never a lead; the
+  header count and the option appear only when some entry is tied only to a conversation, the chip
+  style whenever some entry has a tie. The Conversations manifest (`cache_links.json`, still version 3)
+  gains `conversations` (every listed conversation, with its header anchor and whether arroyo.db holds
+  it) and `arroyo` (its account, the message numbers it holds and whether its conversation tables read
+  in full, read from arroyo.db itself in both readings — unknown, not empty, when a reading will not
+  read or the checkpointed copy will not open), the latter left out of a partial extract. See
+  [docs/cross_report_linking.md](docs/cross_report_linking.md).
 
 ### Fixed
 - **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`
@@ -128,12 +153,15 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   this build no longer has is dropped instead of making the run refuse its own `--relations` spec.
 
 ### Changed
-- **Two partial-report relations for the filter-asset link, both off by default** —
+- **Partial-report relations for the filter-asset link and the conversation tie** —
   `partial_report.EDGE_MEMORY_FILTER_ASSET`: `mem_filter_assets` (the cached assets of the filters a
   selected Memory's overlay record lists) and `cache_filter_memories` (every Memory whose record lists a
-  selected cache entry's asset). The file is not the Memory's media and one asset is listed with many
-  Memories, so neither is followed unless asked, and `mem_cache` / `cache_memory` never follow this
-  edge. See [docs/report_partial.md](docs/report_partial.md).
+  selected cache entry's asset), both off by default. The file is not the Memory's media and one asset
+  is listed with many Memories, so neither is followed unless asked, and `mem_cache` / `cache_memory`
+  never follow this edge. `partial_report.EDGE_CONV_CACHE`: `cache_conversation` (the conversation a
+  selected cache entry's claim names, for a message no row is there for — its row and page, not its
+  messages), on by default, and `conv_cache` (the reverse), off like `conv_messages`; recorded only for
+  a conversation the Conversations report lists. See [docs/report_partial.md](docs/report_partial.md).
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
   3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required

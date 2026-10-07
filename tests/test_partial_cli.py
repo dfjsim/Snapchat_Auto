@@ -249,6 +249,18 @@ def test_a_relation_added_since_the_policy_was_saved_keeps_its_default():
     assert app._saved_relations({"partial": {"relations": "msg_cache"}}) == recommended
 
 
+def test_a_policy_saved_before_the_conversation_tie_follows_it_but_not_the_reverse():
+    """A policy saved by a build without the conversation-tie relations: the tie from a cache entry to
+    its conversation (on by default) is followed, the reverse (off by default) is not."""
+    saved = {k: on for k, on in partial_report.PRESETS["recommended"].items()
+             if k not in ("cache_conversation", "conv_cache")}
+    state = app._saved_relations({"partial": {"relations": saved}})
+    assert state["cache_conversation"] is True and state["conv_cache"] is False
+    spec = app._relations_spec({"relations": state, "transitive": False, "legacy_reports": False})
+    parsed = partial_report.parse_relations(spec)
+    assert parsed["cache_conversation"] is True and parsed["conv_cache"] is False
+
+
 def test_an_empty_dialog_means_minimal_not_recommended():
     """A dialog with every box cleared must not fall back to the default set."""
     spec = app._relations_spec({"relations": {}, "transitive": False, "legacy_reports": False})

@@ -356,10 +356,12 @@ def test_an_arroyo_db_that_will_not_read_is_not_one_that_holds_nothing(tmp_path)
         assert any("could not be read in full" in line for line in said), case
 
 
-def _checkpoint_then_wal(path, before, after, damage=()):
+def _checkpoint_then_wal(path, before, after, damage=(), header=False):
     """Build ``path`` from the ``before`` statements, checkpointed into the file, and leave the
     ``after`` statements in its -wal only. The root page of each ``damage`` table is overwritten
-    in the file alone, so only the checkpointed reading meets it."""
+    in the file alone, so only the checkpointed reading meets it; ``header`` overwrites the file's
+    own 16-byte header, so the file will not open without its -wal (``after`` must then change the
+    schema, which puts page 1 in the -wal)."""
     conn = sqlite3.connect(path)
     conn.execute("pragma journal_mode=wal")
     _sql(conn, before)
@@ -369,6 +371,8 @@ def _checkpoint_then_wal(path, before, after, damage=()):
     checkpointed = bytearray(open(path, "rb").read())
     for root in roots:
         checkpointed[(root - 1) * size:root * size] = b"\xff" * size
+    if header:
+        checkpointed[0:16] = b"\xff" * 16
     conn = sqlite3.connect(path)
     conn.execute("pragma wal_autocheckpoint=0")
     _sql(conn, after)
@@ -468,6 +472,27 @@ def test_a_checkpointed_copy_that_will_not_read_is_not_one_that_holds_nothing(tm
     for number in ("5", "404"):
         assert survey._named_label(CONV, number, ACCT_A, held, convs, accounts,
                                    read=not unread) == survey.NAMED_NOT_READ
+
+
+def test_a_checkpointed_copy_that_will_not_open_is_not_one_that_holds_nothing(tmp_path):
+    """The file's own header is damaged and only the -wal reading opens: the message the -wal
+    deleted, in the checkpointed copy alone, was never read, so the file is unread."""
+    from scripts.data import sqlite_open
+    path = str(tmp_path / "arroyo.db")
+    _checkpoint_then_wal(path, [
+        "create table conversation_message (client_conversation_id text, server_message_id integer)",
+        ("insert into conversation_message values (?, 5), (?, 6)", (CONV, CONV)),
+    ], ["delete from conversation_message where server_message_id = 5",
+        "create table other (x)"], header=True)
+    views = sqlite_open.open_views(path)
+    try:
+        assert views.merged is not None and views.main_only is None
+    finally:
+        views.close()
+    held, convs, accounts, unread, _nameless = survey._arroyo_facts([path])
+    assert unread == [path]
+    assert survey._named_label(CONV, "5", ACCT_A, held, convs, accounts,
+                               read=not unread) == survey.NAMED_NOT_READ
 
 
 def _second_arroyo(tmp_path, userid=None):
@@ -647,3 +672,61 @@ def test_the_survey_reads_every_creative_tools_store_of_the_app_folder(tmp_path)
     stickers = next(s for s in payload["shapes"]
                     if s["shape"] == f"customSticker~<b64:{len(STICKER_BYTES)}>")
     assert stickers["status"] == {"none": 1, survey.ITEM_STATUS: 1}
+
+
+LISTED_CONV = "f1f1f1f1-2222-4333-8444-555555555555"    # listed by the report, no message 404 in it
+
+
+def _with_conversation_sections(tmp_path):
+    """The run's chat manifest as the current build writes it: every listed conversation, and what
+    the arroyo.db the run read holds — here LISTED_CONV, of no message, and CONV's messages."""
+    path = tmp_path / "run" / "Reports" / "Conversations" / "cache_links.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["conversations"] = {LISTED_CONV: {"title": "Chat", "href": "Conversations/pages/l.html",
+                                           "anchor": f"conv-{LISTED_CONV}", "messages": 0,
+                                           "in_arroyo": False}}
+    data["arroyo"] = {"read": True, "account": ACCT_A, "held": {CONV: [7, 9]}}
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_a_key_naming_a_listed_conversation_is_tied_to_it_by_the_report_s_own_rule(tmp_path):
+    """A message no row is there for, in a conversation the report lists: the report ties the file
+    to the conversation, so the claim leaves `none` — while one naming a conversation no report
+    lists is a stated fact there, not a link, and keeps its label."""
+    run = _run_folder(tmp_path)
+    _with_conversation_sections(tmp_path)
+    _add_claims(tmp_path, [(ACCT_B, "k-listed", f"listed~1:{LISTED_CONV}:404:0:0"),
+                           (ACCT_B, "k-other", f"other~1:{OTHER_CONV}:5:0:0")])
+    payload = survey.survey(run, progress=lambda *_: None)
+    status = {s["shape"].split("~")[0]: s["status"] for s in payload["shapes"]}
+    assert status["listed"] == {survey.CONVERSATION_STATUS: 1}
+    assert status["other"] == {"none": 1}
+    assert _named(payload) == {
+        "other": {"names a conversation arroyo.db does not hold — claimed by another account": 1}}
+    out = survey.write_report(run, payload)
+    written = open(out, encoding="utf-8").read() + "\n".join(survey.describe(payload))
+    for secret in (LISTED_CONV, OTHER_CONV, ACCT_A, ACCT_B, "k-listed"):
+        assert secret not in written, secret
+
+
+def test_a_conversation_tie_comes_after_the_message_routes_and_before_a_memory(tmp_path):
+    from scripts import cache_controller_report as cc
+    _run_folder(tmp_path)
+    _with_conversation_sections(tmp_path)
+    reports = str(tmp_path / "run" / "Reports")
+    by_key, by_message = cc.load_chat_links(reports)
+    ids = cc.load_chat_ids(reports, by_message)
+    claim = {"EXTERNAL_KEY": f"1:{LISTED_CONV}:404:0:0", "CACHE_KEY": "k", "MEDIA_CONTEXT_TYPE": 19,
+             "USER_ID": ACCT_A}
+    assert survey._link_status(claim, by_key, by_message, ids) == survey.CONVERSATION_STATUS
+    # a message route first: the file the chat join attached
+    record = {"conversation_id": CONV, "server_message_id": "7.0", "anchor": "m", "href": "x"}
+    assert survey._link_status(claim, {"k": [record]}, by_message, ids) == "message: attached file"
+    # before a Memory: the key's UUID is a Memory's snap id as well
+    snaps = {LISTED_CONV.upper(): (LISTED_CONV, "h")}
+    assert survey._link_status(claim, by_key, by_message, ids, snaps) == survey.CONVERSATION_STATUS
+    assert survey._link_status(claim, by_key, by_message, None, snaps) == \
+        "Memory: its snap id in the key"
+    # a message arroyo.db holds is no tie (the report lists no message 9 of it here: a missing rule)
+    held = dict(claim, EXTERNAL_KEY=f"1:{CONV}:9:0:0")
+    assert survey._link_status(held, by_key, by_message, ids) == "none"

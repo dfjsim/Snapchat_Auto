@@ -658,10 +658,16 @@ class ChatIdIndex:
     * ``by_number``: every message by its conversation and bare message number, so a claim key that
       names message 12 finds it whether the report lists it as ``12.0`` or under another part;
     * the ids each message names its media by (``by_content_id``, see
-      ``arroyo_content.content_ids``), indexed by the token a claim key would carry them as.
+      ``arroyo_content.content_ids``), indexed by the token a claim key would carry them as;
+    * every conversation the report lists (``conversations``), and what the arroyo.db the run read
+      holds (``arroyo``: whether its messages and its conversation tables were read, its account,
+      the message numbers of each conversation) — for a claim whose key names a message no row is
+      there for
+      (:func:`_conversation_links_for`). Without an ``arroyo`` section (an older manifest, or the
+      legacy Communications one) neither is known, and nothing is tied to a conversation.
     """
 
-    def __init__(self, by_message, by_content_id=None):
+    def __init__(self, by_message, by_content_id=None, conversations=None, arroyo=None):
         self.by_number = {}
         for key, records in by_message.items():
             conv, _bar, smid = key.partition("|")
@@ -678,6 +684,41 @@ class ChatIdIndex:
             token = _content_token(cid)
             if records and token:
                 self.by_token.setdefault(token, []).append((cid, records))
+        arroyo = arroyo if isinstance(arroyo, dict) else None
+        # by lower-case id, each carrying the id as the report spells it (its anchor is built from it)
+        self.conversations = {str(conv).lower(): dict(rec, id=conv)
+                              for conv, rec in ((conversations or {}).items() if arroyo else ())
+                              if isinstance(rec, dict)}
+        self.arroyo_read = bool(arroyo and arroyo.get("read"))
+        # whether its conversation tables were read in full: what saying none of them names a
+        # conversation rests on (a manifest without the flag has not said so)
+        self.conversations_read = bool(arroyo and arroyo.get("conversations_read"))
+        self.arroyo_account = str((arroyo or {}).get("account") or "").strip().lower()
+        self.held = None                         # conversation -> {message number}; None: not read
+        if self.arroyo_read:
+            self.held = {}
+            for conv, numbers in (arroyo.get("held") or {}).items():
+                self.held[str(conv).lower()] = {n for n in map(_as_number, numbers or ())
+                                                if n is not None}
+
+    def conversation(self, conv):
+        """The Conversations report's record of conversation ``conv`` (any letter case), or None
+        when it does not list it."""
+        return self.conversations.get(str(conv or "").lower())
+
+    def holds(self, conv, number):
+        """Whether the arroyo.db the run read holds message ``number`` of conversation ``conv``, in
+        either reading: True / False, or None when its messages were not read."""
+        if self.held is None:
+            return None
+        return _as_number(number) in self.held.get(str(conv or "").lower(), ())
+
+    def holds_any(self, conv):
+        """Whether that arroyo.db holds any message of ``conv``; None when its messages were not
+        read."""
+        if self.held is None:
+            return None
+        return bool(self.held.get(str(conv or "").lower()))
 
     def message(self, conv, number):
         """Every record of message ``number`` in conversation ``conv``, lowest part first."""
@@ -705,6 +746,12 @@ _CONTENT_RUN = re.compile(r"[A-Za-z0-9+/=_-]{8,}")
 _CONTENT_B64 = re.compile(r"[A-Za-z0-9+/=]{8,}")
 
 
+def _as_number(value):
+    """A message number as an int (``12``, ``"12"``, ``"012"``, ``"12.0"`` are all 12), or None."""
+    number = arroyo_content.message_number(value)
+    return int(number) if number else None
+
+
 def _content_token(cid):
     """What a claim key holds a content id as: its UUID when it has one, else its longest run."""
     mo = _CONTENT_UUID.search(cid)
@@ -716,16 +763,18 @@ def _content_token(cid):
 
 def load_chat_ids(report_dir, by_message):
     """A :class:`ChatIdIndex` over the chat manifest ``load_chat_links`` read (Conversations only:
-    the legacy manifests carry no content ids)."""
-    content = {}
+    the legacy manifests carry no content ids, conversations or arroyo.db facts)."""
+    data = {}
     cand = os.path.join(report_dir or "", "Conversations", "cache_links.json")
     if os.path.isfile(cand):
         try:
             with open(cand, encoding="utf-8") as fh:
-                content = (json.load(fh) or {}).get("by_content_id") or {}
+                data = json.load(fh) or {}
         except Exception as error:                                 # noqa: BLE001
             logger.debug(f"Could not read the content ids of {cand}: {error}")
-    return ChatIdIndex(by_message, content)
+    data = data if isinstance(data, dict) else {}
+    return ChatIdIndex(by_message, data.get("by_content_id") or {},
+                       conversations=data.get("conversations"), arroyo=data.get("arroyo"))
 
 
 def load_memory_media(report_dir):
@@ -1297,6 +1346,205 @@ def _chat_links_for(clist, cache_key, by_key, by_message, ids=None):
     return out
 
 
+CONV_TIE_BASIS = (
+    "A chat claim's EXTERNAL_KEY names a conversation and a message "
+    "(<type>:<conversation>:<message>:<part>), and there is no message row to link it to: the "
+    "arroyo.db this run read holds no message of that number in that conversation, in either reading "
+    "(with and without its -wal) — or, for a conversation the Conversations report lists, its "
+    "messages could not be read. Such an entry is tied to the conversation the key names, never to a "
+    "message: the chip opens the conversation when the Conversations report lists it, and otherwise "
+    "filters this report to every entry whose claim names the same conversation. Each chip's \"?\" "
+    "says which, and whose account made the claim. Counted apart from the entries linked to a chat.")
+
+
+def _conversation_links_for(clist, chats, ids):
+    """The conversations this entry's claims name, for a message that is not there to link to.
+
+    A claim key of the chat shape (:data:`_CHAT_EK_RE`) names a conversation and a message. When no
+    chat link of the entry (``chats``, :func:`_chat_links_for`) reaches that message and the
+    Conversations report lists no message of that number, the key still names the conversation —
+    and that is all it is tied to:
+
+    * a message the arroyo.db the run read **holds** makes no tie: a report that does not list it is
+      missing a rule, which ``--survey-claim-links`` is for, not this;
+    * a conversation the report lists is a link (``route`` "conversation"), to its page;
+    * one it does not list is a stated fact (``route`` "named"), and only when that arroyo.db's
+      messages were read — absent from both its readings, not merely absent from the report.
+
+    ``ids`` is the :class:`ChatIdIndex`; with none, or one whose manifest has no ``arroyo`` section,
+    nothing is tied. One record per (conversation, message), the parts of every claim naming it in
+    ``parts`` and every claim's key and account in ``claims``: one entry can be claimed by two
+    accounts, and the "?" says whose each claim is. ``user_id`` is arroyo.db's own account when a
+    claim is that account's (as :func:`_ctp_hits` prefers its own-account hit), else the first account
+    a claim names.
+    """
+    if ids is None:
+        return []
+    reached = {(str(ch.get("conversation_id") or "").lower(),
+                _as_number(ch.get("server_message_id"))) for ch in chats or ()}
+    ties = {}
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        mo = _CHAT_EK_RE.match(ek)
+        if not mo:
+            continue
+        conv, number = mo.group("conv").lower(), _as_number(mo.group("msg"))
+        if (conv, number) in reached or ids.message(conv, mo.group("msg")):
+            continue
+        held = ids.holds(conv, number)
+        record = ids.conversation(conv)
+        if held is True or (held is None and record is None):
+            continue
+        tie = ties.get((conv, number))
+        if tie is None:
+            listed = record is not None
+            tie = ties[(conv, number)] = {
+                "route": "conversation" if listed else "named",
+                "conversation_id": record["id"] if listed else mo.group("conv"),
+                "number": str(number), "parts": [], "external_keys": [], "claims": [],
+                "external_key": ek, "user_id": "",
+                "listed": listed, "held": held,
+                "in_arroyo": bool(listed and record.get("in_arroyo")) or bool(ids.holds_any(conv)),
+            }
+            if listed:
+                tie.update(href=record.get("href") or "", title=record.get("title") or "",
+                           anchor=record.get("anchor") or f"conv-{record['id']}")
+        if mo.group("part") not in tie["parts"]:
+            tie["parts"].append(mo.group("part"))
+        if ek not in tie["external_keys"]:
+            tie["external_keys"].append(ek)
+        claim = (ek, str(c.get("user_id") or "").strip())
+        if claim not in tie["claims"]:
+            tie["claims"].append(claim)
+    out = []
+    for tie in ties.values():
+        tie["parts"].sort(key=int)
+        users = [user for _ek, user in tie["claims"] if user]
+        tie["user_id"] = next((u for u in users if u.lower() == ids.arroyo_account),
+                              users[0] if users else "")
+        tie["basis"] = _conversation_basis(tie, ids)
+        out.append(tie)
+    return out
+
+
+def _conversation_basis(tie, ids):
+    """The explanation of one conversation tie (:func:`_conversation_links_for`).
+
+    What the arroyo.db the run read holds is said of **that** database — "the arroyo.db this run
+    read", in both readings — never of the extraction; and never "no longer": nothing in either
+    reading shows the message was ever there. Every claim's account is compared with that
+    database's own (its ``required_values`` USERID) when both are known (:func:`_claim_accounts`),
+    because a second account's cache sits beside the first account's chat database on a phone with
+    two, and its claims name conversations and messages that database need never have held. That no
+    conversation table names a conversation is said only when they were read in full
+    (``ChatIdIndex.conversations_read``).
+    """
+    conv, n, keys = tie["conversation_id"], tie["number"], tie["external_keys"]
+    parts = tie["parts"]
+    named = (f'The claim EXTERNAL_KEY "{keys[0]}" names' if len(keys) == 1 else
+             "The claim EXTERNAL_KEYs " + ", ".join(f'"{k}"' for k in keys) + " name")
+    text = (f"{named} conversation {conv}, message {n} ({'part' if len(parts) == 1 else 'parts'} "
+            f"{', '.join(parts)}) — the <type>:<conversation>:<message>:<part> shape of a chat claim "
+            f"key.")
+    whose, own, others, theirs = _claim_accounts(tie, ids.arroyo_account)
+    absent = (f"The arroyo.db this run read holds no message {n} of this conversation, in either "
+              f"reading (with and without its -wal)")
+    opens = " The link opens the conversation, not a message: there is no message row to point at."
+    unread = ("arroyo.db's conversation tables would not read in full in this run, so whether a "
+              "conversation, feed_entry or user_conversation row names it is not known")
+    if tie["listed"] and tie["held"] is None:                                       # E
+        return (text + whose + " arroyo.db's messages were not read in this run (no arroyo.db was "
+                f"read, or its conversation_message table was not read in full, in both readings), "
+                f"so whether it holds message {n} is not known; the Conversations report lists this "
+                f"conversation, with no message {n} in it." + opens)
+    if tie["listed"] and tie["in_arroyo"]:                                          # A, B
+        text += (f" {absent}, though it holds the conversation itself — a message of it, or a "
+                 f"conversation, feed_entry or user_conversation row: no conversation_message row "
+                 f"has this client_conversation_id and message number {n} (its server_message_id, or "
+                 f"the client_message_id of a message the server never numbered).")
+        if own:
+            return (text + whose + " So the account cached a file of a message its own chat database "
+                    "does not hold; only a recovery of deleted records could say whether it ever "
+                    "held one." + opens)
+        if others:
+            return (text + whose + f" {theirs}, the message may never have been in this database."
+                    + opens)
+        return text + opens
+    if tie["listed"]:                                                               # C
+        tables = (", and no conversation, feed_entry or user_conversation row; the Conversations "
+                  "report lists it from the friends / groups lists or from cached chat files, not "
+                  "from arroyo.db." if ids.conversations_read else
+                  f"; {unread}. The Conversations report lists it from the friends / groups lists or "
+                  f"from cached chat files.")
+        return text + f" {absent} — no message of it at all" + tables + whose + opens
+    holds = ids.holds_any(conv)                                                    # D
+    text += f" {absent}"
+    if holds:
+        text += ("; it holds other messages of this conversation, but the Conversations report does "
+                 "not list it, so there is no page to link to.")
+    elif ids.conversations_read:
+        text += (", nor any other message of it, and no report lists the conversation: neither "
+                 "arroyo.db's conversation tables nor the friends / groups lists name it.")
+    else:
+        text += (", nor any other message of it, and no report lists the conversation: the friends "
+                 f"/ groups lists do not name it, and {unread}.")
+    text += whose
+    if others and not own:
+        # a database that holds messages of the conversation held the conversation: only the
+        # message can be one it never held
+        text += (f" {theirs}, the message may never have been in this database." if holds else
+                 " The conversation may be one of " + " or ".join(f"{u}'s" for u in others)
+                 + " that the database this run read never held.")
+    return (text + " The chip filters this report to every cache entry whose claim names the same "
+            "conversation.")
+
+
+def _claim_accounts(tie, account):
+    """Whose claims name a tie's message, against ``account`` — arroyo.db's own, lower case, "" when
+    not known: ``(sentence, own, others, theirs)``.
+
+    ``sentence`` is what the "?" says of it; ``own`` whether a claim is that account's; ``others`` the
+    other accounts that made one, as their claims spell them; ``theirs`` the subject of the sentence
+    that draws the other-account conclusion ("The claim being another account's"). Every claim's
+    account, never only the first's: one entry can be claimed by two accounts, and the own account's
+    claim is the stronger evidence. Nothing is said when ``account`` is not known or no claim names
+    an account.
+    """
+    claims = tie.get("claims") or [(tie.get("external_key") or "", tie.get("user_id") or "")]
+    by_user = {}                                   # lower-case account -> (as spelled, [its keys])
+    for ek, user in claims:
+        keys = by_user.setdefault(user.strip().lower(), (user.strip(), []))[1]
+        if ek not in keys:
+            keys.append(ek)
+    others = [spelled for low, (spelled, _keys) in by_user.items() if low and low != account]
+    own = bool(account) and account in by_user
+    if not (account and (own or others)):
+        return "", False, [], ""
+    belongs = f"the arroyo.db this run read belongs to account {account} (its required_values USERID)"
+    many = len(claims) > 1
+    if len(by_user) == 1:                          # every claim one account's
+        if own:
+            return (f" The claim{'s were' if many else ' was'} made by the account that arroyo.db "
+                    f"belongs to (its required_values USERID).", True, [], "")
+        return (f" {'These claims were' if many else 'This claim was'} made by account {others[0]}; "
+                f"{belongs}.", False, others,
+                f"The claim{'s' if many else ''} being another account's")
+    said = []
+    for low, (spelled, keys) in by_user.items():
+        quoted, one = ", ".join(f'"{k}"' for k in keys), len(keys) == 1
+        said.append(f"{quoted} {'was' if one else 'were'} made by the account that arroyo.db belongs "
+                    f"to" if low == account else
+                    f"{quoted} {'was' if one else 'were'} made by account {spelled}" if low else
+                    f"{quoted} {'names' if one else 'name'} no account (no USER_ID)")
+    lowered = {u.lower() for u in others}
+    theirs_n = sum(1 for _ek, user in claims if user.strip().lower() in lowered)
+    theirs = (f"The claim{'s' if theirs_n > 1 else ''} of "
+              + " and ".join(f"account {u}" for u in others)
+              + (" being another account's" if len(others) == 1 else " being other accounts'"))
+    return (f" Of the claims naming it, {'; '.join(said)}. {belongs[0].upper()}{belongs[1:]}.",
+            own, others, theirs)
+
+
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
                   chat_by_message=None, workdir=None, memory_content=None, chat_ids=None,
                   ctp_index=None):
@@ -1440,6 +1688,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
         chats = _chat_links_for(clist, key, chat_links, chat_by_message or {}, chat_ids)
+        # a key naming a message no row is there for: tied to the conversation, never to a message
+        conv_links = _conversation_links_for(clist, chats, chat_ids)
         # an asset of a filter a Memory's overlay record lists: a relation of its own, never the
         # Memory link above (see FILTER_LISTED_BASIS)
         filters = _overlay_links_for(clist, overlay_urls, memory_pages,
@@ -1493,6 +1743,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
             "ctp_items": items,
             "content_proof": proofs,
             "chats": chats,
+            "conv_links": conv_links,
             "tombstones": tomb_by_key.get(key, []),
             "created_sort": created_sort,
         })
@@ -1590,7 +1841,7 @@ def orphan_entries(scfull, scparts, claimed_paths, ms_fmt):
             "children": [], "retrieval": {},
             "on_disk": {"paths": paths, "bytes": sum(_size(p) for p in paths), "found": True,
                         "scope_by_path": {p: _scope_user(p) for p in paths}, "cross_scope": []},
-            "memory": None, "memory_basis": None, "chats": [], "tombstones": [],
+            "memory": None, "memory_basis": None, "chats": [], "conv_links": [], "tombstones": [],
             "meta_prior": [], "cache_media": [],
             "created_sort": 0, "orphan": True,
         })
@@ -2093,6 +2344,28 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
                                     f'💬 Chat{label}</a>',
                                     target_rows, closure=closure, brief=compact)
                      + why(ch.get("basis")))
+    # A claim naming a message no row is there for: tied to the conversation, dashed, and never
+    # worded as a message link. A conversation the Conversations report lists opens at its page's
+    # header (the same target window and fragment the Contacts report uses); one it does not list has
+    # nothing to open, so its chip filters this report to every entry naming the same conversation.
+    for tie in entry.get("conv_links") or ():
+        if tie.get("listed"):
+            name = (tie.get("title") or "")[:24] or (tie["conversation_id"][:8] + "…")
+            state = "not in arroyo.db" if tie.get("held") is False else "not listed"
+            chips.append(report_ui.xref(
+                f'<a class="chip chat gone" target="scauto_conv_page" '
+                f'href="{rel_prefix}{_esc(tie["href"])}#{_esc(tie["anchor"])}" '
+                f'title="open the conversation this claim names — not a message">'
+                f'💬 {_esc(name)} · msg {_esc(tie["number"])} — {state}</a>',
+                [("conv", tie["anchor"])], closure=closure, brief=compact)
+                + why(tie.get("basis")))
+        else:
+            chips.append(
+                f'<a class="chip chat gone" '
+                f'href="{_esc(report_ui.find_fragment([tie["conversation_id"]]))}" '
+                f'title="show every cache entry whose claim names this conversation">'
+                f'💬 conversation {_esc(tie["conversation_id"][:8])}… — in no report</a>'
+                + why(tie.get("basis")))
     # A copy of these bytes found under Library/Caches by the cached-media report. The same cached
     # content routinely sits under several paths there, so when there is more than one the chip is
     # ONE link that opens that report filtered to this CACHE_KEY with every match expanded — the
@@ -2609,6 +2882,11 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     on_disk = sum(1 for e in entries if e["on_disk"]["found"])
     mem_linked = sum(1 for e in entries if e["memory"])
     chat_linked = sum(1 for e in entries if e["chats"])
+    # a claim naming a message no row is there for, and nothing else tying the entry to a chat: not
+    # counted as linked to a chat, which is a message
+    conv_tied = sum(1 for e in entries if e.get("conv_links") and not e["chats"])
+    # every tie draws a dashed chip, one beside a chat link too: its style goes with any tie
+    conv_chips = any(e.get("conv_links") for e in entries)
     # counted apart from mem_linked: an asset of a listed filter is not linked to a Memory's media
     filter_linked = sum(1 for e in entries if e.get("filter_memories"))
     # information on the file, not a link: counted on a line of its own
@@ -2647,6 +2925,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             linkbits.append("Memory")
         if e["chats"]:
             linkbits.append("Chat")
+        elif e.get("conv_links"):
+            linkbits.append("Conversation")                # tied to a conversation only
         if e.get("filter_memories"):
             linkbits.append("Filter")                      # not "Memory": the filter matches by indexOf
         is_xscope = bool(e["on_disk"].get("cross_scope"))
@@ -2691,6 +2971,9 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             searchable += e["memory"].get("urls") or []
         for ch in e["chats"]:
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
+        # a tied conversation's id as the Conversations report spells it (the key's spelling is in
+        # the EXTERNAL_KEY already)
+        searchable += [tie["conversation_id"] for tie in e.get("conv_links") or ()]
         # the Memories whose overlay record lists this asset, so their snap id finds it
         searchable += [fm["snap_id"] for fm in e.get("filter_memories") or ()]
         # the creative-tools items that name it: their ids, feed and texts (not the category word: a
@@ -2766,6 +3049,14 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     filter_sum = (f'<div class="sum"><b>{filter_linked}</b> cached file(s) are an asset of a filter '
                   f'listed with a Memory — not its media{_info(FILTER_LISTED_BASIS)}</div>'
                   if filter_linked else "")
+    # the same for a conversation tie: the dashed chip's style when any entry has a tie, the Linked
+    # option and the count when one is tied to nothing else. The option's words hold for every tie it
+    # selects — one whose arroyo.db messages were not read too, where an absence is not known
+    conv_css = ("\n .chip.chat.gone{background:#fff;border:1px dashed #8cc49e}" if conv_chips else "")
+    conv_opt = ('<option value="Conversation">chat conversation only (no message row)</option>'
+                if conv_tied else "")
+    conv_sum = (f" &middot; <b>{conv_tied}</b> tied only to a conversation{_info(CONV_TIE_BASIS)}"
+                if conv_tied else "")
     read_from = " · ".join(f"{html.escape(device_path(s['path'], src_root, manifest))} "
                            f"({html.escape(_ctp_store_state(s))})" for s in ctp_stores or ())
     ctp_sum = (f'<div class="sum"><b>{ctp_named}</b> cached file(s) are named by an item of an '
@@ -2834,7 +3125,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .leadnote{{font-size:12px;color:#6b5a00;margin:2px 0 4px}}
  button.copyids{{font-size:11.5px;padding:2px 8px;border:1px solid #bcbcd0;border-radius:5px;
    background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}}
- .chip.chat{{background:#e7f6ea;color:#1f6b39;border:1px solid #b3ddc0}}
+ .chip.chat{{background:#e7f6ea;color:#1f6b39;border:1px solid #b3ddc0}}{conv_css}
  .chip.cm{{background:#fdf0e3;color:#8a5a1c;border:1px solid #e8cfae}}
  .chip.ok{{background:#eef7ee;color:#2f7d32}} .chip.miss{{background:#f6efef;color:#9a5a5a}}
  .chip.warn{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983}}
@@ -2870,7 +3161,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 <script>{report_ui.VTABLE_JS}</script></head><body>
 <header><h1>Snapchat cache_controller.db</h1>
  <div class="sum">{total} physical cache files &middot; <b>{on_disk}</b> present on disk &middot;
- <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat &middot;
+ <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat{conv_sum} &middot;
  <b>{xscope}</b> with a cross-scope copy &middot; {deleted} with a deletion record &middot;
  times in <b>{html.escape(tz_label)}</b></div>
  <div class="sum"><b>{encrypted_total}</b> cached file(s) hold encrypted bytes
@@ -2893,7 +3184,7 @@ with more than one target fills in here." oninput="flt()">
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
  <label>Linked <select id="link" onchange="flt()"><option value="">any</option>
    <option value="Memory">Memory</option><option value="Chat">Chat</option>
-   <option value="Possible">possible Memory (not proven)</option>{filter_opt}</select></label>
+   <option value="Possible">possible Memory (not proven)</option>{conv_opt}{filter_opt}</select></label>
  <label title="Only files with an on-disk copy in a different account's SCContent scope than the claim">
    <input type="checkbox" id="xscope" onchange="flt()"> ⚠ cross-scope only</label>
  <label title="Measured from the bytes: high entropy and a length that is a multiple of the AES
@@ -2985,7 +3276,7 @@ scConsumeHash();
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, {"total": total, "on_disk": on_disk, "mem": mem_linked,
-                    "chat": chat_linked, "filter": filter_linked, "ctp": ctp_named,
+                    "chat": chat_linked, "conv": conv_tied, "filter": filter_linked, "ctp": ctp_named,
                     "deleted": deleted, "orphans": orphans,
                     "wal_only": wal_only, "main_only": main_only,
                     "meta_changed": meta_changed, "encrypted": encrypted_total,
@@ -3107,10 +3398,11 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         # Only files nothing else accounts for: a category that names what the file is (a lens, a
         # story preview, a Discover video…) already says it is not a Memory's media.
         ctx19 = any(c.get("mct") == 19 for c in e["claims"])
-        # an asset of a filter a Memory's record lists is accounted for, though not as its media; and
-        # a file a creative-tools item names is explained by the item, whatever its category
+        # an asset of a filter a Memory's record lists is accounted for, though not as its media; a
+        # file a creative-tools item names is explained by the item, whatever its category; and one
+        # whose claim names a chat conversation is that conversation's, though no message row is there
         if (e.get("memory") or e.get("chats") or e.get("filter_memories") or e.get("ctp_items")
-                or not e["on_disk"]["found"]
+                or e.get("conv_links") or not e["on_disk"]["found"]
                 or not (e["category"] in LEAD_CATEGORIES or (e["category"] == "Other" and ctx19))):
             continue
         kind = memory_leads.kind_of_ext(guess_media(_head_of(e["on_disk"]["paths"])))
@@ -3153,6 +3445,11 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
             if chat.get("conversation_id") and chat.get("server_message_id"):
                 sel.link(partial_report.EDGE_MESSAGE_CACHE, row_id, "msg",
                          f"conv-{chat['conversation_id']}|msg-{chat['server_message_id']}")
+        # a conversation tie, to the row the Conversations report lists (its anchor is built from the
+        # id as that report spells it, not as the key does); one it does not list has no row to reach
+        for tie in e.get("conv_links") or ():
+            if tie.get("listed") and tie.get("anchor"):
+                sel.link(partial_report.EDGE_CONV_CACHE, row_id, "conv", tie["anchor"])
         # a creative-tools item that names the file is no edge: the store has no report of its own
 
     return partial_report.Stage("cc", all_entries, sel, app=app, outdir=outdir, dbs=dbs,
@@ -3232,6 +3529,9 @@ def render(stage, closure=None, prov=None):
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "
                 f"{stats['deleted']} deleted")
+    if stats.get("conv"):
+        logger.info(f"  {stats['conv']} tied only to a conversation: a claim key names a message no "
+                    f"row is there for — not counted as linked to a chat")
     if stats.get("filter"):
         logger.info(f"  {stats['filter']} an asset of a filter a Memory's overlay record lists "
                     f"(ZGALLERYSNAPDETAIL.ZOVERLAY) — not the Memory's media, and not counted above")

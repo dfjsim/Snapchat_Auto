@@ -102,6 +102,7 @@ happened to name. Built with `report_ui.find_fragment`; see
 | Cached media | cache_controller | every linked `CACHE_KEY` | the file matches ≥ 2 cache entries |
 | Memories (detail) | Cached media | the pack's item hash | always — a pack is many chunk files |
 | cache_controller | Memories | every listing Memory's snap id | the file is an asset of a filter ≥ 2 Memories' overlay records list |
+| cache_controller | cache_controller (the same page) | the conversation id a claim key names | the key names a message no row is there for, in a conversation no report lists (a conversation tie, below) |
 
 A single-target link stays a plain `#anchor`, which highlights the row it lands on.
 
@@ -271,7 +272,12 @@ The Conversations report writes version 3:
  "messages":   {"<conversation id>": {"title": "…", "href": "Conversations/pages/<key>.html",
                                       "anchors": {"12.0": "msg-12.0", "13.0": "msg-13.0"}}},
  "by_content_id": {"<id>": [{"conversation_id": …, "server_message_id": "12.0",
-                             "rule": "media|share|sticker|sticker-name"}]}}
+                             "rule": "media|share|sticker|sticker-name"}]},
+ "conversations": {"<conversation id>": {"title": "…", "href": "Conversations/pages/<key>.html",
+                                         "anchor": "conv-<conversation id>", "messages": 0,
+                                         "in_arroyo": true}},
+ "arroyo":     {"read": true, "conversations_read": true, "account": "<USERID>",
+                "held": {"<conversation id, lower case>": [1, 2, 5]}}}
 ```
 
 `by_key` and `by_message` cover the messages that have an attachment. `messages` lists **every**
@@ -279,9 +285,32 @@ message, compactly (one title and page per conversation, an anchor per message):
 name a message whose file the chat join did not attach — a kind it does not display, or a file it did
 not choose — and `load_chat_links` turns these into the same records. `by_content_id` holds the ids
 each message names its media by (`arroyo_content.content_ids`, read from arroyo.db by
-`conversations_report.load_content_ids`): the media id of its `local_message_references` (`media`), a
+`conversations_report.load_arroyo_messages`): the media id of its `local_message_references` (`media`), a
 shared item's id at `4.4.5.5.1` (`share`), a sticker's id at `4.4.14.2.6` in base64 (`sticker`) or its
 name at `4.4.4.1.2` (`sticker-name`).
+
+The last two sections are for a claim whose key names a message no row is there for (route 4 below).
+`conversations` lists **every** conversation the report lists — one with no message too, which
+`messages` leaves out — with its page, the `conv-<id>` anchor of the page's header, how many messages
+it lists, and `in_arroyo`: whether arroyo.db itself holds the conversation (a `conversation`,
+`feed_entry` or `user_conversation` row, or a message it holds). `arroyo` says what the arroyo.db the
+run read holds: its own account (`required_values` `USERID`, lower-cased; `""` when not known) and the
+message numbers of each conversation — by `server_message_id`, or by `client_message_id` for a
+message the server never numbered — read from arroyo.db directly in both readings
+(`conversations_report.load_arroyo_messages`, the same read as `by_content_id`), **not** inferred from
+`messages`: the chat join lists rows arroyo.db never held (cache-only rows), and a read that failed
+lists none. A message is held by its two ids alone: a reading that predates a column its content ids
+are read from still says which messages it holds. When a reading of `conversation_message` will not
+read, or the checkpointed copy will not open at all (a -wal beside a file whose own header will not
+read — that copy is the only reading of a message the -wal has since deleted), `read` is false — a
+table that will not read is not one that holds nothing. `conversations_read` is the same for the
+`conversation`, `feed_entry` and `user_conversation` tables, read by `client_conversation_id` alone
+(`load_arroyo_conversations`): a missing table is read, one that will not read is not, and only when
+they were does a "?" say that none of them names a conversation. Both sections are additive, so the
+version stays 3
+(`load_chat_links` reads only versions 2 and 3 as indexed manifests; anything else would be taken
+for a bare version-1 map). A partial extract's manifest has `conversations` (its own conversations)
+but no `arroyo`: it would carry the message numbers of every conversation, and nothing reads it back.
 
 `href` (relative to the reports root) is the addition: with one page per conversation the anchor
 alone no longer says *which document* to open. The legacy Communications report still writes its
@@ -310,7 +339,44 @@ The cache_controller report links an entry to a chat message by, in order:
    `local_message_references` names; a shared item's or a sticker's other claims, likewise. The "?"
    names the id and the field it was read from.
 
-Chips are deduplicated per (conversation, message).
+4. **Conversation tie** (`_conversation_links_for`, after the three above, which it leaves
+   unchanged). A key of the chat shape whose message none of them reaches still names its
+   conversation. When no chat link of the entry reaches that message and the report lists no message
+   of that number, the entry is tied to the **conversation** — never to a message:
+
+   * the arroyo.db the run read **holds** the message (`arroyo.held`): no tie. The report not
+     listing it is a missing rule, which [`--survey-claim-links`](claim_link_survey.md) is for;
+   * the conversation is in `conversations`: a dashed 💬 chip to its page, at the header
+     (`Conversations/pages/<key>.html#conv-<id>`, the target window and fragment the Contacts report
+     uses), built from the id as the manifest spells it and emitted through `xref`
+     (`("conv", "conv-<id>")`); a partial run records `EDGE_CONV_CACHE` for it;
+   * it is in no report: a stated fact, not a link — and only when arroyo.db's messages were read, so
+     the absence is from both readings of the database, not merely from the report. Its dashed chip
+     is `#find=<conversation id>` on the same page (no `xref`: the target is this report), which
+     gathers every entry whose claim names that conversation. No edge;
+   * no `arroyo` section in the manifest (an older build, or the legacy report's): nothing is tied.
+
+   One tie per (conversation, message); further parts of the same message, and every claim's key and
+   account, are listed on it. The "?" says which of four it is — the conversation listed and held by
+   arroyo.db (a message of it, or a conversation / feed row), listed but held by no row of arroyo.db
+   (the friends / groups lists or cached chat files list it), listed by no report (when arroyo.db holds
+   other messages of it, the "?" says that instead), or listed while arroyo.db's messages were not
+   read (then the absence is "not known", never stated). That no conversation table names the
+   conversation is said only when `arroyo.conversations_read`; otherwise the "?" says it is not
+   known. Every absence is said of **the arroyo.db this run read** — "holds no message <n> of this
+   conversation, in either reading (with and without its -wal)" — never of the extraction, since a
+   run reads one arroyo.db; and **never "no longer"**: nothing in either reading shows the message was
+   ever there. Whose claim it is matters as much: a phone with two accounts keeps one cache beside the
+   first account's chat database, and the second account's claims name conversations and messages
+   that database need never have held. So each claim's `USER_ID` is compared with arroyo.db's
+   `required_values` `USERID` — "this claim was made by account X; the arroyo.db this run read
+   belongs to account Y" only when both are known and differ, "made by the account that arroyo.db
+   belongs to" when they match, nothing when either is unknown; a message claimed by more than one
+   account says which key each made, and the own account's claim decides the conclusion. A tie is not
+   a chat link: it is not counted as one, has a Linked filter option of its own (`Conversation`, *no
+   message row*), and an entry with one is never a "possible Memory" lead.
+
+Chips are deduplicated per (conversation, message), ties too.
 
 ### the chat report → cache_controller
 Each cached attachment links back to `#ck-<CACHE_KEY>` — the `cclink` in `path_to_image_html`
@@ -359,7 +425,8 @@ Contacts → Memories → CacheMedia → cache_controller**. That matters:
 * the **Contacts** report takes the conversation summary the Conversations report returns, which is
   how a contact row links to a conversation page and shows its message count;
 * the **cache_controller** report reads the chat manifest (`Conversations/cache_links.json`, else
-  the legacy one) and the two manifests the Memories report just wrote (`memory_pages.json`,
+  the legacy one; the conversation ties read only the Conversations one) and the two manifests the
+  Memories report just wrote (`memory_pages.json`,
   `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index (its
   overlay records included).
 

@@ -454,7 +454,7 @@ of the file, against the Memory's `ZGALLERYSNAP.ZCREATETIMEUTC`, `ZCAPTURETIMEUT
 `ZCREATETIMEUTC`. At most five, ranked by the closest pair, each with every difference, and the panel
 says how many Memories fell inside the window. `ZDURATION` is not used: it has been seen to differ from
 the media's real length. A file a creative-tools item names is never a lead, whatever its category: the
-item explains it.
+item explains it. Nor is one whose claim names a chat conversation (a conversation tie, below).
 
 It is a lead, not a link: shown in its own *Possible Memory — NOT proven* panel with a dashed chip,
 never as the 🧠 link, never counted as linked, never followed by a partial report (no closure edge).
@@ -508,6 +508,55 @@ never decrypted with the Memory's key, and an entry with such a link is never a 
 the record accounts for the file. The partial-report edge is its own (`EDGE_MEMORY_FILTER_ASSET`, never
 `EDGE_MEMORY_CACHE`), followed only by the relations `mem_filter_assets` / `cache_filter_memories`, both
 off by default ([report_partial.md](report_partial.md)).
+
+## Tied to a conversation — a message no row is there for
+
+A chat claim's key, `<type>:<conversation>:<message>:<part>[:…]`, names a conversation as well as a
+message. When none of the three chat routes reaches the message — the arroyo.db the run read holds no
+message of that number in that conversation, in either reading, and the Conversations report lists
+none — the key still names the conversation, and `_conversation_links_for` ties the entry to it
+(`entry["conv_links"]`; the rule in full is route 4 in
+[cross_report_linking.md](cross_report_linking.md#cache_controller--the-chat-report)). What arroyo.db
+holds comes from the Conversations manifest's `arroyo` section, read from the database itself, never
+from the messages the report lists. A message arroyo.db holds makes no tie: that is a missing rule for
+[`--survey-claim-links`](claim_link_survey.md).
+
+* **A conversation the Conversations report lists** gets a dashed 💬 chip — *💬 \<title\> · msg N — not
+  in arroyo.db* — that opens its page at the header, never a message: there is no message row to point
+  at. Its "?" says what that arroyo.db holds of the conversation (a message of it or a conversation /
+  feed row; or none, when the friends / groups lists or cached chat files are why the report lists it —
+  that no conversation, feed_entry or user_conversation row names it is said only when those tables
+  read in full, the manifest's `arroyo.conversations_read`). When arroyo.db's messages were not read,
+  the chip says *not listed* and the "?" that whether arroyo.db holds the message is not known.
+* **A conversation no report lists** has nothing to open. Its dashed chip — *💬 conversation
+  \<id\>… — in no report* — filters this report to every entry whose claim names that conversation
+  (`#find=<conversation id>`), and its "?" states the absence: the arroyo.db this run read holds no
+  message of it in either reading, and neither its conversation tables nor the friends / groups lists
+  name it — or, when those tables would not read in full, that whether they name it is not known. When
+  that arroyo.db holds other messages of the conversation and no report lists it, the "?" says so
+  instead, and never that the database may never have held the conversation. Made only when
+  arroyo.db's messages were read.
+* **Whose claim.** Every "?" compares each claim's `USER_ID` with the account arroyo.db belongs to (its
+  `required_values` `USERID`) when both are known: *made by the account that arroyo.db belongs to*, or
+  *made by account X; the arroyo.db this run read belongs to account Y* — then the message, or the
+  conversation, may never have been in that database. A message claimed by two accounts names each
+  claim's account, and a claim of arroyo.db's own account, the stronger evidence, is the one the
+  conclusion follows. On a phone with two accounts one cache sits beside the first account's chat
+  database, and the second account's claims can name conversations and messages that database need
+  never have held. No wording says "no longer": neither reading shows the message was there.
+* **Counted apart** from *linked to a chat*: the header gains *N tied only to a conversation* (an entry
+  with a tie and no chat link) with its "?", and the Linked filter *chat conversation only (no message
+  row)* (link value `Conversation`) — words true of every tie it selects, one whose arroyo.db messages
+  were not read too — both written only when some entry is tied only to a conversation; the page gains
+  the dashed-chip style whenever some entry has a tie, one beside a chat link too. A report with no tie
+  is byte for byte what it was. The run log gives the count on a line of its own. **Search** finds the
+  entry by the conversation id.
+
+The category stays the key's (*Chat media* for contexts 2 and 3). An entry with a tie is never a
+*Possible Memory* lead: the claim says whose file it is. In a partial run a tie to a listed conversation
+is the edge `EDGE_CONV_CACHE`, followed by `cache_conversation` (on by default: ticking the entry brings
+the conversation's row and page, not its messages) and `conv_cache` (off by default); a tie to a
+conversation no report lists has no row to reach and no edge ([report_partial.md](report_partial.md)).
 
 ## Locating the bytes on disk
 
@@ -596,7 +645,11 @@ See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory**
 fallback), then byte-identity with a copy retrieved from Snapchat's servers (last; ☁ on the chip — see
 [cloud_download.md](cloud_download.md)); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
 and — so that every cache entry of a message links back, not only the file the chat report showed —
-by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`. Apart from all of
+by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`, or by an id the
+message names its media by; and when that triple names a message no row is there for, **→ the
+conversation** (route 4, [above](#tied-to-a-conversation--a-message-no-row-is-there-for)) — a link to
+its page when the Conversations report lists it, a stated fact and a same-page filter when it does not,
+never a link to a message and never counted as one. Apart from all of
 these, **→ Memory, filter listed**: a claim key that is the URL of an asset of a geofilter a Memory's
 overlay record lists links to that Memory under a relation of its own, never as its media (see
 [above](#assets-of-a-filter-listed-with-a-memory--not-its-media)). A creative-tools item that names a file
@@ -619,8 +672,9 @@ iOS only — its Android counterpart, if `memories.db` has one, was not examined
 no `overlay_urls` and its report none of that link's chips, filter option or header line. The same goes
 for the creative-tools items: `ctp_items.find_stores` looks in the iOS layout
 (`Documents/user_scoped/*/DocObjects/`), its Android counterpart was not examined, and on an Android app
-folder it finds no store — no item, no category, no section or header line. See
-[snapchat_android.md](snapchat_android.md).
+folder it finds no store — no item, no category, no section or header line. The conversation tie works
+on both: Android's `arroyo.db` is the same database, with the same `required_values` `USERID`, and the
+Conversations report writes the same manifest from it. See [snapchat_android.md](snapchat_android.md).
 
 ## Standalone use
 ```

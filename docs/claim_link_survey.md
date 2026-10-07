@@ -35,7 +35,13 @@ Run it on a run folder the full pipeline produced: the reports' own links are re
   query value is read whole (base64 there may hold `/`), percent-escapes undone.
 * **Link status**, computed by the cache_controller report's own `_chat_links_for`, so the two
   cannot disagree: `message: attached file`, `message: named in the key`, `message: id in the key`
-  (an id the message names its media by), `Memory-scoped key`, `Memory: its snap id in the key` (a
+  (an id the message names its media by), `conversation: named in the key` (a key of the chat shape
+  naming a message no row is there for — the arroyo.db the run read does not hold it, in either
+  reading, or its messages were not read — in a conversation the Conversations report lists: the
+  report ties the file to the
+  conversation, by its own `_conversation_links_for` over the manifest's `conversations` and `arroyo`
+  sections; one naming a conversation no report lists is a stated fact there, not a link, and stays
+  `none`), `Memory-scoped key`, `Memory: its snap id in the key` (a
   full-media claim whose key carries a Memory's `ZSNAPID` — a Memory of the app folder the reports read
   that `cache_controller.db` from, an iOS container or an Android app folder), `Memory: listed in its
   filter record` (a key that is the URL of an asset of a geofilter a Memory's overlay record,
@@ -139,7 +145,7 @@ An untied claim whose key names a conversation and a message gets one label, dec
 | `untied_named_message` | what it means for a link rule |
 |---|---|
 | `names a message arroyo.db holds` | The message is there and nothing ties the file to it: **a rule is missing.** |
-| `names a message not found (arroyo.db not read)` | An `arroyo.db` could not be read in full — it has no `conversation_message` table, or a table its messages, conversations or account are read from will not read, in either reading — so nothing is said to be absent: a damaged table is not one that holds nothing. |
+| `names a message not found (arroyo.db not read)` | An `arroyo.db` could not be read in full — it has no `conversation_message` table, a table its messages, conversations or account are read from will not read, in either reading, or a `-wal` sits beside a file that will not open without it, so its checkpointed reading — the only one of a row the `-wal` has since deleted — was not read — so nothing is said to be absent: a damaged table is not one that holds nothing. |
 | `names a message arroyo.db does not hold, in a conversation it holds` | The conversation is there — a message of it, or a `conversation`, `feed_entry` or `user_conversation` row — but not that message. There is no row to tie the file to; a recovery of deleted records is what could bring one back. |
 | `names a conversation arroyo.db does not hold — claimed by arroyo.db's own account` | None of `conversation_message`, `conversation`, `feed_entry` or `user_conversation` holds the conversation, in either reading, and the claim's `USER_ID` is the `required_values` `USERID` of an `arroyo.db`: the account's own chat database holds no message of it and none of those rows. As above, only a recovery of deleted records could give a rule something to tie to. |
 | `names a conversation arroyo.db does not hold — claimed by another account` | The claim's `USER_ID` is the account of no `arroyo.db` in the extraction, and every one of them named its account — a second account on the phone, whose chat database is not in the extraction. **No rule is possible from the extraction's `arroyo.db`.** |
@@ -154,7 +160,12 @@ phone with more than one account a message the survey finds held may be in an `a
 reports were not built from.
 
 The status of such a claim stays `none` whatever its label: the label says why nothing ties it, it does
-not tie it.
+not tie it. A claim the cache_controller report ties to a **listed** conversation is not untied — its
+status is `conversation: named in the key` and it gets no label; one whose conversation no report lists
+stays `none` here, though the report shows the same absence on the entry as a stated fact (see
+[report_cache_controller.md](report_cache_controller.md#tied-to-a-conversation--a-message-no-row-is-there-for)).
+The two can differ in one way: the report reads the one `arroyo.db` the run read, the labels every
+`arroyo.db` of the extraction.
 
 ## Then
 

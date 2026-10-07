@@ -481,6 +481,20 @@ CLI, the GUI dialog and `describe()` cannot disagree about it. These are set the
   record lists it. `mem_cache` / `cache_memory` never follow this edge. Either way, a link whose other
   end the extract does not hold is marked by `xref`, as every cross-report link is. See
   [cross_report_linking.md](cross_report_linking.md#cache_controller--memory-an-asset-of-a-filter-its-overlay-record-lists).
+* **`cache_conversation` is on, `conv_cache` is off.** Both follow the cache_controller report's
+  *conversation tie* (`EDGE_CONV_CACHE`): a cached file whose claim key names a message of a conversation
+  that the arroyo.db the run read does not hold, in either reading — or, for a conversation the
+  Conversations report lists, whose messages were not read — tied to the conversation itself
+  because there is no message row to tie it to — recorded only when the Conversations report lists the
+  conversation (one it does not list has no row to reach). Ticking the entry brings the conversation's
+  row and, by containment, its page — narrowed to the extract's messages, so it may say it holds none
+  here, which is true — and not its messages: `conv_messages` is off by default, and from a
+  conversation a relation pulled in it would be a second hop (`transitive`). The reverse is off for
+  the reason `conv_messages` is: ticking a conversation for its page is not a request to disclose the
+  cached files its claims name. Neither follows `msg_cache` / `cache_message`, which are a message's.
+  The GUI lays a saved relation policy over the recommended set, so a policy saved before these
+  relations existed starts with `cache_conversation` on and `conv_cache` off. See
+  [cross_report_linking.md](cross_report_linking.md#cache_controller--the-chat-report).
 
 `transitive` follows **only the relations that are switched on** — the enabled list is computed once and
 each pass reuses it. That does not make it a safe default, because the recommended set already contains a
@@ -576,6 +590,12 @@ partial run points it at the full report folder the selection was made in — sa
 already proved by the gate above. Interleaving index and render per report is not an option: that is
 exactly what makes a backward relation (a ticked cache entry pulling in its Memory) impossible, which is
 the whole reason the index pass exists.
+
+The manifests an extract writes for itself are never read back, and one of them is therefore written
+smaller: the extract's `Conversations/cache_links.json` lists its own conversations and leaves out the
+`arroyo` section — what the arroyo.db the run read holds, its account and the message numbers of
+**every** conversation — which the cache_controller report's conversation ties are read from. That
+report reads it from the full folder through `links_dir` like every other manifest.
 
 Reading a full run's manifests only works if the page names they contain are still right in the extract,
 and one of them is not free: a Memory group's detail page is named after a hash of its members' snap

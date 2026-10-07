@@ -17,7 +17,8 @@ this answers it for every claim at once, so one run on the case says which link 
 The result is grouped by the claim key's **shape**: the key with each id replaced by a placeholder
 (``<uuid>``, ``<hex32>``, ``<b64:13>``, ``<id>``, ``<n>``). Per shape and context it counts the
 claims the reports already tie to a message (by the file the chat join attached, or by the message
-the key names), the Memory-scoped keys, the asset URLs a Memory's overlay record lists, the keys an
+the key names) or to the conversation a key names when no row is there for its message, the
+Memory-scoped keys, the asset URLs a Memory's overlay record lists, the keys an
 item of a creative-tools store names (``primary.docobjects`` ``ctp__item_5``), and those nothing
 ties; and for each id position in the shape, where in ``arroyo.db`` the same id was found —
 table, column, protobuf field, content_type, reading — and in how many rows each id occurs. An id
@@ -243,6 +244,9 @@ ROUTE_STATUS = {"file": "message: attached file", "key": "message: named in the 
                 "content": "message: id in the key"}
 
 
+#: The status of a claim whose key names a message no row is there for, in a conversation the
+#: Conversations report lists: the report ties it to the conversation (``_conversation_links_for``).
+CONVERSATION_STATUS = "conversation: named in the key"
 #: The status of a claim whose key is the URL of an asset of a filter a Memory's overlay record lists.
 FILTER_STATUS = "Memory: listed in its filter record"
 #: The status of a claim whose key an item of an account's creative-tools store names.
@@ -252,26 +256,34 @@ ITEM_STATUS = "creative-tools item (ctp__item_5)"
 def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, filter_urls=None,
                  items=None):
     """How the reports tie a claim to a message — computed by the cache_controller report's own
-    ``_chat_links_for``, so the survey and the report cannot disagree — or that its key is a
+    ``_chat_links_for``, so the survey and the report cannot disagree — or to the conversation its
+    key names, for a message no row is there for, when the Conversations report lists the
+    conversation (the report's own ``_conversation_links_for``, over the manifest's ``conversations``
+    and ``arroyo`` sections that ``chat_ids`` carries; a tie to a conversation no report lists is a
+    stated fact in the report, not a link, and leaves the claim ``none``), or that its key is a
     Memory's (a Memory-scoped shape, or a full-media key carrying a Memory's ZSNAPID, the two links
     a key alone makes), or that a Memory's overlay record lists it as the URL of a filter's asset
     (``filter_urls``, the ``overlay_urls`` of ``load_memory_index``, matched by the report's own
     ``_overlay_links_for``), or that an item of a creative-tools store names it (``items``, an index
     of ``ctp_items.read``, matched by ``ctp_items.match`` as the report matches it), or ``none``. The
     first that applies, in that order."""
-    from scripts.cache_controller_report import _chat_links_for, _overlay_links_for, _UUID_RE
+    from scripts.cache_controller_report import (_chat_links_for, _conversation_links_for,
+                                                 _overlay_links_for, _UUID_RE)
     from scripts.memories_media_report import classify_snap_claim
     ek, ck = str(claim.get("EXTERNAL_KEY") or ""), str(claim.get("CACHE_KEY") or "")
+    user = str(claim.get("USER_ID") or "")
     links = _chat_links_for([{"external_key": ek}], ck, by_key, by_message, chat_ids)
     if links:
         return ROUTE_STATUS.get(links[0].get("route"), "message")
+    if any(tie["listed"] for tie in _conversation_links_for(
+            [{"external_key": ek, "user_id": user}], links, chat_ids)):
+        return CONVERSATION_STATUS
     if classify_snap_claim(ek)[0]:
         return "Memory-scoped key"
     mo = _UUID_RE.search(ek)
     if mo and claim.get("MEDIA_CONTEXT_TYPE") == 19 and mo.group(0).upper() in (snap_ids or {}):
         return "Memory: its snap id in the key"
-    if filter_urls and _overlay_links_for(
-            [{"external_key": ek, "user_id": str(claim.get("USER_ID") or "")}], filter_urls):
+    if filter_urls and _overlay_links_for([{"external_key": ek, "user_id": user}], filter_urls):
         return FILTER_STATUS
     if items and ctp_items.match(ek, items):
         return ITEM_STATUS
@@ -364,7 +376,8 @@ def _rows(views, table, needed, optional=(), distinct=False):
     is swallowed. A reading that has the columns and will not read them raises, so a table with a
     damaged page is never taken for an empty one. A reading without them adds no rows: a table or
     column created since the last checkpoint is not in the checkpointed reading, and one dropped
-    since is not in the other.
+    since is not in the other. A checkpointed copy that would not open at all is no reading here;
+    :func:`_arroyo_facts` counts its file unread.
     """
     readings = [views.merged]
     if views.main_only is not None and views.main_only is not views.merged:
@@ -394,9 +407,10 @@ def _arroyo_facts(arroyos):
       sending), so a key naming such a message is never taken for one the database lacks;
     * ``convs``: every conversation id with a row in any of :data:`CONVERSATION_TABLES`;
     * ``accounts``: each database's own account, its ``required_values`` ``USERID``;
-    * ``unread``: the files that could not be read — one with no ``conversation_message``, or with a
-      table of these facts that will not read in either reading. A table that is missing or will
-      not read is not one that holds nothing, and each fact is what an absence is said from;
+    * ``unread``: the files that could not be read — one with no ``conversation_message``, with a
+      table of these facts that will not read in either reading, or with a -wal beside a file that
+      will not open without it (its checkpointed reading was not read). A table that is missing or
+      will not read is not one that holds nothing, and each fact is what an absence is said from;
     * ``nameless``: the files read in full that name no account (no ``required_values`` ``USERID``),
       so a claim may be the account of one of them without being in ``accounts``.
 
@@ -409,6 +423,10 @@ def _arroyo_facts(arroyos):
             views = sqlite_open.open_views(path)
             if views.merged is None:
                 raise sqlite3.DatabaseError("not a database that opens")
+            if views.main_only is None and views.info.get("db_bytes"):
+                # a -wal beside a file that will not open on its own: the checkpointed reading, the
+                # only one of a row the -wal has since deleted, was not read
+                raise sqlite3.DatabaseError("the checkpointed copy does not open")
             rows = _rows(views, "conversation_message",
                          ("client_conversation_id", "server_message_id"), ("client_message_id",))
             if rows is None:

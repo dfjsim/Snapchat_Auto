@@ -376,7 +376,18 @@ to check in `arroyo.db`.
   recovered attachment**. Two more indexes reach the others: `messages` (every message, one anchor
   each, so that a claim key naming a message whose file was not attached still finds it) and
   `by_content_id` (the ids each message names its media by, read from arroyo.db by
-  `load_content_ids`). Format and matching rules: [cross_report_linking.md](cross_report_linking.md).
+  `load_arroyo_messages`). And two for a claim key naming a message **no row is there for**, which
+  the cache_controller report ties to the conversation instead: `conversations` (every conversation
+  listed — one with no message too — with its page, its `conv-<id>` header anchor and whether
+  arroyo.db itself holds it) and `arroyo` (what the arroyo.db this run read holds: its own account,
+  `required_values` `USERID`, and the message numbers of each conversation, read from it directly in
+  both readings by the same `load_arroyo_messages` read; `read` false when a reading of
+  `conversation_message` will not read or the checkpointed copy will not open, and
+  `conversations_read` false when the `conversation`, `feed_entry` or `user_conversation` table will
+  not read, which `load_arroyo_conversations` reads by conversation id alone for whether arroyo.db
+  holds a conversation). A partial extract's manifest has no `arroyo`: it would list
+  the message numbers of every conversation. Format and matching rules:
+  [cross_report_linking.md](cross_report_linking.md).
 * **The same bytes under two names are one attachment.** A message's rows can bring the same file
   twice — the copy saved in the chat (`SCPersistentMedia`) and the cached file, byte-identical. `_merge_rows`
   folds an attachment whose SHA-256 is already on the message into it (`same_as`): the bytes are shown
