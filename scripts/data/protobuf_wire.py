@@ -28,16 +28,13 @@ def varint(data, pos):
             raise Malformed("varint too long")
 
 
-def fields(data):
-    """``[(field, wire type, value)]`` of one message; raises :class:`Malformed`.
-
-    A wire-type-2 value is returned as bytes, whether it is a string, raw bytes or a nested message
-    — only the caller can say which.
-    """
+def _parse(data):
+    """``[(field, wire type, value, start, end)]``: :func:`fields`, with where each value lies."""
     out, pos, end = [], 0, len(data)
     while pos < end:
         key, pos = varint(data, pos)
         field, wire = key >> 3, key & 7
+        start = pos
         if wire == 0:
             value, pos = varint(data, pos)
         elif wire in (1, 5):
@@ -46,14 +43,49 @@ def fields(data):
                 raise Malformed("fixed-size value runs off the end")
             value, pos = data[pos:pos + size], pos + size
         elif wire == 2:
-            length, pos = varint(data, pos)
-            if pos + length > end:
+            length, start = varint(data, pos)
+            if start + length > end:
                 raise Malformed("length runs off the end")
-            value, pos = data[pos:pos + length], pos + length
+            value, pos = data[start:start + length], start + length
         else:
             raise Malformed(f"wire type {wire}")
-        out.append((field, wire, value))
+        out.append((field, wire, value, start, pos))
     return out
+
+
+def fields(data):
+    """``[(field, wire type, value)]`` of one message; raises :class:`Malformed`.
+
+    A wire-type-2 value is returned as bytes, whether it is a string, raw bytes or a nested message
+    — only the caller can say which.
+    """
+    return [(field, wire, value) for field, wire, value, _start, _end in _parse(data)]
+
+
+def field_path(data, start, end):
+    """The field numbers, outermost first, of the value that holds ``data[start:end]``.
+
+    Read the way :func:`strings` reads: the path goes down while the range lies inside one
+    length-delimited value that is not printable text and parses as a message to its last byte, and
+    stops at the value that is not (raw bytes, a string). ``()`` when ``data`` is not a message, or
+    the range is not inside any one value — it covers a field's key, or runs across two fields.
+    """
+    path, buf, base = [], bytes(data), 0
+    while _text(buf) is None:
+        try:
+            parsed = _parse(buf)
+        except Malformed:
+            break
+        inside = next(((field, wire, s, e) for field, wire, _value, s, e in parsed
+                       if s <= start - base and end - base <= e), None)
+        if inside is None:
+            break
+        field, wire, s, e = inside
+        path.append(field)
+        if wire != 2:
+            break
+        buf, base = buf[s:e], base + s
+    return tuple(path)
 
 
 def values(data, *path):
@@ -121,4 +153,36 @@ def strings(data):
         walk(bytes(data))
     except Malformed:
         return None
+    return out
+
+
+def values_with_paths(data):
+    """``[(path, value, text)]`` for every length-delimited value in a message and the messages
+    nested in it, each message's values in field order before those nested in them; ``text`` is the
+    value as text when it is printable UTF-8, else None.
+
+    Every such value is listed, the nested messages included: without a schema, raw bytes (a 16-byte
+    id) can parse as a message by chance, and listing only the innermost values would lose them. A
+    value is searched inside on the rule :func:`strings` reads by — not when it is text, and only
+    when it parses as a message to its last byte. Returns None when ``data`` is not a message.
+    """
+    out = []
+    try:
+        stack = [((), _parse(bytes(data)))]
+    except Malformed:
+        return None
+    while stack:
+        path, parsed = stack.pop()
+        nested = []
+        for field, wire, value, _start, _end in parsed:
+            if wire != 2:
+                continue
+            text = _text(value)
+            out.append((path + (field,), value, text))
+            if text is None and value:
+                try:
+                    nested.append((path + (field,), _parse(value)))
+                except Malformed:
+                    pass
+        stack.extend(reversed(nested))       # a stack, not recursion: nesting depth is unbounded
     return out

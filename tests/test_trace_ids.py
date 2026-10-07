@@ -7,6 +7,7 @@ each identifier must never appear in the log or the JSON.
 
 Every input is synthetic.
 """
+import base64
 import json
 import logging
 import os
@@ -22,6 +23,8 @@ ID_WAL = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"       # only once the -wal is ap
 ID_GONE = "9999dddd-8888-4777-8666-5555555eeeee"      # only in a superseded -wal frame
 ID_LE = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e"        # little-endian UUID bytes in a plain file
 CACHE_KEY = "00a1b2c3d4e5f60718293a4b5c6d7e8f"        # 32 hex digits, stored as raw bytes
+STICKER_BYTES = b"\x0f\xbf\xffsynthetic1"              # an id kept as bytes in one place ...
+STICKER_ID = base64.b64encode(STICKER_BYTES).decode()  # ... and as padded base64 in another
 SECRET = "SENTINEL-CONTENT-MUST-NOT-LEAK"
 
 
@@ -73,6 +76,97 @@ def test_every_search_form_of_a_uuid_and_of_a_cache_key():
     suffixed = {n.form for n in trace_ids.needles_for(0, ID_MAIN + "~1")}
     assert "text" in suffixed and "text (without the ~N suffix)" in suffixed
     assert "bytes (without the ~N suffix)" in suffixed
+
+
+def test_a_base64_identifier_is_also_searched_as_the_bytes_it_encodes():
+    forms = {n.form: n.data for n in trace_ids.needles_for(0, STICKER_ID)}
+    assert forms["bytes (base64-decoded)"] == STICKER_BYTES
+    assert forms["hex (base64-decoded)"] == STICKER_BYTES.hex().encode()
+    assert forms["base64 without padding"] == STICKER_ID.rstrip("=").encode()
+    assert forms["base64url"] == STICKER_ID.rstrip("=").replace("/", "_").encode()
+    # the URL-safe spelling, given unpadded, decodes to the same bytes
+    url = trace_ids.needles_for(0, STICKER_ID.rstrip("=").replace("/", "_"))
+    assert {n.form: n.data for n in url}["bytes (base64-decoded)"] == STICKER_BYTES
+    # hex, words and usernames are made of base64 characters too, and are not read as base64
+    for not_base64 in (ID_MAIN, CACHE_KEY, "1681494784166", "customSticker", "john_smith1",
+                       "D7//c3ludGhldGljM===", "D7//c3ludGhldGljMR=="):
+        assert trace_ids.base64_bytes(not_base64) is None, not_base64
+
+
+def _sticker_run_folder(tmp_path):
+    """A claim key holding a base64 id, and a chat message holding the bytes it encodes."""
+    docs = tmp_path / "run" / "ExtractedData" / "Application" / "APP" / "Documents"
+    docs.mkdir(parents=True)
+    conn = sqlite3.connect(str(docs / "cache.sqlite"))
+    conn.execute("create table claim (key text)")
+    conn.execute("insert into claim values (?)", ("customSticker~" + STICKER_ID,))
+    conn.commit()
+    conn.close()
+
+    def field(number, value):
+        return bytes([number << 3 | 2, len(value)]) + value
+    content = field(4, field(2, b"\x05") + field(4, field(14, field(1, STICKER_BYTES)
+                                                             + field(3, SECRET.encode()))))
+    conn = sqlite3.connect(str(docs / "chat.sqlite"))
+    conn.execute("create table message (content blob)")
+    conn.execute("insert into message values (?)", (content,))
+    conn.commit()
+    conn.close()
+    (docs / "plain.txt").write_bytes(b"x" * 7 + STICKER_ID.rstrip("=").encode() + b"\n")
+    return str(tmp_path / "run")
+
+
+def test_a_base64_id_is_found_as_bytes_in_a_protobuf_and_its_field_is_named(tmp_path):
+    payload = trace_ids.trace(_sticker_run_folder(tmp_path), [STICKER_ID])
+    rows = [h for h in payload["hits"] if h["kind"] == "sqlite"]
+    chat = [h for h in rows if h["table"] == "message"]
+    assert [(h["form"], h.get("field"), h["cell"]) for h in chat] == \
+        [("bytes (base64-decoded)", "4.4.14.1", "blob")]
+    # the padded key is reported once, as text; its unpadded spelling is the same occurrence
+    claim = [h for h in rows if h["table"] == "claim"]
+    assert [(h["form"], h.get("field")) for h in claim] == [("text", None)]
+    raw_claim = [h for h in payload["hits"] if h["kind"] == "sqlite-file"
+                 and h["file"].endswith("cache.sqlite")]
+    assert raw_claim and {h["form"] for h in raw_claim} == {"text"}
+    # an unpadded occurrence on its own is reported under the form that found it
+    plain = [h for h in payload["hits"] if h["kind"] == "file"]
+    assert [(h["form"], h["offset"]) for h in plain] == [("base64 without padding", 7)]
+    assert any("field 4.4.14.1" in line for line in trace_ids.describe(payload))
+    assert SECRET not in json.dumps(payload)
+
+
+def test_a_hit_outside_every_live_record_is_placed_hit_by_hit(tmp_path):
+    """One id in a live row and on a free page; one in a freeblock; one in unallocated space. The
+    first used to be marked "in rows" at both places, because some row held it."""
+    id_free = "12121212-3434-4565-8787-909090909090"
+    id_block = "abababab-cdcd-4efe-8a0a-1b1b1b1b1b1b"
+    id_space = "c0c0c0c0-d1d1-4e2e-8f3f-404040404040"
+    docs = tmp_path / "run" / "ExtractedData" / "Application" / "APP" / "Documents"
+    docs.mkdir(parents=True)
+    conn = sqlite3.connect(str(docs / "store.sqlite"))
+    conn.execute("pragma secure_delete = 0")
+    conn.execute("create table t (id integer primary key, v text)")
+    conn.execute("create table gone (id integer primary key, v text)")
+    for n, text in enumerate((id_free, id_block, "filler", id_space), 1):  # cells fill from the end
+        conn.execute("insert into t values (?, ?)", (n, text + "-" + SECRET))
+    conn.executemany("insert into gone values (?, ?)", [(n, id_free + "x" * 900) for n in range(40)])
+    conn.commit()
+    conn.execute("delete from t where id = 2")          # between two cells: a freeblock
+    conn.execute("delete from t where id = 4")          # the first cell: back to unallocated space
+    conn.execute("drop table gone")                     # its pages: the freelist
+    conn.commit()
+    conn.close()
+    payload = trace_ids.trace(str(tmp_path / "run"), [id_free, id_block, id_space])
+    raw = [h for h in payload["hits"] if h["kind"] == "sqlite-file"]
+
+    def places(i):
+        return {(h["in_rows"], h.get("where")) for h in raw if h["id"] == i}
+    assert places(0) == {(True, None), (False, "free page")}
+    assert places(1) == {(False, "freeblock")}
+    assert places(2) == {(False, "unallocated space")}
+    assert [h["row"] for h in payload["hits"] if h["kind"] == "sqlite"] == [1]
+    assert any("free page - in no row either reading returns" in line
+               for line in trace_ids.describe(payload))
 
 
 def test_a_match_across_a_chunk_boundary_is_found_once(tmp_path):
@@ -132,3 +226,9 @@ def test_exit_codes(tmp_path):
     ids.write_text(f"# a comment\n{ID_LE}\n\n", encoding="utf-8")
     assert app.run_trace_ids(["--trace-ids", run, f"@{ids}"]) == trace_ids.EXIT_FOUND
     assert any(name.startswith("trace_ids_") for name in os.listdir(run))
+
+
+def test_a_damaged_page_size_costs_the_placement_not_the_trace(tmp_path):
+    path = tmp_path / "broken.sqlite"
+    path.write_bytes(trace_ids.SQLITE_MAGIC + b"\x00" * 200 + ID_MAIN.encode())
+    assert trace_ids._free_places(str(path), [216]) == {}

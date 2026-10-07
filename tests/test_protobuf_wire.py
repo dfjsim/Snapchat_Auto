@@ -37,6 +37,34 @@ def test_fields_and_paths():
         pw.fields(msg[:-1])
 
 
+def test_field_path_names_the_field_a_range_lies_in():
+    raw = b"\x0f\xbf\xff\x00\x01\x02\x03"
+    inner = _f(1, raw) + _f(2, "a caption".encode())
+    msg = _f(2, 5) + _f(4, _f(2, 1) + _f(14, inner))
+    at = msg.index(raw)
+    assert pw.field_path(msg, at, at + len(raw)) == (4, 14, 1)
+    assert pw.field_path(msg, at + 2, at + 4) == (4, 14, 1)          # inside the bytes value
+    # text is not read as a message, however it parses: the path stops at the string
+    at = msg.index(b"caption")
+    assert pw.field_path(msg, at, at + 7) == (4, 14, 2)
+    # a range over a field's key, or across two fields, is in no one field of that message
+    at = msg.index(_f(1, raw))
+    assert pw.field_path(msg, at, at + 3) == (4, 14)
+    # not a message at all
+    assert pw.field_path(b"\xff\xff" + raw, 2, 2 + len(raw)) == ()
+    assert pw.field_path("plain text".encode(), 0, 5) == ()
+
+
+def test_every_value_is_listed_with_its_path():
+    raw = bytes.fromhex("0a024142" + "0800" * 6)           # 16 bytes that happen to parse
+    msg = _f(1, "a word".encode()) + _f(4, _f(2, 7) + _f(14, _f(6, raw)))
+    listed = {(path, bytes(value)): text for path, value, text in pw.values_with_paths(msg)}
+    assert listed[((1,), b"a word")] == "a word"
+    assert ((4, 14, 6), raw) in listed                        # listed itself, though it parses
+    assert ((4, 14, 6, 1), b"AB") in listed                   # and what it parses to
+    assert pw.values_with_paths(b"\xff\xff") is None
+
+
 def test_strings_depth_first_in_field_order():
     inner = _f(1, "nested text".encode()) + _f(2, 7)
     msg = _f(1, "first".encode()) + _f(2, inner) + _f(3, "last line\nsecond".encode())

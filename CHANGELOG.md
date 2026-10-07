@@ -13,6 +13,17 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
   3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required
   at 4.2.2 or later.
+- **`--trace-ids` finds a base64 identifier where it is kept as bytes, and names the protobuf field a
+  hit is in** — `scripts/trace_ids.py`. An identifier that is base64 (padded, using `+` or `/`, or
+  mixing cases and digits) is also searched as the bytes it encodes, their hex, without its padding
+  and in the other base64 alphabet; it used to be searched as the text given only, so the same id
+  stored as raw bytes in another database was reported as not there. A row-level hit inside a protobuf
+  blob now carries `field` — the dotted path of the field it lies in, read from the wire alone
+  (`protobuf_wire.field_path`) — so the trace says where in a `message_content` an id sits, not only
+  which row. A shorter form found inside a longer one at the same place is reported once, as the
+  longer one. A raw hit in a database file on a free page, in a page's unallocated space or in a
+  freeblock now says so (`where`) and is marked as in no row, hit by hit — it used to count as "in
+  rows" whenever some other row held the same identifier. See [docs/trace_ids.md](docs/trace_ids.md).
 - **The build no longer warns that FreeSimpleGUI imports pydoc.** `Snapchat_Auto.py` carries
   `# nuitka-project: --noinclude-pydoc-mode=allow`, which Nuitka reads for the portable EXE and the
   MSI alike: pydoc stays in the build (leaving it out breaks `import FreeSimpleGUI`) and the warning

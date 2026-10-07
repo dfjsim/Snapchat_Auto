@@ -26,8 +26,14 @@ searched for, so it stays with the case like the rest of the run folder.
 | `bytes` | 32 hex digits (a UUID, a `CACHE_KEY`) as the 16 bytes themselves |
 | `bytes-uuid-le` | the same UUID in the GUID byte order Windows and .NET use (first three groups little-endian) |
 | `base64`, `base64url` | the 16 bytes in base64, without padding (`base64url` only where it differs) |
+| `bytes (base64-decoded)`, `hex (base64-decoded)` | an identifier that is base64 — padded with `=`, using `+` or `/`, or mixing upper case, lower case and digits, and decoding cleanly — as the bytes it encodes, and their hex. An app that keeps an id as base64 text in one store can keep it as raw bytes in another. Hex (a UUID, a `CACHE_KEY`, a number) is not read as base64 |
+| `base64 without padding`, `base64url` / `base64` | the same base64 identifier without its `=` padding, and in the other base64 alphabet (`-_` for `+/`, or the reverse), where that differs |
 
 Forms shorter than six bytes are not searched; they would match by chance.
+
+Where a shorter form is part of a longer one found at the same place — `ABC` inside `ABC~1`, `QUJD`
+inside `QUJD==` — only the longer one is reported; the shorter form is reported where it stands on its
+own.
 
 ## Where
 
@@ -39,8 +45,21 @@ Forms shorter than six bytes are not searched; they would match by chance.
   reports mark rows (see [sqlite_wal_handling.md](sqlite_wal_handling.md)). The row pass is what finds a
   value long enough to spill onto overflow pages, which page headers cut apart in the raw file. A table
   without a rowid is numbered in table order, because its primary key is evidence content.
+* A row-level hit inside a blob that is a **protobuf message** also names the **field** it lies in, as
+  the dotted path of field numbers from the outermost message in (`4.4.14.1`). The path is read from
+  the wire alone, the way every schema-less decode in the project reads (`protobuf_wire.field_path`):
+  it goes down while the match lies inside one length-delimited value that is not printable text and
+  parses as a message to its last byte. It is a location, like the row number, and what a field
+  *means* is for the report that reads it. No field is named for a text cell, for a blob that is not a
+  message, or for a match that crosses a field boundary.
 * A raw hit in a **database file** that no row of either reading accounts for is said to be "in no row
-  either reading returns" — a free page, unallocated space or a deleted record.
+  either reading returns" — a free page, unallocated space or a deleted record. Hit by hit, the file's
+  own page structure says which where it can: a hit on a page the **freelist** holds (`free page`),
+  between a b-tree page's cell pointers and its first cell (`unallocated space`), or in a released cell
+  (`freeblock`) is in no row, even when some other row holds the same identifier — a deleted record
+  of the same kind as a live one is exactly that case. The file is read as it stands (the last
+  checkpointed state); a page the `-wal` rewrote is read from the log by the merged reading, so what
+  sits at such an offset is returned by neither reading.
 * A raw hit in a **`-wal`** is placed in its frame and page, and a frame that a later frame for the same
   page superseded is marked **superseded**: deleted prior state that neither reading returns.
 
@@ -57,10 +76,14 @@ Forms shorter than six bytes are not searched; they would match by chance.
  "ids":  [{"index": 0, "id": "…", "forms": ["text", "text-utf16le", "hex", "bytes", …]}],
  "hits": [{"id": 0, "kind": "sqlite", "file": "…", "device_path": "…", "table": "…", "column": "…",
            "row": 12, "cell": "text|blob|blob: binary plist|…", "form": "text", "case": "upper",
-           "reading": "main+wal|wal-only|main-only"},
+           "reading": "main+wal|wal-only|main-only", "field": "4.4.14.1"},
           {"id": 0, "kind": "wal", "file": "…-wal", "offset": 0, "frame": 0, "page": 0,
            "where": "page image", "superseded": true, "form": "…", "case": "…"},
-          {"id": 0, "kind": "sqlite-file|file", "file": "…", "offset": 0, "in_rows": false, …}]}
+          {"id": 0, "kind": "sqlite-file|file", "file": "…", "offset": 0, "in_rows": false,
+           "where": "free page|unallocated space|freeblock", …}]}
 ```
+
+`field` is present only on a row-level hit inside a protobuf blob; `where` on a database-file hit
+only when it lies outside every live record.
 
 Exit code: **0** when anything was found, **1** when nothing was, **2** for bad arguments.

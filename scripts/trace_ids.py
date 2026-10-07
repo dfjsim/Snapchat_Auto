@@ -12,23 +12,29 @@ What is searched for, per identifier:
   an identifier with a ``~N`` suffix (the shape of some cache claim keys) is also searched without it;
 * for 32 hex digits — a UUID with or without dashes, a CACHE_KEY — also the dashless hex (``hex``),
   the 16 bytes themselves (``bytes``), a UUID's little-endian byte order (``bytes-uuid-le``) and the
-  bytes in base64 (``base64``, ``base64url``).
+  bytes in base64 (``base64``, ``base64url``);
+* for an identifier that is base64 — kept as text in one store, it may be raw bytes in another —
+  also the bytes it encodes and their hex (``bytes (base64-decoded)``, ``hex (base64-decoded)``),
+  and its other spellings: without its ``=`` padding, and in the other base64 alphabet.
 
 Where it is searched:
 
 * every file under ``<run folder>/ExtractedData``, raw, in chunks (``-shm`` index files skipped);
 * SQLite databases also row by row, through :mod:`scripts.data.sqlite_open` — both readings, with
   and without the ``-wal`` — so a hit is reported as table, column and row, and marked by which
-  reading holds it. A value split across overflow pages is invisible to the raw pass and found here;
+  reading holds it. A value split across overflow pages is invisible to the raw pass and found here.
+  A hit inside a blob that is a protobuf message also names the field it is in (``4.4.14.1``), read
+  from the wire alone (:func:`scripts.data.protobuf_wire.field_path`);
 * a ``-wal`` hit is placed in its frame and page, and a frame a later one superseded is marked as
   such: that is deleted prior state, which neither reading of the database returns.
 
-What it reports is **where**, never **what**: file, offset, table, column, row number, the
-encoding and the kind of cell. No cell value or file content is written to the log or the JSON —
-the output names locations in a case extraction, and that is all it should carry. It still names
-the identifiers searched for, so it stays with the case like the rest of the run folder.
+What it reports is **where**, never **what**: file, offset, table, column, row number, protobuf
+field, the encoding and the kind of cell. No cell value or file content is written to the log or the
+JSON — the output names locations in a case extraction, and that is all it should carry. It still
+names the identifiers searched for, so it stays with the case like the rest of the run folder.
 """
 import base64
+import binascii
 import datetime
 import json
 import logging
@@ -41,7 +47,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from scripts.data import sqlite_open
+from scripts.data import protobuf_wire, sqlite_open
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,9 @@ SQLITE_MAGIC = b"SQLite format 3\x00"
 _WAL_MAGICS = (0x377F0682, 0x377F0683)
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 _SUFFIX = re.compile(r"^(.+?)(~\d+)$")
+_HEXISH = re.compile(r"^[0-9a-fA-F-]+$")
+_B64_STD = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+_B64_URL = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 
 #: Exit codes, in the convention of the other diagnostics: found / nothing found / bad arguments.
 EXIT_FOUND, EXIT_NONE, EXIT_USAGE = 0, 1, 2
@@ -86,6 +95,34 @@ class Needle:
     folded: bool
 
 
+def base64_bytes(text):
+    """The bytes ``text`` encodes, when it reads as base64; else None.
+
+    It reads as base64 when it is padded with ``=``, uses ``+`` or ``/``, or mixes upper case, lower
+    case and digits — and decodes, in one alphabet, to bytes that encode back to exactly ``text``.
+    Hex is not read as base64 (a UUID, a CACHE_KEY or a number is made of base64 characters too, and
+    means something else), and neither is a plain word or username.
+    """
+    if _HEXISH.match(text):
+        return None
+    std, url = _B64_STD.match(text), _B64_URL.match(text)
+    if not (std or url):
+        return None
+    looks = any(ch in text for ch in "=+/") or (
+        any(ch.isupper() for ch in text) and any(ch.islower() for ch in text)
+        and any(ch.isdigit() for ch in text))
+    body = text.rstrip("=")
+    if not looks or len(body) % 4 == 1 or (body != text and len(text) % 4):
+        return None
+    decode, encode = ((base64.b64decode, base64.b64encode) if std
+                      else (base64.urlsafe_b64decode, base64.urlsafe_b64encode))
+    try:
+        raw = decode(body + "=" * (-len(body) % 4))
+    except (binascii.Error, ValueError):
+        return None
+    return raw if encode(raw).decode("ascii").rstrip("=") == body else None
+
+
 def needles_for(index, identifier):
     """Every search form of ``identifier`` (see the module docstring), duplicates removed."""
     ident = identifier.strip()
@@ -105,6 +142,20 @@ def needles_for(index, identifier):
         suffix = "" if i == 0 else " (without the ~N suffix)"
         add("text" + suffix, base.lower().encode("utf-8"), True)
         add("text-utf16le" + suffix, base.lower().encode("utf-16-le"), True)
+        decoded = base64_bytes(base)
+        if decoded is not None:
+            # A base64 text in one store and the bytes it encodes in another — padded in one place
+            # and not in the other, or in the other alphabet — is the same identifier.
+            add("bytes (base64-decoded)" + suffix, decoded, False)
+            add("hex (base64-decoded)" + suffix, decoded.hex().encode("ascii"), True)
+            body = base.rstrip("=")
+            if body != base:
+                add("base64 without padding" + suffix, body.encode("ascii"), False)
+            other = body.translate(str.maketrans("+/-_", "-_+/"))
+            if other != body:
+                add(("base64url" if "+" in body or "/" in body else "base64") + suffix,
+                    other.encode("ascii"), False)
+            continue
         digits = base.replace("-", "")
         if not _HEX32.match(digits):
             continue
@@ -205,6 +256,80 @@ def _wal_place(offset, page_size, frames):
             "superseded": superseded}
 
 
+# ------------------------------------------------------------------------ SQLite free space
+
+def _free_places(db_path, offsets):
+    """``{offset: place}`` for each offset of the database file that lies outside every live record.
+
+    The place is ``free page`` (a page on the file's freelist), ``unallocated space`` (between a
+    b-tree page's cell pointers and its first cell) or ``freeblock`` (a released cell on a b-tree
+    page) — all three keep what deleted or moved records held. An offset in a live cell, an overflow
+    page or the header is left out. This is the file as it stands, i.e. the last checkpointed state:
+    a page the ``-wal`` rewrote is read from the log by the merged reading, so what sits at these
+    offsets is returned by neither reading.
+    """
+    out = {}
+    try:
+        with open(db_path, "rb") as fh:
+            header = fh.read(100)
+            if len(header) < 100 or not header.startswith(SQLITE_MAGIC):
+                return out
+            page_size = int.from_bytes(header[16:18], "big")
+            page_size = 65536 if page_size == 1 else page_size
+            if not 512 <= page_size <= 65536 or page_size & (page_size - 1):
+                return out                                         # not a page size: a damaged header
+            free = _freelist(fh, page_size, int.from_bytes(header[32:36], "big"),
+                             int.from_bytes(header[36:40], "big"))
+            for offset in offsets:
+                page = offset // page_size + 1
+                if page in free:
+                    out[offset] = "free page"
+                    continue
+                fh.seek((page - 1) * page_size)
+                where = _place_in_page(fh.read(page_size), 100 if page == 1 else 0,
+                                       offset - (page - 1) * page_size)
+                if where:
+                    out[offset] = where
+    except OSError as error:
+        logger.debug(f"{db_path}: page structure not readable ({error})")
+    return out
+
+
+def _freelist(fh, page_size, trunk, count):
+    """Every page number on the freelist: its trunk pages and the leaf pages they list."""
+    free = set()
+    while trunk and trunk not in free and len(free) <= count:
+        free.add(trunk)
+        fh.seek((trunk - 1) * page_size)
+        head = fh.read(8)
+        if len(head) < 8:
+            break
+        nxt, n = int.from_bytes(head[:4], "big"), int.from_bytes(head[4:], "big")
+        leaves = fh.read(4 * min(n, page_size // 4 - 2))
+        free.update(int.from_bytes(leaves[i:i + 4], "big") for i in range(0, len(leaves) - 3, 4))
+        trunk = nxt
+    return free
+
+
+def _place_in_page(page, hdr, within):
+    """``unallocated space`` / ``freeblock`` for an offset into a b-tree page, else ""."""
+    if len(page) < hdr + 8 or page[hdr] not in (2, 5, 10, 13):    # not a b-tree page
+        return ""
+    cells = int.from_bytes(page[hdr + 3:hdr + 5], "big")
+    pointers_end = hdr + (12 if page[hdr] in (2, 5) else 8) + 2 * cells
+    content = int.from_bytes(page[hdr + 5:hdr + 7], "big") or 65536
+    if pointers_end <= within < content:
+        return "unallocated space"
+    block, seen = int.from_bytes(page[hdr + 1:hdr + 3], "big"), set()
+    while block and block not in seen and block + 4 <= len(page):
+        seen.add(block)
+        size = int.from_bytes(page[block + 2:block + 4], "big")
+        if block <= within < block + size:
+            return "freeblock"
+        block = int.from_bytes(page[block:block + 2], "big")
+    return ""
+
+
 # ---------------------------------------------------------------------------------- SQLite rows
 
 def _cell_kind(value):
@@ -246,7 +371,11 @@ def _rows(conn, table):
 
 
 def _sql_hits(conn, needles):
-    """``{(table, column, row, form, case, cell kind)}`` for one reading of a database."""
+    """``{(table, column, row, id, form, case, cell kind, protobuf field)}`` for one reading.
+
+    The field is the dotted path of the protobuf field a blob hit lies in (``4.4.14.1``), and "" for
+    a text cell, a blob that is not a protobuf message, or a hit that is not inside one field.
+    """
     found = set()
     if conn is None:
         return found
@@ -266,9 +395,11 @@ def _sql_hits(conn, needles):
                     continue
                 if len(data) < MIN_NEEDLE:
                     continue
-                for needle, _off, case in scan_bytes(data, needles):
+                for needle, off, case in scan_bytes(data, needles):
+                    field = "" if isinstance(value, str) else ".".join(
+                        str(n) for n in protobuf_wire.field_path(data, off, off + len(needle.data)))
                     found.add((table, col, label, needle.index, needle.form, case,
-                               _cell_kind(value)))
+                               _cell_kind(value), field))
     return found
 
 
@@ -291,9 +422,12 @@ def scan_database(db_path, needles):
     for key in sorted(merged | main, key=lambda k: tuple(str(x) for x in k)):
         reading = (sqlite_open.BOTH if key in merged and key in main
                    else sqlite_open.WAL_ONLY if key in merged else sqlite_open.MAIN_ONLY)
-        table, col, label, index, form, case, kind = key
-        out.append({"id": index, "form": form, "case": case, "kind": "sqlite", "table": table,
-                    "column": col, "row": label, "cell": kind, "reading": reading})
+        table, col, label, index, form, case, kind, field = key
+        hit = {"id": index, "form": form, "case": case, "kind": "sqlite", "table": table,
+               "column": col, "row": label, "cell": kind, "reading": reading}
+        if field:
+            hit["field"] = field
+        out.append(hit)
     return out
 
 
@@ -321,12 +455,8 @@ def extracted_root(run_folder):
     return candidate if os.path.isdir(candidate) else run_folder
 
 
-def trace(run_folder, identifiers, progress=None):
-    """Search ``run_folder``'s extracted files for ``identifiers``; return the report as a dict."""
-    progress = progress or logger.info
-    root = extracted_root(run_folder)
-    needles = [n for i, ident in enumerate(identifiers) for n in needles_for(i, ident)]
-    started = time.monotonic()
+def device_path_namer(root):
+    """A function naming an extracted file by its path on the device (as the reports do)."""
     try:
         from scripts import memories_media_report as _mr
         manifest = _mr.load_path_manifest(root)
@@ -336,6 +466,16 @@ def trace(run_folder, identifiers, progress=None):
     except Exception:                                              # noqa: BLE001 - display only
         def shown(path):
             return "/" + os.path.relpath(path, root).replace("\\", "/")
+    return shown
+
+
+def trace(run_folder, identifiers, progress=None):
+    """Search ``run_folder``'s extracted files for ``identifiers``; return the report as a dict."""
+    progress = progress or logger.info
+    root = extracted_root(run_folder)
+    needles = [n for i, ident in enumerate(identifiers) for n in needles_for(i, ident)]
+    started = time.monotonic()
+    shown = device_path_namer(root)
 
     hits, scanned_bytes, scanned_files, next_note = [], 0, 0, PROGRESS_EVERY
     databases, raw_hit = set(), set()          # SQLite files seen; databases the raw pass hit
@@ -382,13 +522,18 @@ def trace(run_folder, identifiers, progress=None):
         hits += rows
         # A raw hit in the database file that no row of either reading accounts for sits in a free
         # page, unallocated space or a deleted record: say so, rather than leave the examiner to
-        # wonder why the file matches and the table does not.
+        # wonder why the file matches and the table does not. Hit by hit where the file's own page
+        # structure places it outside every live record; an identifier no row holds, everywhere.
         in_rows = {r["id"] for r in rows}
-        for h in hits:
-            if h["kind"] == "sqlite-file" and h["file"] == rel:
-                h["in_rows"] = h["id"] in in_rows
+        mine = [h for h in hits if h["kind"] == "sqlite-file" and h["file"] == rel]
+        places = _free_places(path, [h["offset"] for h in mine]) if mine else {}
+        for h in mine:
+            where = places.get(h["offset"], "")
+            h["in_rows"] = h["id"] in in_rows and not where
+            if where:
+                h["where"] = where
 
-    hits = _drop_suffix_echoes(hits)
+    hits = _drop_echoes(hits, needles)
     payload = {
         "tool": "Snapchat_Auto --trace-ids",
         "version": _version(),
@@ -405,17 +550,27 @@ def trace(run_folder, identifiers, progress=None):
     return payload
 
 
-def _drop_suffix_echoes(hits):
-    """Drop the hits of a suffix-less form at a place the full identifier was found too.
+def _drop_echoes(hits, needles):
+    """Drop the hits of a form at a place where a longer form that contains it was found too.
 
-    ``ABC~1`` stored in a cell is also an occurrence of ``ABC``; reporting both says the same thing
-    twice. The suffix-less form is kept where it stands on its own, which is the point of searching it.
+    ``ABC~1`` stored in a cell is also an occurrence of ``ABC``, and ``QUJD==`` one of ``QUJD``;
+    reporting both says the same thing twice. The shorter form is kept where it stands on its own,
+    which is the point of searching it.
     """
+    data = {(n.index, n.form): n.data.lower() for n in needles}
+
     def place(h):
         return (h["id"], h["file"], h["kind"], h.get("offset"), h.get("table"), h.get("column"),
-                h.get("row"))
-    full = {place(h) for h in hits if "without the ~N suffix" not in h["form"]}
-    return [h for h in hits if "without the ~N suffix" not in h["form"] or place(h) not in full]
+                h.get("row"), h.get("field"))
+    forms_at = {}
+    for h in hits:
+        forms_at.setdefault(place(h), set()).add(h["form"])
+
+    def echo(h):
+        mine = data.get((h["id"], h["form"]), b"")
+        return any(len(longer) > len(mine) and mine in longer
+                   for longer in (data.get((h["id"], form), b"") for form in forms_at[place(h)]))
+    return [h for h in hits if not echo(h)]
 
 
 def _version():
@@ -446,8 +601,10 @@ def describe(payload):
         rows = [h for h in mine if h["kind"] == "sqlite"]
         for h in rows[:LOG_ROWS_PER_ID]:
             case = f", {h['case']} case" if h.get("case") else ""
+            field = f" field {h['field']}" if h.get("field") else ""
             lines.append(f"  {h.get('device_path') or h['file']} > {h['table']}.{h['column']} "
-                         f"row {h['row']} [{h['cell']}; {h['form']}{case}; reading {h['reading']}]")
+                         f"row {h['row']}{field} [{h['cell']}; {h['form']}{case}; "
+                         f"reading {h['reading']}]")
         if len(rows) > LOG_ROWS_PER_ID:
             lines.append(f"  ... and {len(rows) - LOG_ROWS_PER_ID} more row(s) - see the JSON")
         groups = {}
@@ -459,6 +616,8 @@ def describe(payload):
                          else "latest frames" if "frame" in h else h.get("where", ""))
             elif h["kind"] == "sqlite-file":
                 state = ("database file" if h.get("in_rows", True) else
+                         f"database file, {h['where']} - in no row either reading returns"
+                         if h.get("where") else
                          "database file, in no row either reading returns (free page, unallocated "
                          "space or a deleted record)")
             else:
