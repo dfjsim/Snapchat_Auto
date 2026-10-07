@@ -187,7 +187,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
   3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required
-  at 4.2.2 or later.
+  at 4.2.2 or later. That runtime keeps the Tcl/Tk 9 script libraries inside its Tcl DLLs, where Nuitka's
+  tk-inter plugin does not look, so both builds stopped with "Could not find Tcl": a Nuitka user plugin,
+  `build_tools/nuitka_tcl_zipfs.py` (named by a `# nuitka-project:` line in `Snapchat_Auto.py`),
+  extracts them from those DLLs into `build/tcl_zipfs/` for the plugin to bundle.
 - **`--trace-ids` finds a base64 identifier where it is kept as bytes, and names the protobuf field a
   hit is in** — `scripts/trace_ids.py`. An identifier that is base64 (padded, using `+` or `/`, or
   mixing cases and digits) is also searched as the bytes it encodes, their hex, without its padding

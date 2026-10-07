@@ -132,7 +132,9 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   imports the same module (`scripts/selection_file.py` re-exports it) — one implementation. Its
   dependency list must stay empty; a test walks its ASTs to enforce that.
 - Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd` (portable onefile
-  EXE), MSI via `uv run build` (`dfjsim_shared_tools`). `[project].version` carries a
+  EXE), MSI via `uv run build` (`dfjsim_shared_tools`). Both load `build_tools/nuitka_tcl_zipfs.py`, a
+  Nuitka user plugin named in `Snapchat_Auto.py`, which extracts the Tcl/Tk 9 libraries the python.org
+  runtime keeps inside its Tcl DLLs — without it tk-inter stops with "Could not find Tcl". `[project].version` carries a
   `+build.<N>` tag because the optional update check compares it against installer filenames —
   `dfjsim_shared_tools.auto_update` does the checking, `Snapchat_Auto.py` the wiring, see
   [auto_update.md](docs/auto_update.md). The folder it checks is

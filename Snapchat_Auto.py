@@ -3,6 +3,9 @@
 # anti-bloat plugin warns about it on every build. "allow" keeps pydoc in the build — leaving it out
 # breaks "import FreeSimpleGUI" — and only stops the warning. Nuitka reads the line above from this
 # file, so the portable EXE (build_nuitka.cmd) and the MSI (uv run build) both get it.
+# nuitka-project: --user-plugin={MAIN_DIRECTORY}/build_tools/nuitka_tcl_zipfs.py
+# The Python install manager's CPython keeps the Tcl/Tk 9 script libraries inside its Tcl DLLs, where
+# Nuitka's tk-inter plugin does not look ("Could not find Tcl"); the plugin above extracts them for it.
 import sys
 
 # Re-entry as a thumbnail worker (scripts/data/poster_worker.py): a packaged build has no interpreter
