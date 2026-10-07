@@ -9,6 +9,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 ## [Unreleased]
 
 ### Changed
+- **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
+  python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
+  3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required
+  at 4.2.2 or later.
 - **The build no longer warns that FreeSimpleGUI imports pydoc.** `Snapchat_Auto.py` carries
   `# nuitka-project: --noinclude-pydoc-mode=allow`, which Nuitka reads for the portable EXE and the
   MSI alike: pydoc stays in the build (leaving it out breaks `import FreeSimpleGUI`) and the warning

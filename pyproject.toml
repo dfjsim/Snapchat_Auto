@@ -1,6 +1,6 @@
 [project]
     name = "Snapchat_Auto"
-    version = "1.9.0-beta.2+build.20261005"
+    version = "1.9.0-beta.3+build.20261006"
     description = "Add your description here"
     readme = "README.md"
     requires-python = ">=3.14,<3.15"
@@ -12,7 +12,7 @@
         "pillow",
         "pycryptodome",
         "freesimplegui",
-        "nuitka",
+        "nuitka>=4.2.2",
         "dfjsim_shared_tools",
         # The selection file format, in its own dependency-free distribution so an external tool can
         # produce a selection without taking on anything above. The application imports the same
@@ -42,6 +42,12 @@
 
 [tool.uv]
     package = true
+    # Prefer the python.org runtime (Python install manager) over uv's own downloads whenever uv picks an
+    # interpreter, e.g. when it rebuilds .venv. uv's default prefers its managed copies, and on the development
+    # machine that is an older 3.14 (3.14.3) — measured 2026-10-06: after an in-place `py install --update`, a stale
+    # .venv/pyvenv.cfg version made a cold-cache `uv run` delete .venv and recreate it on that copy, which the MSI
+    # build would then have bundled.
+    python-preference = "system"
 
     # A path inside this repository, unlike the local editable path this replaced: a fresh clone
     # resolves it, which is what makes the build reproducible for anyone.
@@ -72,7 +78,7 @@
     # The date lives in the fourth field, which Windows Installer **ignores** when comparing versions.
     # That is safe here only because the bundled WiX template sets AllowSameVersionUpgrades="yes":
     # without it, a second beta sharing these first three fields would not be seen as an upgrade.
-    version = "1.9.0.20261005"
+    version = "1.9.0.20261006"
 
 [tool.wix-build]
     # Copied next to the built executable and into the MSI. pyproject.toml is how the installed
