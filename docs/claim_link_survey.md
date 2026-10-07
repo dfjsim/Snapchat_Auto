@@ -40,9 +40,15 @@ Run it on a run folder the full pipeline produced: the reports' own links are re
   that `cache_controller.db` from, an iOS container or an Android app folder), `Memory: listed in its
   filter record` (a key that is the URL of an asset of a geofilter a Memory's overlay record,
   `ZGALLERYSNAPDETAIL.ZOVERLAY`, lists — by the report's own `_overlay_links_for`, the whole URL; never
-  the Memory's media), or `none`. The first that applies, in that order. The record's URLs are still
-  found by the database scan below as `(text inside the blob)` of `scdb-27.sqlite3`, since a binary
-  plist is read there for its printable strings.
+  the Memory's media), `creative-tools item (ctp__item_5)` (a key an item of an account's
+  creative-tools store, `primary.docobjects` › `ctp__item_5`, names: the whole key, or the key after a
+  word and `:` or `~`, is a text the item holds — an asset URL, its item_id or its own id — or the same
+  bytes as its own id; by `ctp_items.match`, the rule the report applies, every account's store of the
+  app folder read; see [report_cache_controller.md](report_cache_controller.md#creative-tools-items--primarydocobjects--ctp__item_5)),
+  or `none`. The first that applies, in that order. The record's URLs are still found by the database
+  scan below as `(text inside the blob)` of `scdb-27.sqlite3`, since a binary plist is read there for
+  its printable strings; so are an item's texts in `primary.docobjects`, whose `ctp__item_5.p` is a
+  FlatBuffers document with the protobuf inside it.
 * **The databases.** Every row of every table of every SQLite database of `ExtractedData/` (at most
   256 MB each — larger ones are listed as skipped), both readings. `arroyo.db` is what a link to a
   message reads; the others say what else holds an id — a Story, a preference, a Memory. For a claim,

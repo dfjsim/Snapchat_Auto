@@ -105,7 +105,9 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   Snap's TSAF containers — `user.plist` and `ClientEncryptionService.plist` are not plists — whose
   one rule is that a value must *immediately* follow its key; and `flatbuffers_doc.py`, a root-table
   reader for the `*.docobjects` FlatBuffers documents that hands back a name only when the document's
-  slot 0 is the user id the caller already knows; and `arroyo_content.py`, what an arroyo.db
+  slot 0 is the user id the caller already knows (and, one level deeper, a sub-table's slots and a
+  `[ubyte]` vector — `table_field`, `bytes_field`, `string_field(…, table=)` — for the creative-tools
+  items, behind the same slot-0 self-check); and `arroyo_content.py`, what an arroyo.db
   `conversation_message` row *is* — every `content_type` named, and its `message_content` body (4.4)
   described: app events from their own fields, shares, replies — read straight off the wire, and a
   kind it does not know named by its field number, never guessed; and `keyed_archive.py`, a strict
@@ -115,7 +117,14 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   `snap_overlay.py`, a Memory's overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`) and the asset URLs of
   the geofilters it lists, with `normalise_url`, the one whole-URL rule a claim key is matched to a URL
   by — a listed filter is never said to be on the Memory, and a file matched this way is never its
-  media).
+  media; and `ctp_items.py`, the creative-tools item store (`primary.docobjects` › `ctp__item_5`, every
+  account's, both readings, staged in a temp folder: a FlatBuffers document with a protobuf inside, the
+  feed named only from `ctp__feedtree`) and the cached files its items name — exact whole texts only
+  (the whole key, the key after `<word>:` / `<word>~`, or the same id bytes), never a query parameter
+  or a part of a text, a text two items of a store hold attributed to neither, the `item_id` column
+  matched even when the document has another layout; information on the entry, never a link; and
+  `base64_text.py`, the one rule for when a text is base64, shared by `--trace-ids`, the survey and
+  the item matcher).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app

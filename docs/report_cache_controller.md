@@ -307,6 +307,17 @@ that is an asset of a filter a Memory's overlay record lists keeps its category 
 URL-keyed claim — because that link is a relation of its own, not a statement of what the file is (see
 [below](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
 
+One category comes from another database: *Creative tools asset*, a file an item of an account's
+creative-tools store names ([below](#creative-tools-items--primarydocobjects--ctp__item_5)). It takes
+the place of *CDN media*, *Other* or *Chat media* only — never of a category the key's shape gives
+(*Lens*, *Snap editor*, a Memory's) — and only when no chat message and no Memory links to the file:
+those say what the file is. A filter listing does not hold it back, being a relation and not what the
+file is. The claims table keeps each claim's own category and context label (`2 (Chat media)`, a
+reading of the number): the contexts labelled *Chat media* claim creative-tools assets — custom stickers
+among them — as well as chat media, and on such a row a "?" beside the context says so. The
+category is applied after the key's (`build_entries`), not in `classify_external_key`, so the key-based
+categories are what they were.
+
 ### Context 34 — the snap editor's working copy
 
 Claims with `MEDIA_CONTEXT_TYPE` 34 are keyed `<UUID>~<position>` and claim the files of a snap being
@@ -338,6 +349,97 @@ on the device too, the file links to it *by content* (≡, rule 5 in
 [cross_report_linking.md](cross_report_linking.md)); when it is not, the retrieval from Snapchat's
 servers can supply the reference (☁), and until then the file is a lead.
 
+### Creative-tools items — primary.docobjects › ctp__item_5
+
+Each account keeps a store at `Documents/user_scoped/<userHash>/DocObjects/primary.docobjects` (SQLite;
+`userHash` is SHA-256 of the account's user id — the contacts' store too). Beside the contacts it holds
+the items of the feeds the camera's creative tools are filled from — captions, filters, stickers — in
+`ctp__item_5(rowid, p BLOB, item_id STRING UNIQUE)`, one row per item. `scripts/data/ctp_items.py` reads
+it, every account's store, both readings, staged in a temporary folder (never beside the report: it would
+put the contacts' store into the report folder). `p` is a FlatBuffers document; its root table:
+
+| slot | value |
+|---|---|
+| 0 | the row's `item_id` again — the self-check: a document whose slot 0 is not its item_id is not read |
+| 1 | a rank text, equal to `index_ctp__item_5rank_id.rank_id` of the row — not read |
+| 2 | a `[ubyte]` vector holding a protobuf message: the item's **payload** |
+| 3 | the item's own id: standard padded base64 of payload field 6 |
+| 4 | a sub-table whose slot 0 is the item's feed, `feed:<TYPE>-<CONTEXT>-<n>` |
+| 5–9 | small integers, a digit text and a short base64 value many items share — not read |
+
+On the stores examined the `item_id` is `<own id>-<feed>-<n>`; it is read from its column, never rebuilt.
+The payload parses as a protobuf to its last byte. Its field 2 holds exactly one field, whose number is
+the item's **kind** as stored — `2.11` on the captions feed's items, `2.16` on the filters feed's, `2.7`
+and `2.15` on two feeds of other contexts — field 6 is the own id as bytes (8 bytes on most items, 13 on
+one kind), field 4 the same id as an integer when it is 8 bytes. Its texts are style and font names,
+colours, a JSON text and the URLs of the item's assets: a font file and a caption asset under `2.11`, a
+filter image (`2.16.2.1.1`), its CDN copy (`2.16.2.1.2`), a filter font (`2.16.7.1.5.1`) and a geofilter
+PNG (`2.16.15.3.3`) under `2.16`, CDN assets under `2.7.10.1` / `2.7.11.1` and `2.15.1.3.4.1` / `.2`. They
+are shown as stored, under their field numbers, which are numbers and not names. A field 2 that is not a
+message of one field (a number, a text) gives no kind, and the payload's texts are still read. No item in
+this layout carries a date, and none names a snap (verified on the stores examined); a document of another
+layout is not read, so what it holds is not known.
+
+The feed is named from the store's **feed tree**, `ctp__feedtree(rowid, p BLOB, context INTEGER UNIQUE)`:
+per context a FlatBuffers document whose slot 2 is an NSKeyedArchiver archive (`keyed_archive`) of a
+`CTPFeed` — `FEED_ID` (`TYPE`, `CONTEXT`), `NAME`, `SOURCE.COMPUTE_ENDPOINT` (the
+`/snapchat.creativetools.<service>.ComputeFeedService/ComputeFeed` it is fetched from) and `CHILD_FEEDS`
+(slot 0 is the context, slot 1 a Cocoa time). A feed's short name is the word after `.creativetools.` in
+its endpoint (`captions`, `filters`, `custom-stickers`, …), else its `NAME`. Only context 2 has a tree on
+the devices examined, so items of `feed:19-1-0` or `feed:16-6-0` read *not in ctp__feedtree* — their
+numbers are never read as a name. Both readings of the tree are read: the current one names a feed, and a
+feed only the checkpointed version lists is named as prior state — *(prior state)* beside the name, and
+the "?" says the `-wal`'s tree does not list it. A tree document that does not hold a `CTPFeed` archive is
+not read; a feed missing from the trees that were read then reads *ctp__feedtree not decoded*, never *not
+in ctp__feedtree*, since whether the unread tree lists it is not known — and the run log counts such
+documents per store.
+
+**The match** (`ctp_items.match`) is an exact identity of whole texts, in this order, the first rule that
+finds an item deciding:
+
+1. **the whole key** is a text the item holds — a URL in the form `snap_overlay.normalise_url` gives it,
+   the one URL rule the reports share (so a key with an empty trailing `?` is the item's URL), anything
+   else as it is; the item_id and the own id are texts the item holds too;
+2. **the key after a word and `:` or `~`** (`music:<url>`, `customSticker:<id>`, `customSticker~<id>`;
+   never `://`, which is a URL) is such a text — a payload text, the item_id or the own id;
+3. failing those, that part of the key **read as base64 is the same bytes** as the item's own id —
+   payload field 6, or the item_id or slot 3 read as base64 — in either alphabet, padded or not, when
+   that part reads as base64 by the rule `--trace-ids` reads ids by (`base64_text.base64_bytes`: padded
+   with `=`, or using `+` or `/`, or mixing upper case, lower case and digits). An unpadded id with none
+   of these is not read as base64 and matches by its text only.
+
+Never matched: a URL's query values on their own (`bo=`, `mo=`, `uc=` — a `bo=` value decodes to a
+protobuf of fetch options with no id in it, and one value is shared by many cached files whose `/d/` id
+no item holds), a path segment alone, a part of a text, a text shorter than 8 characters or of digits
+only, and a text two items of one store hold — attributed to neither, and not matched in that store by
+a later rule either: the first rule that finds the text in a store decides for it, so the bytes rule
+never picks one of the items whose text was ambiguous. The same asset URL in two
+accounts' stores is listed twice, each saying whose store holds it. A document of another layout is
+still an item: its `item_id` column is indexed whatever the document holds, so a key naming the item by
+it matches, and the detail says *document not decoded (layout differs)* rather than reading it on a
+guess; the run log counts such documents per store. A document whose reading fails is one of those, and
+a store that cannot be read at all loses its items, never the report.
+
+Both readings are read. The `-wal` rewrites these rows: an item can have one version in each reading,
+and the two readings then do not agree on its row. The version shown is the one that holds the matched
+text — the one both readings hold, else the `-wal`'s, else the checkpointed file's — and its *(read from)*
+cell is that version's own reading. A text the `-wal`'s version holds is badged *-wal only*, and when the
+checkpointed version holds it too, the explanation adds that the row was rewritten and that the older
+version's other texts are not shown; a text only the checkpointed version holds is badged *no -wal only* —
+prior state, not the store's current content. The header's store line says whether the two readings
+differ of the two tables read, `ctp__item_5` and `ctp__feedtree`, never of the whole store: its other
+tables, the contacts among them, are not compared.
+
+Verified on the two test devices where an item names a cached file: every changed entry's item is the one
+a byte search (`instr(p, <key>)`) of a read-only copy of the store returns, in the reading its badge
+names. On the device whose caption items hold `bo=` values of cached files, those files are not matched:
+no item holds their key. On the third device whose store holds items, no claim's key occurs in any item,
+and no entry changes.
+
+What an item this report reads does **not** say: when the account had it, whether it put it in a snap,
+or which. It says that the app keeps, in that account's store, an item whose asset or id the cached file
+is named by. A document of another layout is not read, so what it holds is not known.
+
 ## Possible Memory — leads, never links
 
 Some cached media is a Memory's media with nothing on the device to say so: the snap editor's working
@@ -351,7 +453,8 @@ the file's: each claim's `CREATION_TIMESTAMP_MILLIS`, and the device's birth, mo
 of the file, against the Memory's `ZGALLERYSNAP.ZCREATETIMEUTC`, `ZCAPTURETIMEUTC` and its entry's
 `ZCREATETIMEUTC`. At most five, ranked by the closest pair, each with every difference, and the panel
 says how many Memories fell inside the window. `ZDURATION` is not used: it has been seen to differ from
-the media's real length.
+the media's real length. A file a creative-tools item names is never a lead, whatever its category: the
+item explains it.
 
 It is a lead, not a link: shown in its own *Possible Memory — NOT proven* panel with a dashed chip,
 never as the 🧠 link, never counted as linked, never followed by a partial report (no closure edge).
@@ -441,6 +544,20 @@ case**, filtered with **Selected only** and saved with **💾 Save selections** 
 Memories report through `Reports/selection.js`. See [report_ui.md](report_ui.md). Keep the `data/`
 and `files/` folders next to the HTML file.
 
+A file a creative-tools item names (`entry["ctp_items"]`) has a detail section *Named by a
+creative-tools item — primary.docobjects › ctp__item_5*, after the snap editor's session record: per
+item, whose store it is (the account, *the claiming account's own store* or *another account's store*,
+and the store's device path), its item_id and own id, its feed as the tree names it, its kind (*payload
+field 2.k*), which part of the key names it and where in the item (*the whole key* / *the key after
+music:* … with the field path, and a "?" spelling out the match) and the reading; then the item's texts
+as stored, URLs first, at most 40. The row's search text gains the item_id, the own id, the feed, its
+short name and endpoint, the kind and those texts — not the category's name, which a file that kept its
+category is not filed under. The header gains a count line naming the store(s) read and their `-wal`
+state (whether the readings differ is said of the two tables read, not of the store), and the Category
+filter the *Creative tools asset* value — each only when
+some entry has an item, so a report with none is byte for byte what it was; the run log gives the
+count on a line of its own. There is no chip: it is not a link.
+
 ## Coverage caveats (does every SCContent file have a claim?)
 
 **No.** `cache_controller.db` does not index every physical file in the
@@ -482,7 +599,10 @@ and — so that every cache entry of a message links back, not only the file the
 by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`. Apart from all of
 these, **→ Memory, filter listed**: a claim key that is the URL of an asset of a geofilter a Memory's
 overlay record lists links to that Memory under a relation of its own, never as its media (see
-[above](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
+[above](#assets-of-a-filter-listed-with-a-memory--not-its-media)). A creative-tools item that names a file
+is **information on the entry, not a link**: the item store has no report of its own, so there is no
+target, no anchor, no `report_ui.xref` and no partial-report edge — the section belongs to the entry and
+travels with it into a partial extract, and no copy of the store is staged into the report folder.
 
 ## Android
 
@@ -496,7 +616,10 @@ it for both (`android_layout.scan`), `load_memory_index` reads the Memories from
 their words from `PLATFORM_WORDS` — `memories_snap._id` rather than `ZSNAPID`. Device paths are shown
 as `/data/data/com.snapchat.android/…`. The overlay record a filter-asset link is made from is read on
 iOS only — its Android counterpart, if `memories.db` has one, was not examined — so the Android index has
-no `overlay_urls` and its report none of that link's chips, filter option or header line. See
+no `overlay_urls` and its report none of that link's chips, filter option or header line. The same goes
+for the creative-tools items: `ctp_items.find_stores` looks in the iOS layout
+(`Documents/user_scoped/*/DocObjects/`), its Android counterpart was not examined, and on an Android app
+folder it finds no store — no item, no category, no section or header line. See
 [snapchat_android.md](snapchat_android.md).
 
 ## Standalone use

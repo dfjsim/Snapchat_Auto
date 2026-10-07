@@ -184,6 +184,16 @@ snap's geofilters, and three fields of a geofilter hold a URL: `imageUrl`,
 Both reports read the record through the same module and match by the same rule, so the Memory's page
 lists the same files (see below) without a manifest passing between them.
 
+### Not a link: a creative-tools item that names a cached file
+
+An item of an account's creative-tools store (`primary.docobjects` › `ctp__item_5`, read by
+`scripts/data/ctp_items.py`) can name a cached file — the claim key is one of the item's asset URLs, or
+names the item by its id — and the cache_controller report says so on the entry, as an explanation of
+what the file is (*Creative tools asset*). It is not a cross-report link: the store has no report, so
+there is no target and no anchor, it goes through neither `report_ui.xref` nor a partial-report edge, and
+nothing points back at the entry. The rule and the store's layout are in
+[report_cache_controller.md](report_cache_controller.md#creative-tools-items--primarydocobjects--ctp__item_5).
+
 ### Which `EXTERNAL_KEY` shapes name a Memory
 
 One list, read by **both** reports, because they link in opposite directions and a shape only one

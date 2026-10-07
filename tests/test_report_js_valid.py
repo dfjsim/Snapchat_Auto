@@ -101,6 +101,29 @@ def test_the_cache_controller_shell_parses(tmp_path):
 
 
 @needs_node
+def test_the_cache_controller_data_parses_with_a_creative_tools_item_s_texts(tmp_path):
+    """An item's texts are shown as stored — quotes, markup and a closing script tag included — in
+    the detail chunk and the row's search text: both must still be JavaScript."""
+    import ctp_fixture
+    import overlay_fixture
+    app = str(tmp_path / "app")
+    nasty = "</script><script>alert(\"x\")</script>'\\u2028"
+    item_id, doc = ctp_fixture.filter_item(image=ctp_fixture.FILTER_IMAGE + "?n=" + nasty)
+    ctp_fixture.store(app, [(item_id, doc)])
+    overlay_fixture.cache_db(app, [("a" * 32, 25, ctp_fixture.FILTER_CDN)])
+    out = str(tmp_path / "Reports" / "CacheController")
+    stage = cache_controller_report.index(app, outdir=out, tz="utc")
+    assert stage.model[0]["ctp_items"]
+    path = cache_controller_report.render(stage)
+    assert _check_inline_scripts(path)
+    for name in ("index.js", "detail-0.js"):
+        with open(os.path.join(out, "data", name), encoding="utf-8") as fh:
+            source = fh.read()
+        assert "ctp__item_5" in source and "alert" in source       # the item, and its texts
+        _check_js(source, f"CacheController/data/{name}")
+
+
+@needs_node
 def test_the_memories_shell_parses(tmp_path):
     path, _linked, _located = memories_media_report.generate_report(
         {}, str(tmp_path / "Memories"), False, run_id="RUN-1")

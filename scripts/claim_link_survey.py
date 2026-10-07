@@ -17,8 +17,9 @@ this answers it for every claim at once, so one run on the case says which link 
 The result is grouped by the claim key's **shape**: the key with each id replaced by a placeholder
 (``<uuid>``, ``<hex32>``, ``<b64:13>``, ``<id>``, ``<n>``). Per shape and context it counts the
 claims the reports already tie to a message (by the file the chat join attached, or by the message
-the key names), the Memory-scoped keys, the asset URLs a Memory's overlay record lists, and those
-nothing ties; and for each id position in the shape, where in ``arroyo.db`` the same id was found —
+the key names), the Memory-scoped keys, the asset URLs a Memory's overlay record lists, the keys an
+item of a creative-tools store names (``primary.docobjects`` ``ctp__item_5``), and those nothing
+ties; and for each id position in the shape, where in ``arroyo.db`` the same id was found —
 table, column, protobuf field, content_type, reading — and in how many rows each id occurs. An id
 found in one message, or a few, is what a link rule is written from; one found in every message of
 a conversation (the conversation's own id) is not. An
@@ -46,7 +47,7 @@ import uuid
 from dataclasses import dataclass
 
 from scripts import trace_ids
-from scripts.data import arroyo_content, protobuf_wire, sqlite_open
+from scripts.data import arroyo_content, ctp_items, protobuf_wire, sqlite_open
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,8 @@ ROUTE_STATUS = {"file": "message: attached file", "key": "message: named in the 
 
 #: The status of a claim whose key is the URL of an asset of a filter a Memory's overlay record lists.
 FILTER_STATUS = "Memory: listed in its filter record"
+#: The status of a claim whose key an item of an account's creative-tools store names.
+ITEM_STATUS = "creative-tools item (ctp__item_5)"
 
 
 def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, filter_urls=None,
@@ -253,10 +256,9 @@ def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, fil
     Memory's (a Memory-scoped shape, or a full-media key carrying a Memory's ZSNAPID, the two links
     a key alone makes), or that a Memory's overlay record lists it as the URL of a filter's asset
     (``filter_urls``, the ``overlay_urls`` of ``load_memory_index``, matched by the report's own
-    ``_overlay_links_for``), or ``none``. The first that applies, in that order.
-
-    ``items`` is accepted and not read yet: it is where the creative-tools items will come in, by
-    the report's own rule, without another change to every caller."""
+    ``_overlay_links_for``), or that an item of a creative-tools store names it (``items``, an index
+    of ``ctp_items.read``, matched by ``ctp_items.match`` as the report matches it), or ``none``. The
+    first that applies, in that order."""
     from scripts.cache_controller_report import _chat_links_for, _overlay_links_for, _UUID_RE
     from scripts.memories_media_report import classify_snap_claim
     ek, ck = str(claim.get("EXTERNAL_KEY") or ""), str(claim.get("CACHE_KEY") or "")
@@ -271,6 +273,8 @@ def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, fil
     if filter_urls and _overlay_links_for(
             [{"external_key": ek, "user_id": str(claim.get("USER_ID") or "")}], filter_urls):
         return FILTER_STATUS
+    if items and ctp_items.match(ek, items):
+        return ITEM_STATUS
     return "none"
 
 
@@ -325,6 +329,18 @@ def _memory_keys(apps):
 def _snap_ids(apps):
     """Every Memory's ZSNAPID, from each app folder (:func:`_apps`)."""
     return _memory_keys(apps)[0]
+
+
+def _ctp_index(apps):
+    """The items of every account's creative-tools store of each app folder (:func:`_apps`), in one
+    index for ``ctp_items.match`` — iOS; an Android app folder has no such store."""
+    indexes = []
+    for app in apps:
+        try:
+            indexes.append(ctp_items.read(app))
+        except Exception as error:                                 # noqa: BLE001 - optional
+            logger.debug(f"--survey-claim-links: creative-tools items not read for {app} ({error})")
+    return ctp_items.merge(indexes)
 
 
 #: The tables whose ``client_conversation_id`` says that arroyo.db holds a conversation. Each is
@@ -684,7 +700,9 @@ def survey(run_folder, progress=None):
     from scripts.cache_controller_report import load_chat_ids, load_chat_links
     by_key, by_message = load_chat_links(report_dir)
     chat_ids = load_chat_ids(report_dir, by_message)
-    snap_ids, filter_urls = _memory_keys(_apps(controllers))
+    apps = _apps(controllers)
+    snap_ids, filter_urls = _memory_keys(apps)
+    items = _ctp_index(apps)
     manifest = next((os.path.join(report_dir, r, "cache_links.json")
                      for r in ("Conversations", "Communications_legacy", "Communications")
                      if os.path.isfile(os.path.join(report_dir, r, "cache_links.json"))), None)
@@ -705,7 +723,7 @@ def survey(run_folder, progress=None):
                            "idents": idents, "_key": str(row.get("EXTERNAL_KEY") or ""),
                            "_user": str(row.get("USER_ID") or ""),
                            "status": _link_status(row, by_key, by_message, chat_ids, snap_ids,
-                                                  filter_urls=filter_urls)})
+                                                  filter_urls=filter_urls, items=items)})
     progress(f"--survey-claim-links: {len(claims)} claim(s) in {len(controllers)} "
              f"cache_controller.db, chat links from {manifest or 'no Conversations report'}")
 

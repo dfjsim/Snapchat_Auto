@@ -34,7 +34,6 @@ JSON — the output names locations in a case extraction, and that is all it sho
 names the identifiers searched for, so it stays with the case like the rest of the run folder.
 """
 import base64
-import binascii
 import datetime
 import json
 import logging
@@ -48,6 +47,9 @@ import uuid
 from dataclasses import dataclass
 
 from scripts.data import protobuf_wire, sqlite_open
+# when a text is read as base64, and the bytes it stands for: one rule, shared with the claim-link
+# survey and the creative-tools item matcher (re-exported here, where the survey has always taken it)
+from scripts.data.base64_text import base64_bytes  # noqa: F401 - re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +68,6 @@ SQLITE_MAGIC = b"SQLite format 3\x00"
 _WAL_MAGICS = (0x377F0682, 0x377F0683)
 _HEX32 = re.compile(r"^[0-9a-fA-F]{32}$")
 _SUFFIX = re.compile(r"^(.+?)(~\d+)$")
-_HEXISH = re.compile(r"^[0-9a-fA-F-]+$")
-_B64_STD = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
-_B64_URL = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
 
 #: Exit codes, in the convention of the other diagnostics: found / nothing found / bad arguments.
 EXIT_FOUND, EXIT_NONE, EXIT_USAGE = 0, 1, 2
@@ -93,34 +92,6 @@ class Needle:
     form: str
     data: bytes
     folded: bool
-
-
-def base64_bytes(text):
-    """The bytes ``text`` encodes, when it reads as base64; else None.
-
-    It reads as base64 when it is padded with ``=``, uses ``+`` or ``/``, or mixes upper case, lower
-    case and digits — and decodes, in one alphabet, to bytes that encode back to exactly ``text``.
-    Hex is not read as base64 (a UUID, a CACHE_KEY or a number is made of base64 characters too, and
-    means something else), and neither is a plain word or username.
-    """
-    if _HEXISH.match(text):
-        return None
-    std, url = _B64_STD.match(text), _B64_URL.match(text)
-    if not (std or url):
-        return None
-    looks = any(ch in text for ch in "=+/") or (
-        any(ch.isupper() for ch in text) and any(ch.islower() for ch in text)
-        and any(ch.isdigit() for ch in text))
-    body = text.rstrip("=")
-    if not looks or len(body) % 4 == 1 or (body != text and len(text) % 4):
-        return None
-    decode, encode = ((base64.b64decode, base64.b64encode) if std
-                      else (base64.urlsafe_b64decode, base64.urlsafe_b64encode))
-    try:
-        raw = decode(body + "=" * (-len(body) % 4))
-    except (binascii.Error, ValueError):
-        return None
-    return raw if encode(raw).decode("ascii").rstrip("=") == body else None
 
 
 def needles_for(index, identifier):

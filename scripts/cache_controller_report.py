@@ -47,6 +47,7 @@ from scripts.data import sniff
 from scripts.data import arroyo_content
 from scripts.data import snap_overlay
 from scripts.data import snap_session
+from scripts.data import ctp_items
 from scripts import memory_leads
 from scripts import progress
 from scripts import parallel
@@ -57,7 +58,7 @@ from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
-    cache_controller_paths, decode_memdata, account_matches,
+    cache_controller_paths, decode_memdata, account_matches, map_userids, _account_label,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -519,6 +520,87 @@ def _overlay_links_for(clist, overlay_urls, memory_pages=None, skip_sid=None):
             "external_key": ek, "claim_user": user, "cross_account": same is False,
             "basis": _filter_basis(ek, user, sid, asset, same)})
     return links
+
+
+def _ctp_basis(ek, hit, claim_user, same_account):
+    """The explanation of one creative-tools item that names a claim key (``ctp_items.match``)."""
+    where = " and ".join(w for w, _text in hit["where"])
+    held = hit["where"][0][1]                              # the text as the item stores it
+    item = f"item {hit['item_id']}"
+    if hit["rule"] == "id_bytes":
+        text = (f"The claim EXTERNAL_KEY \"{ek}\" is \"{hit['prefix']}\" followed by base64 of the same "
+                f"bytes as {where} of {item} (\"{held}\")"
+                + (": the same id, in another base64 alphabet or padding."
+                   if ek[len(hit["prefix"]):] != held else "."))
+    else:
+        rest = ek if hit["rule"] == "key" else ek[len(hit["prefix"]):]
+        differs = _url_difference(rest, held)
+        text = (f"The claim EXTERNAL_KEY \"{ek}\" is "
+                + (f"\"{hit['prefix']}\" followed by " if hit["rule"] == "after_prefix" else "")
+                + "the text" + (f" \"{held}\" (the same URL but for {differs})" if differs else "")
+                + f" at {where} of {item}.")
+    info = hit.get("feed_info")
+    if info:
+        tree = ("only the checkpointed version of the store's feed tree" if info.get("prior")
+                else "the store's feed tree")
+        text += (f" The item is of feed {info['feed']}"
+                 + (f", which {tree} names {info['short']}" if info["short"]
+                    else "" if info["in_tree"]
+                    else ", which is not named: a document of the store's feed tree could not be read"
+                    if info.get("tree_unread") else ", which the store's feed tree does not list")
+                 + (f" (payload field 2.{hit['kind']})" if hit.get("kind") is not None else "") + ".")
+    if not hit.get("decoded"):
+        text += (" Its document (column p) does not have the layout this report reads, so it is not "
+                 "decoded: the match is on the item_id column alone.")
+    if same_account is True:
+        text += " The store is the claiming account's own: its folder is SHA-256 of the claim's USER_ID."
+    elif same_account is False:
+        text += (f" The claim was made by account {claim_user}, and this store is another account's: "
+                 f"the same text, kept in that account's store.")
+    if hit.get("rewritten"):
+        text += (" The version shown is the current one, written after the store's last checkpoint "
+                 "(-wal only). The checkpointed version of the item, without the -wal, holds this "
+                 "text too: the -wal rewrote the item's row, and that version's other texts are not "
+                 "shown.")
+    elif hit.get("wal") == sqlite_open.MAIN_ONLY:
+        text += (" This version of the item is in primary.docobjects only without its -wal: the "
+                 "write-ahead log has since changed or removed it, so it is prior state, not the "
+                 "store's current content.")
+    return text
+
+
+def _ctp_hits(clist, ctp_index):
+    """The creative-tools items that name one of this entry's claim keys — the one rule, which the
+    survey (``--survey-claim-links``) calls too (``ctp_items.match``). One per item and store, from the
+    claim of the store's own account when the entry has one, sorted by account and item_id."""
+    if not ctp_index or not ctp_index.get("stores"):
+        return []
+    found = {}
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        user = c.get("user_id") or ""
+        for hit in ctp_items.match(ek, ctp_index):
+            ident = (hit["store"], hit["item_id"])
+            same = account_matches(user, hit["user_hash"])
+            if ident in found and not (same is True and found[ident]["own_account"] is not True):
+                continue
+            found[ident] = dict(hit, claim_key=ek, claim_user=user, own_account=same,
+                                basis=_ctp_basis(ek, hit, user, same))
+    return sorted(found.values(), key=lambda h: (h["user_hash"], h["item_id"]))
+
+
+def _ctp_store_state(store):
+    """What was read of one creative-tools store (``ctp_items.read``'s store record), for the header:
+    its sizes and -wal, and whether the two readings differ — said of the tables read (ctp__item_5,
+    ctp__feedtree) only, never of the whole store, whose other tables (the contacts among them) are
+    not compared. Without a -wal the readings are one, and that is true of the whole file."""
+    info = store.get("info") or {}
+    if not info.get("wal_bytes"):
+        return sqlite_open.describe(info)
+    text = sqlite_open.describe(dict(info, differs=None))
+    for table, differs in (store.get("differs") or {}).items():
+        text += f"; {table}: " + ("the two readings DIFFER" if differs else "both readings agree")
+    return text
 
 
 def load_chat_links(report_dir):
@@ -1216,11 +1298,15 @@ def _chat_links_for(clist, cache_key, by_key, by_message, ids=None):
 
 
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
-                  chat_by_message=None, workdir=None, memory_content=None, chat_ids=None):
+                  chat_by_message=None, workdir=None, memory_content=None, chat_ids=None,
+                  ctp_index=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows, wal_info). Each entry aggregates its claims, metadata,
-    on-disk resolution and cross-report links.
+    on-disk resolution and cross-report links. ``ctp_index`` is ``ctp_items.read``'s: the items of
+    the creative-tools stores that name a file are attached to it (``ctp_items``), and give it
+    :data:`CTP_CATEGORY` in place of a category of :data:`CTP_REPLACES` when nothing links it to a
+    chat or a Memory.
 
     The database is read **twice** — with and without its ``-wal`` — so claims the write-ahead log
     has already superseded or deleted are recovered instead of silently lost. Each claim carries
@@ -1358,6 +1444,13 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
         # Memory link above (see FILTER_LISTED_BASIS)
         filters = _overlay_links_for(clist, overlay_urls, memory_pages,
                                      skip_sid=(memory or {}).get("snap_id"))
+        # the creative-tools items that name the file: information, not a link — they say what the
+        # file is when no chat or Memory link does (the filter listing above does not: it is a
+        # relation, not what the file is)
+        items = _ctp_hits(clist, ctp_index)
+        category = _category_of(clist) if clist else "Deleted (tombstone)"
+        if items and category in CTP_REPLACES and not chats and not memory:
+            category = CTP_CATEGORY
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
                        or {t["user_id"] for t in tomb_by_key.get(key, []) if t["user_id"]})
@@ -1376,7 +1469,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                               [t["wal"] for t in tomb_by_key.get(key, [])]),
             # the checkpointed version(s) of this file's metadata row, when the -wal changed it
             "meta_prior": [p for p in meta_prior_by_key.get(key, []) if p is not meta],
-            "category": _category_of(clist) if clist else "Deleted (tombstone)",
+            "category": category,
             "claims": clist,
             "users": users,
             "meta": {
@@ -1397,6 +1490,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
             "memory": memory,
             "memory_basis": basis,
             "filter_memories": filters,
+            "ctp_items": items,
             "content_proof": proofs,
             "chats": chats,
             "tombstones": tomb_by_key.get(key, []),
@@ -1569,6 +1663,60 @@ SESSION_BASIS = (
     "session the file belonged to; it does not say what became of the snap afterwards.")
 
 
+#: The category of a file an item of an account's creative-tools store names (scripts/data/ctp_items.py)
+#: — given only in place of these, and only when no chat or Memory link says what the file is.
+CTP_CATEGORY = "Creative tools asset"
+CTP_REPLACES = frozenset(("CDN media", "Other", "Chat media"))
+
+CTP_BASIS = (
+    "This file is named by an item of an account's creative-tools item store: a claim's EXTERNAL_KEY, "
+    "or the part of it after a word and ':' or '~' (music:<url>, customSticker~<id>; never '://'), is "
+    "a text the item holds — a text of its payload such as the URL of one of its assets, its item_id or "
+    "its own id — or, failing that, that part read as base64 is the same bytes as the item's own id "
+    "(payload field 6, or its item_id or own id read as base64), in either base64 alphabet, padded or "
+    "not. The store is table ctp__item_5 of Documents/user_scoped/<userHash>/DocObjects/"
+    "primary.docobjects, one per account (userHash is SHA-256 of the account's user id), where the app "
+    "keeps the items of the feeds its camera's creative tools (captions, filters, stickers) are filled "
+    "from. Each row is one item: its item_id column and a document (column p). In the layout this "
+    "report reads — a FlatBuffers document whose slot 0 repeats the item_id — slot 3 holds the item's "
+    "own id, slot 4 its feed and slot 2 a protobuf message whose texts include the item's asset URLs; "
+    "a document of another layout is not read. The feed is named from the store's feed tree "
+    "(ctp__feedtree: each feed's TYPE and CONTEXT and the creativetools service it is fetched from) "
+    "when the tree lists it. Texts are compared whole and exactly (a URL in the one form the reports "
+    "share, so an empty trailing '?' or '#' and the letter case of its scheme aside), and the rule that "
+    "matched is stated per item: never a URL's query parameters on their own (bo= is a set of fetch "
+    "options many cached files share), never a part of a text, and a text two items of one store hold "
+    "is attributed to neither. Both readings of the store are read, with and without its -wal. On the "
+    "stores examined, an item in that layout carries no date, and nothing in it says the account put "
+    "the item in a snap, or when. Its texts are shown as stored, under their protobuf field numbers, "
+    "which are numbers and not names.")
+
+#: Beside a context-2/3 claim of a file a creative-tools item names: the context's name is a reading of
+#: the number, and these contexts claim more than chat media.
+MCT_CTP_NOTE = (
+    "The label \"Chat media\" is read from the context number alone. This file is claimed under that "
+    "context, no chat message links to it, and an item of a creative-tools store names it instead "
+    "(see the section on the creative-tools item below): the context claims creative-tools assets — "
+    "custom stickers among them — as well as chat media.")
+
+FEED_NOT_IN_TREE_BASIS = (
+    "The store's feed tree (ctp__feedtree) does not list this feed, so it is not named: the feed id "
+    "is shown as the item stores it — feed:<TYPE>-<CONTEXT>-<n> — and its numbers are not read as a "
+    "name.")
+
+#: A feed missing from the trees that were read, in a store with a tree document that was not.
+FEED_TREE_UNDECODED_BASIS = (
+    "The store's feed tree (ctp__feedtree) has a document this report cannot read (it does not hold "
+    "an archive of a CTPFeed), so whether the tree lists this feed is not known: the feed id is shown "
+    "as the item stores it and is not named.")
+
+UNDECODED_ITEM_BASIS = (
+    "This item's document (ctp__item_5.p) does not have the layout this report reads — its FlatBuffers "
+    "slot 0 is not the row's item_id — so nothing is read from it, and what it holds (a date, a snap, "
+    "anything else) is not known. The item is still an item: its item_id column is what the claim key "
+    "names.")
+
+
 #: The categories whose files can be a lead: the snap editor's working copies, files no claim names,
 #: and Memory-shaped claims whose Memory row is gone. A file of no recognised shape ("Other") only when
 #: the app itself claimed it as Memories media (context 19): otherwise every image the app cached
@@ -1662,6 +1810,85 @@ def _session_html(entry, src_root, manifest):
             "'SnapEditor-SnapSessionContext'" + _info(SESSION_BASIS) + "</div>"
             "<table class='sub'><tr><th>saved</th><th>snap edited</th><th>claim key</th>"
             "<th>context</th><th>store</th><th>(read from)</th></tr>" + "".join(rows) + "</table>")
+
+
+def _ctp_feed_cell(hit):
+    """The item's feed, named only as the store's feed tree names it."""
+    info = hit.get("feed_info")
+    if not info:
+        return ""
+    feed = f"<span class='mono'>{_esc(info['feed'])}</span>"
+    if not info["in_tree"]:
+        if info.get("tree_unread"):
+            return feed + " — ctp__feedtree not decoded" + _info(FEED_TREE_UNDECODED_BASIS)
+        return feed + " — not in ctp__feedtree" + _info(FEED_NOT_IN_TREE_BASIS)
+    said = " · ".join(bit for bit in (f"NAME {info['name']}" if info["name"] else "",
+                                       f"COMPUTE_ENDPOINT {info['endpoint']}" if info["endpoint"]
+                                       else "") if bit)
+    lists = ("Only the checkpointed version of the store's feed tree (ctp__feedtree read without its "
+             "-wal) lists this feed" if info.get("prior")
+             else "The store's feed tree (ctp__feedtree) lists this feed")
+    return (feed + (f" — {_esc(info['short'])}" if info["short"] else " — unnamed in ctp__feedtree")
+            + (" (prior state)" if info.get("prior") else "")
+            + _info(f"{lists} — TYPE {info['type']}, CONTEXT {info['context']} — "
+                    + (f"with {said}" if said else "with no NAME and no COMPUTE_ENDPOINT")
+                    + ". The short name is the word after '.creativetools.' in the endpoint, else "
+                      "the NAME, as stored."
+                    + (" The -wal's version of the tree does not list it, so the name is prior "
+                       "state, not the tree as the app last left it." if info.get("prior") else "")))
+
+
+def _ctp_texts(texts):
+    """An item's texts as the detail lists them — its URLs first, then the rest in field order — and
+    how many more there are than are shown."""
+    ordered = ([(p, t) for p, t in texts if snap_overlay.normalise_url(t)]
+               + [(p, t) for p, t in texts if not snap_overlay.normalise_url(t)])
+    return ordered[:ctp_items.MAX_TEXTS], max(0, len(ordered) - ctp_items.MAX_TEXTS)
+
+
+def _ctp_items_html(entry, src_root, manifest):
+    """The creative-tools items that name this file (``entry["ctp_items"]``); ``""`` when none.
+
+    Information on the file, not a link: the item store has no report of its own. One row per item,
+    each with its own "?", and under the table the texts each item holds, as stored.
+    """
+    hits = entry.get("ctp_items") or []
+    if not hits:
+        return ""
+    rows, texts = [], []
+    for hit in hits:
+        who = _esc(hit.get("account") or _account_label(hit["user_hash"]))
+        whose = {True: " — the claiming account&#39;s own store",
+                 False: " — another account&#39;s store"}.get(hit.get("own_account"), "")
+        item = f"<span class='mono'>{_esc(hit['item_id'])}</span>"
+        if hit.get("own_id") and hit["own_id"] != hit["item_id"]:
+            item += f"<br>own id <span class='mono'>{_esc(hit['own_id'])}</span>"
+        if not hit.get("decoded"):
+            item += ("<br><span class='muted'>document not decoded (layout differs)</span>"
+                     + _info(UNDECODED_ITEM_BASIS))
+        kind = (f"payload field 2.{hit['kind']}" if hit.get("kind") is not None
+                else "payload not readable" if hit.get("decoded") and not hit.get("payload_ok")
+                else "")
+        rule = ctp_items.RULE_LABELS.get(hit.get("rule"), "").format(prefix=hit.get("prefix") or "")
+        where = "<br>".join(_esc(w) for w, _text in hit.get("where") or ())
+        rows.append(f"<tr><td>{who}{whose}<br><span class='mono'>"
+                    f"{_esc(device_path(hit['store'], src_root, manifest))}</span></td>"
+                    f"<td>{item}</td><td>{_ctp_feed_cell(hit)}</td><td>{_esc(kind)}</td>"
+                    f"<td>{_esc(rule)}{_info(hit.get('basis'))}<br><span class='mono'>{where}</span></td>"
+                    f"<td>{_wal_cell(hit.get('wal'))}</td></tr>")
+        shown, more = _ctp_texts(hit.get("texts") or ())
+        if shown:
+            texts.append(f"<div class='scopehdr'>texts in item <span class='mono'>"
+                         f"{_esc(hit['item_id'])}</span> (as stored)</div><div class='grid'>"
+                         + "".join(f"<div class='k'>payload {_esc(path)}</div>"
+                                   f"<div class='v'>{_esc(text)}</div>" for path, text in shown)
+                         + "</div>"
+                         + (f"<div class='muted'>+{more} more not shown</div>" if more else ""))
+    return ("<div class='sect'>Named by a creative-tools item — primary.docobjects › ctp__item_5"
+            + _info(CTP_BASIS) + "</div>"
+            "<table class='sub'><tr><th>account (store)</th><th>item_id</th><th>feed</th>"
+            "<th>kind</th><th>the claim&#39;s key is</th><th>(read from)</th></tr>"
+            + "".join(rows) + "</table>" + "".join(texts))
 
 
 # What the search box should match for a row read from only one of the two database views, so an
@@ -2091,9 +2318,12 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
 
     # claims — headers are the real CACHE_FILE_CLAIM column names (description in parentheses)
     rows = []
+    # beside a file a creative-tools item names and no chat links to, the label "Chat media" explained
+    ctp_named = e.get("category") == CTP_CATEGORY
     for c in e["claims"]:
+        note = MCT_CTP_NOTE if ctp_named and c["mct"] in (2, 3) else None
         rows.append(f"<tr><td class='mono'>{_esc(c['external_key'])}</td>"
-                    f"<td>{_esc(_mct_label(c['mct']))}{_info(MCT_BASIS.get(c['mct']))}</td>"
+                    f"<td>{_esc(_mct_label(c['mct']))}{_info(MCT_BASIS.get(c['mct']))}{_info(note)}</td>"
                     f"<td class='mono'>{_esc(c['user_id'])}</td>"
                     f"<td>{_esc(c['category'])}</td><td>{_esc(c['created'])}</td>"
                     f"<td>{_esc(c['expires'])}</td><td>{_esc(c['deleted'])}</td>"
@@ -2108,6 +2338,9 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     session = _session_html(e, src_root, manifest)
     if session:
         parts.append(session)
+    items = _ctp_items_html(e, src_root, manifest)
+    if items:
+        parts.append(items)
     leads = _leads_html(e, rel_prefix, closure)
     if leads:
         parts.append(leads)
@@ -2368,7 +2601,7 @@ def _external_key_summary(claims):
 
 def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, manifest,
                     db_display, run_id="default", wal_infos=None, closure=None, prov=None,
-                    platform="ios"):
+                    platform="ios", ctp_stores=None):
     # The source fingerprints this run recorded, so the examiner's saved selection carries
     # them and a later partial run can check the extraction it is handed against this one.
     sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
@@ -2378,6 +2611,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     chat_linked = sum(1 for e in entries if e["chats"])
     # counted apart from mem_linked: an asset of a listed filter is not linked to a Memory's media
     filter_linked = sum(1 for e in entries if e.get("filter_memories"))
+    # information on the file, not a link: counted on a line of its own
+    ctp_named = sum(1 for e in entries if e.get("ctp_items"))
     deleted = sum(1 for e in entries if e["tombstones"])
     xscope = sum(1 for e in entries if e["on_disk"].get("cross_scope"))
     orphans = sum(1 for e in entries if e.get("orphan"))
@@ -2458,6 +2693,14 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
         # the Memories whose overlay record lists this asset, so their snap id finds it
         searchable += [fm["snap_id"] for fm in e.get("filter_memories") or ()]
+        # the creative-tools items that name it: their ids, feed and texts (not the category word: a
+        # file that kept its category is not in it, and the search must agree with the filter)
+        for hit in e.get("ctp_items") or ():
+            info = hit.get("feed_info") or {}
+            searchable += ["ctp__item_5", hit["item_id"], hit.get("own_id") or "",
+                           info.get("feed") or "", info.get("short") or "", info.get("endpoint") or "",
+                           f"payload 2.{hit['kind']}" if hit.get("kind") is not None else ""]
+            searchable += [text for _path, text in _ctp_texts(hit.get("texts") or ())[0]]
         for k in e.get("child_files") or []:
             searchable += [str(k.get("name") or ""), k.get("md5") or "", k.get("sha256") or ""]
             searchable += report_ui.embedded_search_terms(k.get("embedded"), k.get("embedded_times"),
@@ -2523,6 +2766,12 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     filter_sum = (f'<div class="sum"><b>{filter_linked}</b> cached file(s) are an asset of a filter '
                   f'listed with a Memory — not its media{_info(FILTER_LISTED_BASIS)}</div>'
                   if filter_linked else "")
+    read_from = " · ".join(f"{html.escape(device_path(s['path'], src_root, manifest))} "
+                           f"({html.escape(_ctp_store_state(s))})" for s in ctp_stores or ())
+    ctp_sum = (f'<div class="sum"><b>{ctp_named}</b> cached file(s) are named by an item of an '
+               f"account's creative-tools store (primary.docobjects ctp__item_5){_info(CTP_BASIS)}"
+               + (f" — read from {read_from}" if read_from else "") + "</div>"
+               if ctp_named else "")
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Snapchat cache_controller.db</title>{report_ui.emoji_font_link(rel_prefix)}<style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
@@ -2631,7 +2880,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  {_info(ORPHAN_BASIS) if orphans else ''}</div>
  <div class="sum">Scope: {html.escape(_words(platform)["scope"])}</div>
  <div class="sum">Source: {html.escape(db_display)}</div>
- {filter_sum}{figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
+ {filter_sum}{ctp_sum}{figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
 {banner}{report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
 <div class="toolbar">
@@ -2736,7 +2985,7 @@ scConsumeHash();
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, {"total": total, "on_disk": on_disk, "mem": mem_linked,
-                    "chat": chat_linked, "filter": filter_linked,
+                    "chat": chat_linked, "filter": filter_linked, "ctp": ctp_named,
                     "deleted": deleted, "orphans": orphans,
                     "wal_only": wal_only, "main_only": main_only,
                     "meta_changed": meta_changed, "encrypted": encrypted_total,
@@ -2771,6 +3020,16 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
 
     scfull, scparts = index_sccontent(app)
     mem_index = load_memory_index(app)
+    # every account's creative-tools item store, staged in a temporary folder (never beside the
+    # report: it is the contacts' store too), and the userIds its folders are named after. Optional
+    # evidence: a store that cannot be read loses its items, never the report.
+    try:
+        ctp_index = ctp_items.read(app)
+    except Exception as error:                                     # noqa: BLE001 - optional store
+        logger.warning(f"  creative-tools item stores (primary.docobjects ctp__item_5) not read: "
+                       f"{error}")
+        ctp_index = ctp_items.empty_index()
+    userids = map_userids(app)
     # report_dir defaults to the parent of outdir when the report is placed under …/Reports/CacheController
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     # The manifests the Memories, Conversations and Library/Caches reports write are read from
@@ -2796,10 +3055,13 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         entries, virt, wal_info = build_entries(db, app, scfull, scparts, mem_index, chat_links,
                                                 ms_fmt, memory_pages, chat_by_message,
                                                 workdir=outdir, memory_content=memory_content,
-                                                chat_ids=chat_ids)
+                                                chat_ids=chat_ids, ctp_index=ctp_index)
         all_entries.extend(entries)
         virtual.extend(virt)
         wal_infos.append(wal_info)
+    for e in all_entries:                                  # whose store, as every panel names one
+        for hit in e.get("ctp_items") or ():
+            hit["account"] = _account_label(hit["user_hash"], userids)
 
     # Files that are on disk but that the index does not account for. Without these the report only
     # shows what cache_controller.db remembers, and a recovered file it has forgotten is invisible.
@@ -2845,8 +3107,9 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         # Only files nothing else accounts for: a category that names what the file is (a lens, a
         # story preview, a Discover video…) already says it is not a Memory's media.
         ctx19 = any(c.get("mct") == 19 for c in e["claims"])
-        # an asset of a filter a Memory's record lists is accounted for, though not as its media
-        if (e.get("memory") or e.get("chats") or e.get("filter_memories")
+        # an asset of a filter a Memory's record lists is accounted for, though not as its media; and
+        # a file a creative-tools item names is explained by the item, whatever its category
+        if (e.get("memory") or e.get("chats") or e.get("filter_memories") or e.get("ctp_items")
                 or not e["on_disk"]["found"]
                 or not (e["category"] in LEAD_CATEGORIES or (e["category"] == "Other" and ctx19))):
             continue
@@ -2890,12 +3153,14 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
             if chat.get("conversation_id") and chat.get("server_message_id"):
                 sel.link(partial_report.EDGE_MESSAGE_CACHE, row_id, "msg",
                          f"conv-{chat['conversation_id']}|msg-{chat['server_message_id']}")
+        # a creative-tools item that names the file is no edge: the store has no report of its own
 
     return partial_report.Stage("cc", all_entries, sel, app=app, outdir=outdir, dbs=dbs,
                                 virtual=virtual, wal_infos=wal_infos, tz_label=tz_label,
                                 rel_prefix=rel_prefix, rdir=rdir, scfull=scfull, scparts=scparts,
                                 manifest=manifest, src_root=src_root, memory_media=memory_media,
-                                cache_media=cache_media, ms_fmt=ms_fmt, platform=platform)
+                                cache_media=cache_media, ms_fmt=ms_fmt, platform=platform,
+                                ctp_stores=ctp_index["stores"])
 
 
 def _drop_sqlite_views(outdir):
@@ -2948,7 +3213,8 @@ def render(stage, closure=None, prov=None):
                                     stage["rel_prefix"], src_root, manifest, db_display,
                                     report_ui.run_id(rdir), stage["wal_infos"],
                                     closure=closure, prov=prov,
-                                    platform=stage.get("platform") or "ios")
+                                    platform=stage.get("platform") or "ios",
+                                    ctp_stores=stage.get("ctp_stores"))
     # The same leads, seen from the Memory: the Memories pages, already written, load this file. A
     # partial extract's names only the Memories it holds.
     memory_leads.write_script(os.path.join(outdir, "data"),
@@ -2969,6 +3235,9 @@ def render(stage, closure=None, prov=None):
     if stats.get("filter"):
         logger.info(f"  {stats['filter']} an asset of a filter a Memory's overlay record lists "
                     f"(ZGALLERYSNAPDETAIL.ZOVERLAY) — not the Memory's media, and not counted above")
+    if stats.get("ctp"):
+        logger.info(f"  {stats['ctp']} named by an item of an account's creative-tools store "
+                    f"(primary.docobjects ctp__item_5) — information on the file, not a link")
     logger.info(f"  {stats['encrypted']} hold encrypted bytes (high entropy + AES block "
                 f"alignment), {stats['encrypted_locked']} of them with no key available; "
                 f"everything else on disk was identified by its magic bytes")

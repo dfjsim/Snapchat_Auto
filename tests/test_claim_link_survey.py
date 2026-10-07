@@ -564,8 +564,8 @@ def test_a_full_media_key_carrying_a_memory_s_snap_id_counts_as_tied():
     assert survey._link_status(claim, {}, {}, None, snaps) == "Memory: its snap id in the key"
     assert survey._link_status(dict(claim, MEDIA_CONTEXT_TYPE=34), {}, {}, None, snaps) == "none"
     assert survey._link_status(claim, {}, {}, None, {}) == "none"
-    # the creative-tools input is taken, by keyword, and changes nothing yet; filter-record URLs
-    # change nothing for a key that is not one of them
+    # filter-record URLs and an index that is not ctp_items.read's change nothing for a key that is
+    # not one of them
     for status, snap_ids in (("Memory: its snap id in the key", snaps), ("none", {})):
         assert survey._link_status(claim, {}, {}, snap_ids=snap_ids, filter_urls={"x": 1},
                                    items={"x": 1}) == status
@@ -615,3 +615,35 @@ def test_the_survey_reads_the_filter_records_of_the_app_folder(tmp_path):
     payload = survey.survey(run, progress=lambda *_: None)
     assert [s["status"] for s in payload["shapes"] if s["context"] == 25] == [
         {survey.FILTER_STATUS: 1}]
+
+
+def test_a_key_a_creative_tools_item_names_is_said_so_by_the_report_s_own_rule(tmp_path):
+    import ctp_fixture as cfx
+    from scripts.data import ctp_items
+    app = str(tmp_path / "app")
+    cfx.store(app, [cfx.filter_item()])
+    items = ctp_items.read(app)
+    claim = {"EXTERNAL_KEY": cfx.FILTER_CDN, "CACHE_KEY": "k", "MEDIA_CONTEXT_TYPE": 25,
+             "USER_ID": ACCT_A}
+    assert survey._link_status(claim, {}, {}, items=items) == survey.ITEM_STATUS
+    assert survey._link_status(claim, {}, {}) == "none"
+    for near_miss in (cfx.FILTER_CDN.replace("uc=7", "uc=8"), cfx.FILTER_CDN.split("?")[0]):
+        assert survey._link_status(dict(claim, EXTERNAL_KEY=near_miss), {}, {}, items=items) == "none"
+    # a message route and a filter record come first
+    record = {"conversation_id": CONV, "server_message_id": "7.0", "anchor": "m", "href": "x"}
+    assert survey._link_status(claim, {"k": [record]}, {}, items=items) == "message: attached file"
+    assert survey._link_status(claim, {}, {}, filter_urls=_filter_urls(cfx.FILTER_CDN),
+                               items=items) == survey.FILTER_STATUS
+
+
+def test_the_survey_reads_every_creative_tools_store_of_the_app_folder(tmp_path):
+    """A custom sticker's claim, whose key names the item by its item_id — a document of another
+    layout than the one the report reads, matched by the item_id column alone."""
+    import ctp_fixture as cfx
+    run = _run_folder(tmp_path)
+    app_dir = str(tmp_path / "run" / "ExtractedData" / "Application" / "APP")
+    cfx.store(app_dir, [(LONELY_ID, b"a document of another layout")])
+    payload = survey.survey(run, progress=lambda *_: None)
+    stickers = next(s for s in payload["shapes"]
+                    if s["shape"] == f"customSticker~<b64:{len(STICKER_BYTES)}>")
+    assert stickers["status"] == {"none": 1, survey.ITEM_STATUS: 1}

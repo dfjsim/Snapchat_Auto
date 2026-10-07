@@ -19,7 +19,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   a UUID (`filtered-<UUID>.mp4` …), looked up in every database of the extraction.
   `protobuf_wire.values_with_paths` lists every value of a message with its field path. A claim keyed
   by the URL of an asset of a filter a Memory's overlay record lists has a status of its own, `Memory:
-  listed in its filter record`, by the cache_controller report's own `_overlay_links_for`.
+  listed in its filter record`, by the cache_controller report's own `_overlay_links_for`, and so has
+  one an item of a creative-tools store names, `creative-tools item (ctp__item_5)`, by
+  `ctp_items.match`.
   See [docs/claim_link_survey.md](docs/claim_link_survey.md).
 - **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
   Conversations reports.
@@ -59,6 +61,25 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   under the Memory that lists it. `scripts/data/keyed_archive.py` is a new strict NSKeyedArchiver
   resolver, which `decode_memdata` now uses too. See [docs/report_memories.md](docs/report_memories.md) and
   [docs/cross_report_linking.md](docs/cross_report_linking.md).
+- **A cached file named by an item of an account's creative-tools store says so** —
+  `scripts/data/ctp_items.py`, `cache_controller_report._ctp_hits`. Each account's `primary.docobjects`
+  keeps the items of the camera's creative-tools feeds (captions, filters, stickers) in `ctp__item_5`: a
+  FlatBuffers document per item with a protobuf payload holding its asset URLs and its own id, the feed
+  named only from the store's `ctp__feedtree`. A claim whose whole key, or key after `<word>:` /
+  `<word>~` (`music:`, `customSticker~`), is a text an item holds — or, when that part reads as base64,
+  the same bytes as its own id in another alphabet or padding — gets a detail section naming the item,
+  its feed and kind, where in it the text sits, whose store and which reading; and, when no chat or
+  Memory link says what the file is, the category *Creative tools asset* in place of *CDN media*,
+  *Other* or *Chat media*. Exact whole texts only: never a query value (`bo=` is a set of fetch options
+  many files share), a part of a text, or a text two items of a store hold. It is information on the
+  file, not a link, and the file is never a lead; the header line, the category option and the log line
+  appear only when some file is named. An item whose document has another layout is still matched by
+  its `item_id` column, and nothing is said of what it holds; a feed only the checkpointed feed tree
+  lists is named as prior state, and one a tree document that cannot be read might list is not said to
+  be missing. Every account's store is read, staged in a temporary folder. `flatbuffers_doc` reads a
+  sub-table and a `[ubyte]` vector (`table_field`, `bytes_field`, `string_field(…, table=)`), and
+  `trace_ids.base64_bytes` moved to `scripts/data/base64_text.py`, still re-exported. See
+  [docs/report_cache_controller.md](docs/report_cache_controller.md).
 
 ### Fixed
 - **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`
