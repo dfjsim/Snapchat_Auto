@@ -414,12 +414,18 @@ finds an item deciding:
 Never matched: a URL's query values on their own (`bo=`, `mo=`, `uc=` — a `bo=` value decodes to a
 protobuf of fetch options with no id in it, and one value is shared by many cached files whose `/d/` id
 no item holds), a path segment alone, a part of a text, a text shorter than 8 characters or of digits
-only, and a text two items of one store hold — attributed to neither, and not matched in that store by
-a later rule either: the first rule that finds the text in a store decides for it, so the bytes rule
-never picks one of the items whose text was ambiguous. The same asset URL in two
-accounts' stores is listed twice, each saying whose store holds it. A document of another layout is
-still an item: its `item_id` column is indexed whatever the document holds, so a key naming the item by
-it matches, and the detail says *document not decoded (layout differs)* rather than reading it on a
+only. A text several rows of one store hold is attributed by whose own id it is
+(`ctp_items._attributable`): rows with one own id are **one item listed in several feeds** — a custom
+sticker is listed in each sticker-picker feed that shows it — and each is shown, the explanation saying
+so; else the rows whose own id (or whole `item_id`) the text is, when they are one item, are the match,
+and another item holding the same text in its payload only refers to it — it is counted in the
+explanation, not shown; else (different items each hold it, as a shared endpoint URL) it is attributed
+to none, and not matched in that store by a later rule either: the first rule that finds the text in a
+store decides for it, so the bytes rule never picks one of the items whose text was ambiguous. The same
+asset URL in two accounts' stores is listed twice, each saying whose store holds it. A document of
+another layout is still an item: its `item_id` column is indexed whatever the document holds — and so
+is the part before `-feed:`, which on every decoded item is its own id — so a key naming the item by
+either matches, and the detail says *document not decoded (layout differs)* rather than reading it on a
 guess; the run log counts such documents per store. A document whose reading fails is one of those, and
 a store that cannot be read at all loses its items, never the report.
 

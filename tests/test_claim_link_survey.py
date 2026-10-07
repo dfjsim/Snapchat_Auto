@@ -703,8 +703,16 @@ def test_a_key_naming_a_listed_conversation_is_tied_to_it_by_the_report_s_own_ru
     assert status["other"] == {"none": 1}
     assert _named(payload) == {
         "other": {"names a conversation arroyo.db does not hold — claimed by another account": 1}}
+    # the tied claim keeps its own label, apart: whose claim it is says whether a recovery of
+    # deleted records could bring the message back
+    tie = {s["shape"].split("~")[0]: s.get("conversation_tie") for s in payload["shapes"]}
+    assert tie["listed"] == {"names a conversation arroyo.db does not hold — claimed by another "
+                             "account": 1}
+    assert tie["other"] is None and not any(v for k, v in tie.items() if k != "listed")
+    lines = survey.describe(payload)
+    assert any(line.startswith("Claims tied to the conversation their key names") for line in lines)
     out = survey.write_report(run, payload)
-    written = open(out, encoding="utf-8").read() + "\n".join(survey.describe(payload))
+    written = open(out, encoding="utf-8").read() + "\n".join(lines)
     for secret in (LISTED_CONV, OTHER_CONV, ACCT_A, ACCT_B, "k-listed"):
         assert secret not in written, secret
 

@@ -356,17 +356,26 @@ def test_a_text_two_items_of_one_store_hold_is_attributed_to_neither(tmp_path):
     assert ctp_items.match(fx.FONT_URL, index) == []
     assert _places(ctp_items.match("https://geofilter.example.net/png/first.png", index)) == [
         (first[0], "key", ["payload 2.16.2.1.1"])]
-    # one item's own id is another's payload text: the bytes rule does not then pick the one whose
-    # own id it is — a store where an earlier rule found the text is decided by that rule
+
+
+def test_an_item_s_own_id_is_its_own_though_another_item_refers_to_it(tmp_path):
+    """One item's own id is another's payload text: the text is the first item's identity, the second
+    only refers to it — so it is the first's, the second is counted, and no later rule decides."""
     own_a = b"\xfb\xff\xbfsynthA"
     id_a = base64.b64encode(own_a).decode()
     item_a = fx.filter_item(own=own_a, image="https://geofilter.example.net/png/a.png",
                             cdn="https://cf-st.example.net/d/SyntheticA?uc=1", font=None)
     item_b = fx.filter_item(own=b"secnd-own", image="https://geofilter.example.net/png/b.png",
                             cdn=id_a, font=None)
-    index = _index(tmp_path / "ab", [item_a, item_b])
-    for key in (id_a, "customSticker~" + id_a, "customSticker:" + id_a):
-        assert ctp_items.match(key, index) == [], key
+    index = _index(tmp_path, [item_a, item_b])
+    for key in ("customSticker~" + id_a, "customSticker:" + id_a):
+        hits = ctp_items.match(key, index)
+        assert _places(hits) == [(item_a[0], "after_prefix", ["FlatBuffers slot 3 (its own id)"])], key
+        assert hits[0]["references"] == [item_b[0]] and hits[0]["same_item"] == [item_a[0]]
+    basis = cc._ctp_hits([{"external_key": "customSticker:" + id_a, "user_id": fx.USER}],
+                         index)[0]["basis"]
+    assert "1 other item(s) of the store hold the same text in their payload" in basis
+    assert item_b[0] in basis
     # the same id in the other alphabet is a text no item holds, and only A's own id is its bytes
     urlsafe = "customSticker~" + base64.urlsafe_b64encode(own_a).decode().rstrip("=")
     hits = ctp_items.match(urlsafe, index)
@@ -374,6 +383,43 @@ def test_a_text_two_items_of_one_store_hold_is_attributed_to_neither(tmp_path):
                                                       "payload field 6 (its own id)"])]
     basis = cc._ctp_hits([{"external_key": urlsafe, "user_id": fx.USER}], index)[0]["basis"]
     assert "the same id, in another base64 alphabet or padding" in basis
+    # two different items each holding it in their payload: neither
+    item_c = fx.filter_item(own=b"third-own", image="https://geofilter.example.net/png/c.png",
+                            cdn=id_a, font=None)
+    index = _index(tmp_path / "bc", [item_b, item_c])
+    assert ctp_items.match("customSticker:" + id_a, index) == []
+
+
+def test_one_sticker_in_several_feeds_is_one_item_shown_in_each(tmp_path):
+    """A custom sticker is listed in each sticker-picker feed that shows it: one own id under several
+    item_ids. That is one item, not a text different items share — every row is a hit."""
+    feeds = ("feed:4-2-0", "feed:3-2-0", "feed:13-2-0")
+    payload = fx.message((2, [(9, [(1, "https://cf-st.example.net/d/SyntheticSticker"), (2, 1)])]),
+                         (6, fx.STICKER))
+    rows = [(f"{fx.STICKER_ID}-{f}-0", None) for f in feeds]
+    rows = [(item_id, fx.item_doc(item_id, payload, fx.STICKER_ID, f))
+            for (item_id, _doc), f in zip(rows, feeds)]
+    index = _index(tmp_path, rows)
+    hits = ctp_items.match("customSticker:" + fx.STICKER_ID, index)
+    assert sorted(h["feed"] for h in hits) == sorted(feeds)
+    assert all(h["same_item"] == sorted(r[0] for r in rows) and h["references"] == [] for h in hits)
+    entry = cc._ctp_hits([{"external_key": "customSticker:" + fx.STICKER_ID, "user_id": fx.USER}],
+                         index)
+    assert len(entry) == 3
+    assert "lists the same item — the same own id — under 3 item_ids, one per feed" in entry[0]["basis"]
+    # its asset URL, which all three hold, is that one item's too
+    assert len(ctp_items.match("https://cf-st.example.net/d/SyntheticSticker", index)) == 3
+
+
+def test_a_sticker_whose_document_is_not_read_is_found_by_its_item_id_before_feed(tmp_path):
+    item_id = f"{fx.STICKER_ID}-feed:4-2-0-0"
+    index = _index(tmp_path, [(item_id, b"a document of another layout")])
+    for separator in ":~":
+        hits = ctp_items.match(f"customSticker{separator}{fx.STICKER_ID}", index)
+        assert _places(hits) == [(item_id, "after_prefix", ["its item_id, before -feed:"])]
+        assert hits[0]["decoded"] is False
+    assert ctp_items.identity({"own_id": "", "item_id": item_id}) == fx.STICKER_ID
+    assert ctp_items.identity({"own_id": "", "item_id": "no-feed-here"}) == "no-feed-here"
 
 
 def test_both_readings_are_read_and_a_hit_says_which_holds_its_text(tmp_path):

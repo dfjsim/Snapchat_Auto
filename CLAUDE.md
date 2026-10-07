@@ -122,8 +122,9 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   account's, both readings, staged in a temp folder: a FlatBuffers document with a protobuf inside, the
   feed named only from `ctp__feedtree`) and the cached files its items name — exact whole texts only
   (the whole key, the key after `<word>:` / `<word>~`, or the same id bytes), never a query parameter
-  or a part of a text, a text two items of a store hold attributed to neither, the `item_id` column
-  matched even when the document has another layout; information on the entry, never a link; and
+  or a part of a text, a text several items of a store hold attributed only to the one whose own id
+  it is (one item listed in several feeds is one item), the `item_id` column matched even when the
+  document has another layout; information on the entry, never a link; and
   `base64_text.py`, the one rule for when a text is base64, shared by `--trace-ids`, the survey and
   the item matcher).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace

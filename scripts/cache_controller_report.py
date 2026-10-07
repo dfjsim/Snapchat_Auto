@@ -591,6 +591,14 @@ def _ctp_basis(ek, hit, claim_user, same_account):
     if not hit.get("decoded"):
         text += (" Its document (column p) does not have the layout this report reads, so it is not "
                  "decoded: the match is on the item_id column alone.")
+    same = [i for i in hit.get("same_item") or () if i != hit["item_id"]]
+    if same:
+        text += (f" The store lists the same item — the same own id — under {len(same) + 1} item_ids, "
+                 f"one per feed; each is shown: {', '.join([hit['item_id']] + same)}.")
+    if hit.get("references"):
+        refs = hit["references"]
+        text += (f" {len(refs)} other item(s) of the store hold the same text in their payload — a "
+                 f"reference to this item — and are not shown: {', '.join(refs)}.")
     if same_account is True:
         text += " The store is the claiming account's own: its folder is SHA-256 of the claim's USER_ID."
     elif same_account is False:
@@ -1977,8 +1985,10 @@ CTP_BASIS = (
     "when the tree lists it. Texts are compared whole and exactly (a URL in the one form the reports "
     "share, so an empty trailing '?' or '#' and the letter case of its scheme aside), and the rule that "
     "matched is stated per item: never a URL's query parameters on their own (bo= is a set of fetch "
-    "options many cached files share), never a part of a text, and a text two items of one store hold "
-    "is attributed to neither. Both readings of the store are read, with and without its -wal. On the "
+    "options many cached files share), never a part of a text, and a text several items of one store "
+    "hold is attributed only to the one whose own id it is — one item listed in several feeds is one "
+    "item, shown in each; different items holding it, to none. Both readings of the store are read, "
+    "with and without its -wal. On the "
     "stores examined, an item in that layout carries no date, and nothing in it says the account put "
     "the item in a snap, or when. Its texts are shown as stored, under their protobuf field numbers, "
     "which are numbers and not names.")

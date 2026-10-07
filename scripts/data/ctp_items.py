@@ -59,13 +59,22 @@ differ is known of the two tables read only (``differs`` per store), never of th
 
 Never a query value (``bo=``, ``mo=``, ``uc=`` — ``bo=`` is a set of fetch options many cached files
 share), never a path segment alone, never a part of a text, never a text shorter than :data:`MIN_ID`
-or made of digits only. A text that more than one item of one store holds is attributed to none of
-them — and no later rule matches in that store: the first rule that finds the text in a store decides
-for it. The same text in two accounts' stores is two hits, each saying whose store holds it.
+or made of digits only. A text that more than one item of one store holds is attributed by **whose
+own id** it is (:func:`_attributable`):
+
+* rows that are one item listed in several feeds — the same own id under several item_ids, as a
+  sticker is in each sticker-picker feed that shows it — are each a hit, and each says so;
+* else the rows whose own id (or whole item_id) the text is, when they are one item, are the hits —
+  another item holding the same text in its payload refers to that item and is counted, not matched;
+* else (different items each hold it, as a shared endpoint URL) it is attributed to none of them.
+
+The first rule that finds the text in a store decides for it: no later rule matches there. The same
+text in two accounts' stores is two hits, each saying whose store holds it.
 
 A document of another layout is still an item: its ``item_id`` column is indexed whatever the
-document holds, so a key naming the item by it matches, and the item is shown as not decoded rather
-than read on a guess. This finds the store on an iOS app folder (``Documents/``); on an Android app
+document holds — and so is the part of it before ``-feed:``, which on every decoded item is its own
+id — so a key naming the item by either matches, and the item is shown as not decoded rather than
+read on a guess. This finds the store on an iOS app folder (``Documents/``); on an Android app
 folder :func:`find_stores` finds nothing, and nothing is matched.
 """
 import base64
@@ -106,8 +115,11 @@ RULE_LABELS = {"key": "the whole key", "after_prefix": "the key after {prefix}",
 
 #: Where a matched text sits in an item, as the explanations say it.
 WHERE_ITEM_ID = "its item_id"
+WHERE_ITEM_HEAD = "its item_id, before -feed:"
 WHERE_OWN_ID = "FlatBuffers slot 3 (its own id)"
 WHERE_OWN_BYTES = "payload field 6 (its own id)"
+#: The places where a text is the item's own identity rather than a text its payload holds.
+_IDENTITY_PLACES = {WHERE_ITEM_ID, WHERE_ITEM_HEAD, WHERE_OWN_ID, WHERE_OWN_BYTES}
 
 _PREFIXED = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)([:~])(?!//)(.+)$")
 _FEED = re.compile(r"^feed:(\d+)-(\d+)(?:-(\d+))?$")
@@ -275,6 +287,19 @@ def _matchable(text):
     return form if len(form) >= MIN_ID and not form.isdigit() else ""
 
 
+def _item_head(item_id):
+    """The part of an item_id before ``-feed:`` (``<own id>-feed:<TYPE>-<CONTEXT>-<n>-<n>`` on every
+    decoded item), or ``""`` when it has none."""
+    head, sep, _tail = (item_id or "").rpartition("-feed:")
+    return head if sep else ""
+
+
+def identity(item):
+    """What makes rows of ``ctp__item_5`` one item: its own id (slot 3), or — a document not decoded —
+    the part of its item_id before ``-feed:``, or else the item_id itself."""
+    return item.get("own_id") or _item_head(item.get("item_id")) or item.get("item_id") or ""
+
+
 def _id_bytes(text):
     raw = base64_text.base64_bytes(text) if isinstance(text, str) and text else None
     return raw if raw is not None and len(raw) >= MIN_ID_BYTES else None
@@ -284,13 +309,16 @@ def _index_item(index, item):
     """Index one version of one item: by its texts (item_id, own id, payload texts) and by the bytes of
     its own id. Each index entry is ``(item, [(where, the text as stored)])``."""
     by_text, by_bytes = {}, {}
-    places = [(WHERE_ITEM_ID, item["item_id"]), (WHERE_OWN_ID, item["own_id"])]
-    places += [(f"payload {path}", text) for path, text in item["texts"]]
+    ids = [(WHERE_ITEM_ID, item["item_id"]), (WHERE_OWN_ID, item["own_id"])]
+    if not item["own_id"]:
+        # a document not decoded: the item_id still carries the own id, before its "-feed:"
+        ids.append((WHERE_ITEM_HEAD, _item_head(item["item_id"])))
+    places = ids + [(f"payload {path}", text) for path, text in item["texts"]]
     for where, text in places:
         form = _matchable(text)
         if form:
             by_text.setdefault(form, []).append((where, text))
-    for where, text in ((WHERE_ITEM_ID, item["item_id"]), (WHERE_OWN_ID, item["own_id"])):
+    for where, text in ids:
         raw = _id_bytes(text)
         if raw is not None:
             by_bytes.setdefault(raw, []).append((where, text))
@@ -398,16 +426,27 @@ def merge(indexes):
 # --------------------------------------------------------------------------- matching a claim
 
 def _attributable(found):
-    """The entries of one lookup, less those of a store in which more than one item holds the text."""
+    """``[(item, wheres, notes)]``: the entries of one lookup that the text is attributed to, store by
+    store (the module docstring). ``notes`` is ``{"feeds": the item_ids of the one item it is
+    attributed to in that store, "references": the item_ids of the other items holding it only in
+    their payload}``. A store in which different items hold the text attributes it to none."""
     by_store = {}
     for item, wheres in found or ():
         by_store.setdefault(item["store"], []).append((item, wheres))
     out = []
     for store, entries in by_store.items():
-        if len({item["item_id"] for item, _wheres in entries}) == 1:
-            out += entries
-        else:
-            logger.debug(f"{store}: a text held by several creative-tools items - not attributed")
+        chosen = entries
+        if len({identity(item) for item, _wheres in entries}) > 1:
+            # different items hold it: only the one whose own identity it is, if that is one item
+            chosen = [(item, wheres) for item, wheres in entries
+                      if any(where in _IDENTITY_PLACES for where, _text in wheres)]
+            if not chosen or len({identity(item) for item, _wheres in chosen}) > 1:
+                logger.debug(f"{store}: a text held by several creative-tools items - not attributed")
+                continue
+        feeds = sorted({item["item_id"] for item, _wheres in chosen})
+        references = sorted({item["item_id"] for item, _wheres in entries} - set(feeds))
+        out += [(item, wheres, {"feeds": feeds, "references": references})
+                for item, wheres in chosen]
     return out
 
 
@@ -420,8 +459,10 @@ def match(external_key, index):
     Each hit is the item's version that holds the matched text (the one both readings hold, else the
     -wal's, else the checkpointed file's), plus ``rule``, ``where`` (the places in the item, with the
     text each holds as stored), ``prefix`` (the word and separator a rule skipped), ``wal`` (the
-    reading of the version shown) and ``rewritten`` (the -wal's version is shown, and the
-    checkpointed version of the item holds the text too).
+    reading of the version shown), ``rewritten`` (the -wal's version is shown, and the
+    checkpointed version of the item holds the text too), ``same_item`` (the item_ids of the store
+    that are this one item, listed in several feeds — itself included) and ``references`` (the
+    item_ids of the store's other items that hold the text only in their payload).
     """
     if not index or not isinstance(external_key, str) or not external_key:
         return []
@@ -444,17 +485,18 @@ def match(external_key, index):
         found = [(item, wheres) for item, wheres in found or () if item["store"] not in held]
         held |= {item["store"] for item, _wheres in found}
         best, readings = {}, {}
-        for item, wheres in _attributable(found):
+        for item, wheres, notes in _attributable(found):
             ident = (item["store"], item["item_id"])
             readings.setdefault(ident, set()).add(item["wal"])
             if ident not in best or _READING_RANK.get(item["wal"], 3) < \
                     _READING_RANK.get(best[ident][0]["wal"], 3):
-                best[ident] = (item, wheres)
+                best[ident] = (item, wheres, notes)
         if best:
-            return [dict(item, rule=rule, where=wheres, prefix=prefix,
+            return [dict(item, rule=rule, where=wheres, prefix=prefix, same_item=notes["feeds"],
+                         references=notes["references"],
                          **_held_in(readings[(item["store"], item["item_id"])]))
-                    for item, wheres in sorted(best.values(),
-                                               key=lambda iw: (iw[0]["user_hash"], iw[0]["item_id"]))]
+                    for item, wheres, notes in sorted(
+                        best.values(), key=lambda iwn: (iwn[0]["user_hash"], iwn[0]["item_id"]))]
     return []
 
 

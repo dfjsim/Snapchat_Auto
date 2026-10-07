@@ -685,6 +685,8 @@ def _aggregate(subjects, found, group_of):
             group["found"][status] += 1
         if subject.get("named"):
             group.setdefault("named", collections.Counter())[subject["named"]] += 1
+        if subject.get("tied"):
+            group.setdefault("tied", collections.Counter())[subject["tied"]] += 1
     return list(groups.values())
 
 
@@ -759,12 +761,16 @@ def survey(run_folder, progress=None):
                  f"(no required_values USERID) - no claim is said to be another account's")
     # "does not hold" only when every arroyo.db was read; otherwise all that is known is "not found"
     read = bool(arroyos) and not unread
+    # A claim tied to its conversation gets the same label: whether the message is in a conversation
+    # arroyo.db holds, and whose claim it is, is what says if a recovery of deleted records could
+    # bring the message back — or if it is another account's, which no database here holds.
     for claim in claims:
         mo = _CHAT_EK_RE.match(claim.pop("_key", ""))
         user = claim.pop("_user", "")
-        if mo and claim["status"] == "none":
-            claim["named"] = _named_label(mo.group("conv"), mo.group("msg"), user, held, convs,
-                                          accounts, read, every_account=not nameless)
+        if mo and claim["status"] in ("none", CONVERSATION_STATUS):
+            claim["named" if claim["status"] == "none" else "tied"] = _named_label(
+                mo.group("conv"), mo.group("msg"), user, held, convs, accounts, read,
+                every_account=not nameless)
     # 2. Library/Caches files whose path carries a UUID
     files = [{"shape": file_shape(rel),
               "idents": [i for i in read_key(rel)[1] if i.label == "<uuid>"]}
@@ -822,6 +828,7 @@ def survey(run_folder, progress=None):
                     "found_in_arroyo": dict(g["in_arroyo"]),
                     "found_in_any_database": dict(g["found"]),
                     **({"untied_named_message": dict(g["named"])} if g.get("named") else {}),
+                    **({"conversation_tie": dict(g["tied"])} if g.get("tied") else {}),
                     "ids": [_found_json(slot, "claims", True) for slot in g["ids"]]}
                    for g in shapes],
         "cache_files": len(files),
@@ -859,6 +866,13 @@ def describe(payload):
     for s in named[:LOG_SHAPES]:
         lines.append(f"  context {s['context']} {s['shape']}: "
                      + ", ".join(f"{n} {what}" for what, n in s["untied_named_message"].items()))
+    tied = [s for s in payload["shapes"] if s.get("conversation_tie")]
+    if tied:
+        lines.append("Claims tied to the conversation their key names (no message row), by what "
+                     "arroyo.db holds:")
+    for s in tied[:LOG_SHAPES]:
+        lines.append(f"  context {s['context']} {s['shape']}: "
+                     + ", ".join(f"{n} {what}" for what, n in s["conversation_tie"].items()))
     lead = [s for s in payload["shapes"] if s["found_in_arroyo"].get("none")]
     # in arroyo.db: only what arroyo.db holds is listed under these shapes
     lead = [dict(s, ids=[dict(slot, found=[f for f in slot["found"] if f["database"] == "arroyo.db"])

@@ -45,7 +45,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   reading was not read), and a message the server never numbered counts as held by its
   `client_message_id`. A
   claim's snap id is looked up in the Memories of the app folder the reports read its
-  `cache_controller.db` from (`_apps`), which on Android is not four folders above it.
+  `cache_controller.db` from (`_apps`), which on Android is not four folders above it. A claim the
+  report ties to the conversation its key names gets the same label, counted apart
+  (`conversation_tie`), so the survey says which tied messages a recovery of deleted records could
+  bring back.
 - **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
   a Story, a preference or a Memory can hold the id a claim carries. A hit in a message the server never
   numbered says so, and an owner username in a key's `<USERNAME>~` position is masked out of the shapes.
@@ -82,7 +85,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   conversation tie or Memory link says what the file is, the category *Creative tools asset* in place of
   *CDN media*,
   *Other* or *Chat media*. Exact whole texts only: never a query value (`bo=` is a set of fetch options
-  many files share), a part of a text, or a text two items of a store hold. It is information on the
+  many files share) or a part of a text; a text several items of a store hold is attributed only to the
+  one whose own id it is — a custom sticker is one item listed in each sticker-picker feed that shows
+  it, and each is shown — and to none when different items hold it. It is information on the
   file, not a link, and the file is never a lead; the header line, the category option and the log line
   appear only when some file is named. An item whose document has another layout is still matched by
   its `item_id` column, and nothing is said of what it holds; a feed only the checkpointed feed tree

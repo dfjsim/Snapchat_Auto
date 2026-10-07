@@ -85,6 +85,8 @@ placeholder (`customSticker~<b64:13>`, `content~<n>:<uuid>:<n>:<n>:<n>`):
 * for the untied claims whose key names a conversation and a message
   (`<type>:<conversation>:<message>:<part>`): what `arroyo.db` holds of what the key names, in either
   reading, and whose claim it is (`untied_named_message`) — see [below](#a-key-that-names-a-message);
+  and the same labels for the claims the cache_controller report ties to the conversation their key
+  names (`conversation_tie`);
 * for each id position in the shape: every place the same id was found — table, column, protobuf
   field, `content_type` (for `conversation_message`), reading, and how the row holds it (`a whole value,
   as bytes`, `a whole text, as <b64:13>`, `inside a text, as <uuid>`) — with the number of claims;
@@ -161,7 +163,10 @@ reports were not built from.
 
 The status of such a claim stays `none` whatever its label: the label says why nothing ties it, it does
 not tie it. A claim the cache_controller report ties to a **listed** conversation is not untied — its
-status is `conversation: named in the key` and it gets no label; one whose conversation no report lists
+status is `conversation: named in the key` — and its label is counted apart, as `conversation_tie`: a
+message not held *in a conversation it holds*, or *claimed by arroyo.db's own account*, is one a
+recovery of deleted records could bring back; one *claimed by another account* is that account's, whose
+chat database the extraction does not hold. One whose conversation no report lists
 stays `none` here, though the report shows the same absence on the entry as a stated fact (see
 [report_cache_controller.md](report_cache_controller.md#tied-to-a-conversation--a-message-no-row-is-there-for)).
 The two can differ in one way: the report reads the one `arroyo.db` the run read, the labels every
