@@ -68,6 +68,7 @@ def test_only_assets_with_a_cached_file_are_shown_and_none_becomes_media(tmp_pat
         (fx.IMAGE_URL, [(CK, 25, fx.USER, fx.IMAGE_URL)])]
     assert m["media_files"] == []                                    # not decrypted, not published
     assert CK not in mr._cache_tokens(m)                              # not a key that names it
+    assert "filter_assets" not in m              # the full list is not kept once the cached are found
     page = mr._filter_assets_html([m])
     assert f"CacheController_report.html#ck-{CK}" in page
     assert "filters.geoFilters[0].imageUrl" in page and "filter image" in page

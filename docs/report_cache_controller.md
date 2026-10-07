@@ -303,18 +303,21 @@ tie-breaker): *Memory media / overlay / thumbnail* (`snap-*`/`g-media-`), *Chat 
 2/3), *Lens*, *Preview*, *App install*, *Video / Discover* (`topvideo~`/`firstframe`/`video~`),
 *CDN media* (a bare `http(s)` URL), *Snap editor* (context 34 with a `<UUID>~<position>` key — below),
 else *Other*. The row's category is the most meaningful across its claims (Memory beats Other). A file
-that is an asset of a filter a Memory's overlay record lists keeps its category — *CDN media*, as a
-URL-keyed claim — because that link is a relation of its own, not a statement of what the file is (see
-[below](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
+that is an asset of a filter a Memory's overlay record lists keeps the category it would have without
+that link — *CDN media* for its URL-keyed claim, or *Creative tools asset* when a creative-tools item
+names the file (next paragraph) — because that link is a relation of its own, not a statement of what
+the file is (see [below](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
 
 One category comes from another database: *Creative tools asset*, a file an item of an account's
 creative-tools store names ([below](#creative-tools-items--primarydocobjects--ctp__item_5)). It takes
 the place of *CDN media*, *Other* or *Chat media* only — never of a category the key's shape gives
-(*Lens*, *Snap editor*, a Memory's) — and only when no chat message and no Memory links to the file:
-those say what the file is. A filter listing does not hold it back, being a relation and not what the
-file is. The claims table keeps each claim's own category and context label (`2 (Chat media)`, a
-reading of the number): the contexts labelled *Chat media* claim creative-tools assets — custom stickers
-among them — as well as chat media, and on such a row a "?" beside the context says so. The
+(*Lens*, *Snap editor*, a Memory's) — and only when no chat message, no conversation tie and no Memory
+links to the file: those say what the file is (a tie, whose conversation's file it is). A filter
+listing does not hold it back, being a relation and not what the file is. The claims table keeps each
+claim's own category and context label (`2 (Chat media)`, a reading of the number): the contexts
+labelled *Chat media* claim creative-tools assets — custom stickers among them — as well as chat media,
+and on such a row a "?" beside the context says so (never beside a key of a chat message's shape,
+which names a conversation and a message itself). The
 category is applied after the key's (`build_entries`), not in `classify_external_key`, so the key-based
 categories are what they were.
 
@@ -478,8 +481,11 @@ no lead. A partial extract's file names only the Memories the extract holds.
 
 A Memory's overlay record (`scdb-27` `ZGALLERYSNAPDETAIL.ZOVERLAY`, read by `scripts/data/snap_overlay.py`;
 see [report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) lists the
-snap's geofilters with the URLs of their image, sky image and font. `load_memory_index` keeps those URLs
-(`overlay_urls`, iOS only), and an entry whose claim `EXTERNAL_KEY` is exactly one of them — the whole URL,
+snap's geofilters with the URLs of their image, sky image and font (and a sky item's `blimpUrl`, read
+the same way when it holds one). `load_memory_index(app, overlays=True)` keeps those URLs
+(`overlay_urls`, iOS only; asked for by this report's `index` and the survey, not by the Library/Caches
+report, which reads the same index for its URL keys alone and would pay for decoding every record for
+nothing), and an entry whose claim `EXTERNAL_KEY` is exactly one of them — the whole URL,
 by `snap_overlay.normalise_url` — gets `entry["filter_memories"]`: one link per listing Memory
 (`_overlay_links_for`; the rule in full is in [cross_report_linking.md](cross_report_linking.md)). On the
 corpus these are context-25 claims on WebP filter images, PNG sky images and TrueType fonts.
@@ -496,7 +502,12 @@ corpus these are context-25 claims on WebP filter images, PNG sky images and Tru
   it), the filter (type · carousel group · idValue), what the record says about it being selected (*yes*
   / *no — the record names another filter* / *not recorded*), and the claim — flagged *another account's
   claim* when its `USER_ID` is not the Memory's account. Each Memory's "?" quotes the record's field,
-  what it says of the selected filter and the Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE`.
+  what it says of the selected filter and the Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE` — only what is
+  that Memory's own (`_filter_row_basis`): the method is the section's "?", once. One asset can be
+  listed by a large share of a gallery's Memories, so the section shows at most `FILTER_DETAIL_ROWS`
+  (200) — those whose record names the filter as selected first, then, in a partial report, those the
+  extract holds, then by snap id, shown in snap-id order — and a line saying how many more there are.
+  The chip and the search are not capped: they carry every listing Memory.
 * **The Linked filter** gains *filter listed with a Memory (not its media)* (link value `Filter`), the
   header a count line with its "?", the page a dashed-chip style — each written only when some entry has
   such a link, so a report with none is byte for byte what it was. The run log gives the count on a line
@@ -552,7 +563,8 @@ from the messages the report lists. A message arroyo.db holds makes no tie: that
   is byte for byte what it was. The run log gives the count on a line of its own. **Search** finds the
   entry by the conversation id.
 
-The category stays the key's (*Chat media* for contexts 2 and 3). An entry with a tie is never a
+The category stays the key's (*Chat media* for contexts 2 and 3), a creative-tools item that names the
+file notwithstanding: the item's section is still in the detail. An entry with a tie is never a
 *Possible Memory* lead: the claim says whose file it is. In a partial run a tie to a listed conversation
 is the edge `EDGE_CONV_CACHE`, followed by `cache_conversation` (on by default: ticking the entry brings
 the conversation's row and page, not its messages) and `conv_cache` (off by default); a tie to a
@@ -672,7 +684,9 @@ iOS only — its Android counterpart, if `memories.db` has one, was not examined
 no `overlay_urls` and its report none of that link's chips, filter option or header line. The same goes
 for the creative-tools items: `ctp_items.find_stores` looks in the iOS layout
 (`Documents/user_scoped/*/DocObjects/`), its Android counterpart was not examined, and on an Android app
-folder it finds no store — no item, no category, no section or header line. The conversation tie works
+folder it finds no store — no item, no category, no section or header line. The MemData-id link and the
+*Possible Memory* leads are iOS-only too: they need what the Android Memories index does not carry
+(`memdata_ids`, `points`). The conversation tie works
 on both: Android's `arroyo.db` is the same database, with the same `required_values` `USERID`, and the
 Conversations report writes the same manifest from it. See [snapchat_android.md](snapchat_android.md).
 

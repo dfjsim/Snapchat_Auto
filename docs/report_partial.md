@@ -474,12 +474,13 @@ CLI, the GUI dialog and `describe()` cannot disagree about it. These are set the
   than to one matched on a name.
 * **`mem_filter_assets` and `cache_filter_memories` are off.** They follow the cache_controller report's
   *filter listed* link (`EDGE_MEMORY_FILTER_ASSET`): a cached file whose claim key is the URL of an asset
-  — filter image, sky image, font — of a geofilter a Memory's overlay record
-  (`ZGALLERYSNAPDETAIL.ZOVERLAY`) lists. That file is not the Memory's media, the record lists filters it
-  does not name as selected, and one asset is commonly listed with many Memories — so ticking a Memory
-  does not bring the assets of every filter its record lists, nor ticking a font every Memory whose
-  record lists it. `mem_cache` / `cache_memory` never follow this edge. Either way, a link whose other
-  end the extract does not hold is marked by `xref`, as every cross-report link is. See
+  — filter image, sky image, font, or a sky item's blimpUrl when it holds one — of a geofilter a
+  Memory's overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`) lists. That file is not the Memory's media,
+  the record lists filters it does not name as selected, and one asset is commonly listed with many
+  Memories — so ticking a Memory does not bring the assets of every filter its record lists, nor
+  ticking a font every Memory whose record lists it. `mem_cache` / `cache_memory` never follow this
+  edge. Either way, a link whose other end the extract does not hold is marked by `xref`, as every
+  cross-report link is. See
   [cross_report_linking.md](cross_report_linking.md#cache_controller--memory-an-asset-of-a-filter-its-overlay-record-lists).
 * **`cache_conversation` is on, `conv_cache` is off.** Both follow the cache_controller report's
   *conversation tie* (`EDGE_CONV_CACHE`): a cached file whose claim key names a message of a conversation
@@ -492,8 +493,12 @@ CLI, the GUI dialog and `describe()` cannot disagree about it. These are set the
   conversation a relation pulled in it would be a second hop (`transitive`). The reverse is off for
   the reason `conv_messages` is: ticking a conversation for its page is not a request to disclose the
   cached files its claims name. Neither follows `msg_cache` / `cache_message`, which are a message's.
-  The GUI lays a saved relation policy over the recommended set, so a policy saved before these
-  relations existed starts with `cache_conversation` on and `conv_cache` off. See
+  A policy the GUI saved before these relations existed names every relation of the build that saved
+  it, so these are the ones it lacks. A hand-mixed policy starts them at their defaults —
+  `cache_conversation` on, `conv_cache` off — while one saved as *Minimal* (all off) or *Everything*
+  (all on) gives them that same answer, so a containment-only extract stays containment-only. Until
+  the policy is saved again the Related items dialog marks them *[new]*, so the answer each was given
+  is seen before a run (`Snapchat_Auto._saved_relations`, `_relations_added_since_saved`). See
   [cross_report_linking.md](cross_report_linking.md#cache_controller--the-chat-report).
 
 `transitive` follows **only the relations that are switched on** — the enabled list is computed once and

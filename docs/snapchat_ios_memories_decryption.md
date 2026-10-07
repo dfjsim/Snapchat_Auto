@@ -430,8 +430,9 @@ matched on the **account name**, so dumps that export no `agrp` still work.
 `ZGALLERYSNAPDETAIL` (both schemas, plain — no keychain): `ZSNAP` is the Memory's `ZGALLERYSNAP.Z_PK`
 (`ZGALLERYSNAP.ZDETAIL` points back; at most one row per Memory, some have none), and `ZOVERLAY` is the
 Memory's overlay record, an NSKeyedArchiver archive of `SOJUGallerySnapOverlay` listing the snap's
-filters — the geofilters with the URLs of their image, sky image and font, and which one the record names
-as selected. `gallery.encrypteddb` holds no counterpart. Read by `scripts/data/snap_overlay.py`; see
+filters — the geofilters with the URLs of their image, sky image and font (and a sky item's blimpUrl,
+read when it holds one), and which one the record names as selected. `gallery.encrypteddb` holds no
+counterpart. Read by `scripts/data/snap_overlay.py`; see
 [report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay).
 
 ---

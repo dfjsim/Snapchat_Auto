@@ -398,6 +398,16 @@ def test_a_tied_cache_entry_brings_its_conversation_but_a_conversation_brings_no
     assert f"conv-{CONV_A}" not in closure("cc", "ck-Y", {}).included.get("conv", set())
 
 
+def test_both_tie_relations_say_they_are_the_tie_and_not_the_conversation_s_cached_files():
+    """conv_cache follows only the tie (a claim naming a message no row is there for), never the
+    cached files of the conversation's messages, which come through its messages (msg_cache). Its
+    label must say so as its pair's does, or ticking it reads as "this conversation's cached files"."""
+    tie = [r for r in pr.RELATIONS if r.edge == pr.EDGE_CONV_CACHE]
+    assert {r.key for r in tie} == {"cache_conversation", "conv_cache"}
+    for relation in tie:
+        assert "(no message row)" in relation.label, relation.key
+
+
 def test_the_filter_asset_relations_are_off_unless_asked_and_never_the_media_edge():
     """An asset of a filter a Memory's overlay record lists is not its media, and one asset is listed
     with many Memories: neither direction is followed by default, and following a Memory to its

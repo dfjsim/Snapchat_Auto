@@ -52,7 +52,8 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 - **A cached filter asset links to the Memories whose overlay record lists it — never as their media** —
   `scripts/data/snap_overlay.py`, `cache_controller_report._overlay_links_for`. A Memory's
   `ZGALLERYSNAPDETAIL.ZOVERLAY` (scdb-27, plain on both storage schemas) is an NSKeyedArchiver archive
-  listing the snap's geofilters with the URLs of their image, sky image and font. A cache_controller
+  listing the snap's geofilters with the URLs of their image, sky image and font (and a sky item's
+  `blimpUrl`, read the same way when it holds one). A cache_controller
   claim keyed by exactly one of those URLs — the whole URL, query included (`snap_overlay.normalise_url`)
   — now links to each Memory whose record lists it: a dashed *filter listed* chip (*filter selected*
   only when the record names that filter), one `#find=` chip for several Memories, a detail section, a
@@ -62,8 +63,13 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   account than the Memory's is linked and says so; a Bitmoji filter's shared address is never an asset.
   The Memory's page lists the same files under *Cached assets of filters listed with this Memory — not
   its media* (`memories_media_report.index_claim_urls`, `_filter_assets_html`), on a shared page each
-  under the Memory that lists it. `scripts/data/keyed_archive.py` is a new strict NSKeyedArchiver
-  resolver, which `decode_memdata` now uses too. See [docs/report_memories.md](docs/report_memories.md) and
+  under the Memory that lists it. A file's detail lists at most `FILTER_DETAIL_ROWS` listing Memories
+  (one asset can be listed by a large share of a gallery) and says how many more, each row's "?" holding
+  only what is that Memory's own; the chip and the search carry them all. Only the readers that match
+  filter assets decode the records (`load_memory_index(app, overlays=True)`), and the Memories report
+  keeps a Memory's cached assets, not every asset its record lists. `scripts/data/keyed_archive.py` is a
+  new strict NSKeyedArchiver resolver, which `decode_memdata` now uses too. See
+  [docs/report_memories.md](docs/report_memories.md) and
   [docs/cross_report_linking.md](docs/cross_report_linking.md).
 - **A cached file named by an item of an account's creative-tools store says so** —
   `scripts/data/ctp_items.py`, `cache_controller_report._ctp_hits`. Each account's `primary.docobjects`
@@ -72,8 +78,9 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   named only from the store's `ctp__feedtree`. A claim whose whole key, or key after `<word>:` /
   `<word>~` (`music:`, `customSticker~`), is a text an item holds — or, when that part reads as base64,
   the same bytes as its own id in another alphabet or padding — gets a detail section naming the item,
-  its feed and kind, where in it the text sits, whose store and which reading; and, when no chat or
-  Memory link says what the file is, the category *Creative tools asset* in place of *CDN media*,
+  its feed and kind, where in it the text sits, whose store and which reading; and, when no chat link,
+  conversation tie or Memory link says what the file is, the category *Creative tools asset* in place of
+  *CDN media*,
   *Other* or *Chat media*. Exact whole texts only: never a query value (`bo=` is a set of fetch options
   many files share), a part of a text, or a text two items of a store hold. It is information on the
   file, not a link, and the file is never a lead; the header line, the category option and the log line
@@ -120,7 +127,7 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   listed only messages with an attachment; and a key carrying an id the message names its media by —
   `content~`, `thumbnail~` or `SnapVideoFilterState-` with the media id of the message's
   `local_message_references`, or a shared item's or a sticker's other files. The Conversations
-  manifest now lists every message and those ids (`conversations_report.load_content_ids`,
+  manifest now lists every message and those ids (`conversations_report.load_arroyo_messages`,
   `arroyo_content.content_ids`); each link's "?" names the id and the field it came from. See
   [docs/cross_report_linking.md](docs/cross_report_linking.md). A message the server never numbered
   (not sent, or still sending) is found by its `client_message_id`, and a `local_message_references`
@@ -146,11 +153,24 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   (`<CACHE_KEY>_<child>`), which is a cache_controller row only when no claimed bundle lists the child,
   so it usually opened the report without landing anywhere. And `thumbnail~<UUID>` /
   `profilethumbnail~<UUID>` no longer report "thumbnail" as the claim's owner username (`claim_owner`).
+- **A staged copy of a database that will not open is no longer left in the temp folder** —
+  `sqlite_open._open_ro`. The connection whose first read failed was not closed, and it holds the staged
+  file open until the garbage collector runs, so on Windows `Views.close()` could not remove the folder:
+  a copy of the evidence database (`arroyo.db`, an account's `primary.docobjects`) stayed in `%TEMP%`.
+  It is closed there and then, and `close()` collects and retries once, then logs the folder it could
+  not remove.
+- **The Related items dialog's buttons are always in reach** — `Snapchat_Auto._relations_dialog`. Minimal,
+  Recommended, Everything, Ok and Cancel were the last row of the scrolling list, which is taller than
+  the dialog, so they opened out of sight; they are under it now, and the list's requested height is
+  kept small enough that a window shrunk to its minimum still shows them.
 - **A relation a later build adds starts at its default in the GUI** — `Snapchat_Auto._saved_relations`.
   The relation policy the GUI remembers names only the relations of the build that saved it, and the
   dialog read an absent one as off, so a new relation that is on by default stayed off for every
-  examiner who had saved a policy. The saved choices are now laid over the recommended set, and a key
-  this build no longer has is dropped instead of making the run refuse its own `--relations` spec.
+  examiner who had saved a policy. A saved policy names every relation of the build that saved it, so
+  one it lacks is new: a policy saved as *Minimal* (all off) or *Everything* (all on) gives a new
+  relation the same answer, and only a hand-mixed one starts it at its default. The dialog names the
+  relations added since the policy was saved, and a key this build no longer has is dropped instead of
+  making the run refuse its own `--relations` spec.
 
 ### Changed
 - **Partial-report relations for the filter-asset link and the conversation tie** —
@@ -160,8 +180,10 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   is listed with many Memories, so neither is followed unless asked, and `mem_cache` / `cache_memory`
   never follow this edge. `partial_report.EDGE_CONV_CACHE`: `cache_conversation` (the conversation a
   selected cache entry's claim names, for a message no row is there for — its row and page, not its
-  messages), on by default, and `conv_cache` (the reverse), off like `conv_messages`; recorded only for
-  a conversation the Conversations report lists. See [docs/report_partial.md](docs/report_partial.md).
+  messages), on by default, and `conv_cache` (the reverse — only those tie entries, not the cached files
+  of the conversation's messages, and labelled *(no message row)* like its pair), off like
+  `conv_messages`; recorded only for a conversation the Conversations report lists. See
+  [docs/report_partial.md](docs/report_partial.md).
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
   3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required

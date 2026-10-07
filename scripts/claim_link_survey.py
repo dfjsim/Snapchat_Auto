@@ -328,7 +328,7 @@ def _memory_keys(apps):
     snap_ids, filter_urls = {}, {}
     for app in apps:
         try:
-            index = load_memory_index(app)
+            index = load_memory_index(app, overlays=True)
         except Exception as error:                                 # noqa: BLE001 - optional
             logger.debug(f"--survey-claim-links: Memories not read for {app} ({error})")
             continue

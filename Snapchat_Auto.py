@@ -1600,20 +1600,54 @@ def _handle_help(event):
     return True
 
 
-def _saved_relations(cfg):
-    """The relation policy the settings window starts with: the saved one, over the recommended set.
-
-    A saved policy names every relation of the build that saved it, and nothing else. A relation a
-    later build adds is absent from it — and the dialog reads an absent box as off, and the run spec
-    (``_relations_spec``) turns off whatever it does not name — so a new relation that is on by
-    default would stay off for every examiner who had ever pressed Ok. Laid over the recommended set,
-    the saved choices win where they were made and the build's defaults stand where none was. A key
-    no relation of this build carries any more is dropped, so a renamed relation cannot make the run
-    refuse its own spec.
-    """
+def _saved_policy(cfg):
+    """The saved relation choices this build still has a relation for, or {} when none were saved."""
     saved = cfg.get("partial", {}).get("relations")
-    merged = {**partial_report.PRESETS["recommended"], **(saved if isinstance(saved, dict) else {})}
-    return {key: bool(on) for key, on in merged.items() if key in partial_report.RELATION_KEYS}
+    return ({key: bool(on) for key, on in saved.items() if key in partial_report.RELATION_KEYS}
+            if isinstance(saved, dict) else {})
+
+
+def _saved_relations(cfg):
+    """The relation policy the settings window starts with: the saved one, and an answer for each
+    relation it lacks.
+
+    A saved policy names every relation of the build that saved it, and nothing else — the dialog's Ok
+    writes all of them, and so does the main window — so a relation it lacks is one a later build
+    added. The dialog reads an absent box as off, and the run spec (``_relations_spec``) turns off
+    whatever it does not name, so without an answer a new relation that is on by default would stay
+    off for every examiner who had ever pressed Ok. Which answer depends on what was saved: a policy
+    that is all off or all on is *Minimal* or *Everything* — pressed or ticked by hand, the same
+    choice — and a new relation takes that same answer, so a containment-only extract stays
+    containment-only; a hand-mixed policy starts it at the build's default. Every saved choice stands.
+    A key no relation of this build carries any more is dropped, so a renamed relation cannot make the
+    run refuse its own spec.
+    """
+    saved = _saved_policy(cfg)
+    if not saved:                        # nothing saved, or nothing this build knows
+        return dict(partial_report.PRESETS["recommended"])
+    answers = set(saved.values())
+    if len(answers) == 1:                # Minimal (all off) or Everything (all on)
+        fill = answers.pop()
+        base = {key: fill for key in partial_report.RELATION_KEYS}
+    else:                                # hand-mixed: a new relation starts at its default
+        base = partial_report.PRESETS["recommended"]
+    return {key: saved.get(key, base[key]) for key in partial_report.RELATION_KEYS}
+
+
+def _relations_added_since_saved(cfg):
+    """The relations this build has that the saved policy does not name — added since it was saved.
+
+    Empty when no policy was saved: then every relation starts at its default and none is new to
+    the examiner. The dialog marks these, so the answer each was given is seen before a run.
+    """
+    saved = _saved_policy(cfg)
+    return [key for key in partial_report.RELATION_KEYS if key not in saved] if saved else []
+
+
+def _policy_to_save(state):
+    """The relation state as the settings file keeps it: what was chosen, not which relations were
+    new when this session started — once saved, the policy names them all and none is new."""
+    return {key: value for key, value in state.items() if key != "added"}
 
 
 def _relations_spec(state):
@@ -1740,6 +1774,16 @@ def _last_run_folder(workdir):
     return max(runs, key=os.path.getmtime) if runs else ""
 
 
+#: The relations dialog, in 100% pixels: the size it opens at, its floor, and the height its scrolling
+#: list *requests* — kept at or below the floor less the button row (about 50), or a shrunk window
+#: loses its buttons (see _relations_dialog).
+_RELATIONS_WINDOW = (844, 640)
+_RELATIONS_MIN = (700, 420)
+_RELATIONS_LIST_REQUEST = (820, 340)
+#: After the label of a relation the saved policy does not name (_relations_added_since_saved).
+NEW_RELATION_MARK = "  [new]"
+
+
 def _relations_dialog(state):
     """Which related items to bring in with the ticked rows. Edits *state* in place.
 
@@ -1754,15 +1798,23 @@ def _relations_dialog(state):
              "cc": "From a selected cache_controller entry",
              "cm": "From a selected Library/Caches file"}
 
+    # relations this build added since the saved policy was saved: marked, so the answer each was
+    # given (_saved_relations) is seen before a run rather than taken on trust
+    added = set(state.get("added") or ())
     rows = [[sg.Text("Always included, and not optional:")]]
     for line in partial_report.CONTAINMENT:
         rows.append([sg.Text(f"   • {line}", font=("", 9))])
+    if added:
+        rows.append([sg.Text(f"{NEW_RELATION_MARK.strip()}: added since your relation policy was saved"
+                             " — each starts as shown", font=HINT_FONT, text_color=hint_color(),
+                             pad=((0, 0), (10, 0)))])
     for src, relations in by_src.items():
         rows.append([sg.Text(label.get(src, src), font=("", 10, "bold"), pad=((0, 0), (10, 0)))])
         for relation in relations:
             # The basis is on the "?" rather than under the checkbox: a paragraph under every
             # relation turned the choice everyone comes here to make into a wall of prose.
-            rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
+            text = relation.label + (NEW_RELATION_MARK if relation.key in added else "")
+            rows.append([sg.Checkbox(text, default=bool(state["relations"].get(relation.key)),
                                      key=f"rel_{relation.key}"),
                          _help(relation.basis, title=relation.label)])
     # The last two are not relations — they set the scope of the whole extract — so they sit under
@@ -1787,14 +1839,24 @@ def _relations_dialog(state):
                        'It is one question about the run rather than a relation between rows, so it '
                        'is asked once, on the main window, and applies to a full report and to an '
                        'extract alike.', title="The legacy reports")])
-    rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
-                 sg.Button("Ok"), sg.Button("Cancel")])
+    # Outside the scrolling list, as on the settings window: Ok scrolled off the bottom is the same as
+    # no Ok at all, and the list is taller than the window it opens in.
+    buttons = [sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
+               sg.Button("Ok"), sg.Button("Cancel")]
 
+    # The Column's size is what it *requests* — a floor, not the size it opens at. Tk's packer takes
+    # space from the last-packed row first, so a Column requesting more than the window's minimum
+    # height less the button row would push the buttons out of a shrunk window, beyond the reach of
+    # the scrollbar too. It stays small; the window opens at the size wanted and expand_y gives the
+    # list the rest. Do not put 580 back on the Column.
     window = sg.Window("Related items to include",
-                       [[sg.Column(rows, scrollable=True, vertical_scroll_only=True,
-                                   expand_x=True, expand_y=True, size=hidpi.px2((820, 580)))]],
-                       modal=True, keep_on_top=True, resizable=True, finalize=True)
-    window.set_min_size(hidpi.px2((700, 420)))
+                       [[sg.Column(rows, key="relations_form", scrollable=True,
+                                   vertical_scroll_only=True, expand_x=True, expand_y=True,
+                                   size=hidpi.px2(_RELATIONS_LIST_REQUEST))],
+                        buttons],
+                       size=hidpi.px2(_RELATIONS_WINDOW), modal=True, keep_on_top=True,
+                       resizable=True, finalize=True)
+    window.set_min_size(hidpi.px2(_RELATIONS_MIN))
     try:
         while True:
             event, values = window.read()
@@ -1814,6 +1876,7 @@ def _relations_dialog(state):
                 state["relations"] = {r.key: bool(values[f"rel_{r.key}"])
                                      for r in partial_report.RELATIONS}
                 state["transitive"] = bool(values["transitive"])
+                state.pop("added", None)        # answered now: none is new to the examiner any more
                 # legacy_reports is deliberately not read here: it belongs to the main window, and
                 # this dialog only reports what it is set to.
                 return
@@ -1869,7 +1932,9 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
     relation_state = {"relations": _saved_relations(cfg),
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
                       # one setting, on the main window (the dialog only states it)
-                      "legacy_reports": bool(cfg.get("legacy_reports"))}
+                      "legacy_reports": bool(cfg.get("legacy_reports")),
+                      # marked in the dialog; never saved (_policy_to_save)
+                      "added": _relations_added_since_saved(cfg)}
     layout = [
         [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
          sg.Text("Text size"),
@@ -2278,7 +2343,7 @@ def main(args):
                 "tile_server": values.get("tile_server", "").strip(),
                 # The relation policy is a working preference and is remembered. The selection file and
                 # the case reference deliberately are not: both belong to one case.
-                "partial": relation_state,
+                "partial": _policy_to_save(relation_state),
                 "legacy_reports": bool(values.get("legacy_reports")),
                 # Never committed and never bundled: this repository is public, so an internal
                 # share path may only live in this examiner's own settings file.

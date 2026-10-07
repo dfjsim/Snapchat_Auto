@@ -153,8 +153,9 @@ Not one of the rules above, and never the Memory's media. A Memory's overlay rec
 `ZGALLERYSNAPDETAIL.ZOVERLAY`, the row whose `ZSNAP` is the Memory's `Z_PK`, an NSKeyedArchiver archive
 of `SOJUGallerySnapOverlay` (see
 [report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) — lists the
-snap's geofilters, and three fields of a geofilter hold a URL: `imageUrl`,
-`arSegmentation.sky.replacementSkyUrl` and `geofilterMarkups[j].displayParameters.font`. A claim whose
+snap's geofilters, and four fields of a geofilter are read for a URL: `imageUrl`,
+`arSegmentation.sky.replacementSkyUrl`, `arSegmentation.sky.blimpUrl` (empty wherever it has been seen)
+and `geofilterMarkups[j].displayParameters.font` (`snap_overlay.ASSET_FIELDS`). A claim whose
 `EXTERNAL_KEY` is one of those URLs is a cached asset of a listed filter
 (`cache_controller_report._overlay_links_for`, reading `scripts/data/snap_overlay.py`):
 
@@ -180,7 +181,8 @@ snap's geofilters, and three fields of a geofilter hold a URL: `imageUrl`,
   Linked filter, its own partial-report edge (`EDGE_MEMORY_FILTER_ASSET`; relations `mem_filter_assets`
   and `cache_filter_memories`, both off by default). An entry linked to a Memory as its media is not
   linked to the same Memory again this way. One asset is commonly listed for many Memories, so several
-  are one dashed `#find=` chip, and the detail lists each Memory with its own "?".
+  are one dashed `#find=` chip, and the detail lists each Memory with its own "?" — up to
+  `FILTER_DETAIL_ROWS` of them, then a line saying how many more; the chip and the search carry all.
 
 Both reports read the record through the same module and match by the same rule, so the Memory's page
 lists the same files (see below) without a manifest passing between them.

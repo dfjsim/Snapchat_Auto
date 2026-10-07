@@ -111,9 +111,10 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   `conversation_message` row *is* — every `content_type` named, and its `message_content` body (4.4)
   described: app events from their own fields, shares, replies — read straight off the wire, and a
   kind it does not know named by its field number, never guessed; and `keyed_archive.py`, a strict
-  NSKeyedArchiver resolver shared by the MemData ids and overlay-record readers, which converts by the
-  archive's own class names and gives None, never a partial tree, for anything that does not hold
-  together (the older `ccl_bplist`-based readers and `ufed_keychain` still resolve their own); and
+  NSKeyedArchiver resolver shared by the MemData ids, overlay-record and creative-tools feed-tree
+  (`ctp__feedtree`) readers, which converts by the archive's own class names and gives None, never a
+  partial tree, for anything that does not hold together (the older `ccl_bplist`-based readers and
+  `ufed_keychain` still resolve their own); and
   `snap_overlay.py`, a Memory's overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`) and the asset URLs of
   the geofilters it lists, with `normalise_url`, the one whole-URL rule a claim key is matched to a URL
   by — a listed filter is never said to be on the Memory, and a file matched this way is never its

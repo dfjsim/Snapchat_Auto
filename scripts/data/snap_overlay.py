@@ -9,9 +9,11 @@ schemas — no keychain is needed, and ``gallery.encrypteddb`` holds nothing lik
 names the selected one; for the geofilters that is ``geoFilters`` (``SOJUGalleryGeoFilter``) and
 ``geoFilterSelectedId`` / ``geoFilterSelectedIds``.
 
-Three fields of a geofilter hold a URL (:data:`ASSET_FIELDS`, relative to one ``geoFilters[i]``): its
-image (``imageUrl``), its sky image (``arSegmentation.sky.replacementSkyUrl``) and the font of its
-text (``geofilterMarkups[j].displayParameters.font``). A ``cache_controller.db`` claim whose
+Four fields of a geofilter are read for a URL (:data:`ASSET_FIELDS`, relative to one
+``geoFilters[i]``): its image (``imageUrl``), its sky image (``arSegmentation.sky.replacementSkyUrl``),
+the font of its text (``geofilterMarkups[j].displayParameters.font``) and its sky item's
+``arSegmentation.sky.blimpUrl`` — read the same way when it holds an ``http(s)`` URL; where it has been
+seen it is present but empty, which gives no asset. A ``cache_controller.db`` claim whose
 EXTERNAL_KEY is one of those URLs — compared by :func:`normalise_url` on both sides, so the whole URL,
 query included — is a cached asset of a filter the record lists. That is all the match says. A record
 commonly lists several filters and names the selected one separately (often none), so a listed filter
@@ -41,7 +43,7 @@ CLASS = keyed_archive.CLASS
 ASSET_FIELDS = (
     (("imageUrl",), "filter image"),
     (("arSegmentation", "sky", "replacementSkyUrl"), "sky image"),
-    (("arSegmentation", "sky", "blimpUrl"), "sky item blimpUrl"),
+    (("arSegmentation", "sky", "blimpUrl"), "sky item (blimpUrl)"),
     (("geofilterMarkups", "[]", "displayParameters", "font"), "font of the filter text"),
 )
 

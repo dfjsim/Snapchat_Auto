@@ -107,7 +107,8 @@ RELATIONS = (
              "The conversation's own messages, as arroyo.db records them."),
     # Off by default for the same reason: ticking a conversation for its page is not a request to
     # disclose the cached files its claims name.
-    Relation("conv_cache", "The cache_controller entries tied to a selected conversation",
+    Relation("conv_cache",
+             "The cache_controller entries tied to a selected conversation (no message row)",
              EDGE_CONV_CACHE, "conv", "cc", False,
              "The same tie as cache_conversation, read from the conversation: cached files whose "
              "claim EXTERNAL_KEY names a message of this conversation that no row is there for - the "
@@ -151,7 +152,8 @@ RELATIONS = (
              "The cached assets of the filters a selected Memory's overlay record lists",
              EDGE_MEMORY_FILTER_ASSET, "mem", "cc", False,
              "cache_controller entries whose claim EXTERNAL_KEY is exactly the URL of an asset "
-             "(filter image, sky image, font) of a geofilter listed in the Memory's "
+             "(filter image, sky image, font - or the sky item's blimpUrl, when it holds one) of "
+             "a geofilter listed in the Memory's "
              "ZGALLERYSNAPDETAIL.ZOVERLAY. Not the Memory's media: the record lists the snap's "
              "geofilters and names the selected one separately."),
     Relation("cache_memory", "The Memory a selected cache entry belongs to",

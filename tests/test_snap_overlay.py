@@ -1,7 +1,8 @@
 """A Memory's overlay record (scdb-27 ``ZGALLERYSNAPDETAIL.ZOVERLAY``) and the asset URLs it lists.
 
 The record is an NSKeyedArchiver archive of ``SOJUGallerySnapOverlay``. Its geofilters each give the
-URL of an image, a sky image and the font of their text; those URLs are what a cached file's claim
+URL of an image, a sky image and the font of their text (and a sky item's blimpUrl, read the same way
+when it holds a URL); those URLs are what a cached file's claim
 key is matched against, whole, by the one rule :func:`snap_overlay.normalise_url`. A record commonly
 lists several filters and names the selected one separately (often none) — so the reader reports
 ``selected`` as the record states it and nothing more. Every input is synthetic.
@@ -33,6 +34,18 @@ def test_every_asset_url_of_every_listed_geofilter_with_its_place_in_the_record(
     assert [a["selected"] for a in assets] == [False, True, True]
     assert assets[1]["filter_type"] == "DYNAMIC" and assets[1]["group"] == "DAY_GROUP"
     assert assets[0]["filter_id"] == "101" and assets[0]["key"] == fx.IMAGE_URL
+
+
+def test_a_sky_item_s_blimp_url_is_read_the_same_way_and_an_empty_one_is_no_asset():
+    """The fourth field: read like the others when it holds a URL. Where it has been seen it is
+    present and empty beside a replacementSkyUrl — that gives the sky image only."""
+    blimp = "https://geofilter.example.net/blimp/0b0b0b0b-1111-4222-8333-444444444444"
+    record = so.unarchive(fx.overlay([fx.geofilter("101", sky=fx.SKY_URL, blimp=blimp)]))
+    assert [(a["role"], a["field"], a["url"]) for a in so.filter_assets(record)] == [
+        ("sky image", "filters.geoFilters[0].arSegmentation.sky.replacementSkyUrl", fx.SKY_URL),
+        ("sky item (blimpUrl)", "filters.geoFilters[0].arSegmentation.sky.blimpUrl", blimp)]
+    seen = so.unarchive(fx.overlay([fx.geofilter("101", sky=fx.SKY_URL, blimp="")]))
+    assert [a["role"] for a in so.filter_assets(seen)] == ["sky image"]
 
 
 def test_selected_is_what_the_record_says_and_none_when_it_says_nothing():

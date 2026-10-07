@@ -949,7 +949,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
                               **entry_raw.get(entry_pk, {})),
             # media retrieved from Snapchat's servers — never mixed into media_files
             "cloud_files": [],
-            # the asset URLs of the geofilters its overlay record lists (snap_overlay) — never media
+            # the asset URLs of the geofilters its overlay record lists (snap_overlay) — never media;
+            # read only by collect_media, which replaces it with the cached ones (filter_cached)
             "filter_assets": [],
         }
         if has_zenc and r.get("ZENCRYPTION"):
@@ -979,7 +980,8 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
 
     # The overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY): the asset URLs of the geofilters it lists. The
     # cache_controller report matches claims against them with the same rule (scripts/data/
-    # snap_overlay.py); collect_media finds the cached ones. Not media of the Memory, and no keychain.
+    # snap_overlay.py); collect_media finds the cached ones and drops the rest. Not media of the
+    # Memory, and no keychain.
     for rec in snap_overlay.read_overlays(views):
         m = memories.get(rec["snap_id"])
         if m is not None:
@@ -1881,9 +1883,12 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
         claim_urls = urls if claim_urls is None else claim_urls
     # The cached assets of the geofilters each Memory's overlay record lists: a claim whose key is
     # the asset's URL. Shown on the Memory's page apart from its media, never decrypted or published.
+    # The full list is taken off the Memory as it is read: nothing reads it after this, and on a
+    # geofilter-heavy gallery it is most of what a Memory weighs while the report runs.
     for m in memories.values():
+        listed = m.pop("filter_assets", None) or ()
         m["filter_cached"] = [dict(asset, claims=claim_urls[asset["key"]])
-                              for asset in m.get("filter_assets") or () if asset["key"] in claim_urls]
+                              for asset in listed if asset["key"] in claim_urls]
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
@@ -3877,7 +3882,8 @@ FILTER_ASSETS_PAGE_BASIS = (
     "cache_controller entries whose claim EXTERNAL_KEY is exactly a URL this Memory's overlay record "
     "(scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, an NSKeyedArchiver archive of "
     "SOJUGallerySnapOverlay) gives an asset of one of its listed geofilters: the filter image, the "
-    "sky image or the font of its text. The whole URL is compared, query included, never an id "
+    "sky image or the font of its text — or the sky item's blimpUrl, when it holds one. The whole URL "
+    "is compared, query included, never an id "
     "inside it. The record lists the snap's geofilters and names the selected one separately "
     "(filters.geoFilterSelectedId / geoFilterSelectedIds), so a listed filter is not shown to be on "
     "the Memory, and these files are not its media: they are not among the Media files above, and "

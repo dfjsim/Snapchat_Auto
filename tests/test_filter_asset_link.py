@@ -1,7 +1,8 @@
 """A cached filter asset is linked to the Memories whose overlay record lists it — and to nothing more.
 
 A Memory's ``ZGALLERYSNAPDETAIL.ZOVERLAY`` lists the snap's geofilters with the URLs of their image,
-sky image and font. A cache_controller claim keyed by exactly one of those URLs is a cached asset of a
+sky image and font (and a sky item's blimpUrl, when it holds one). A cache_controller claim keyed by
+exactly one of those URLs is a cached asset of a
 listed filter: the cache_controller report links it to each such Memory under a relation of its own —
 a dashed "filter listed" chip, a detail section, the ``Filter`` link filter, an edge of its own — and
 never as the Memory's media: not ``entry["memory"]``, not the "linked to a Memory" count, not a lead.
@@ -62,12 +63,28 @@ def test_the_index_keys_every_listed_asset_by_its_whole_url(tmp_path):
     app = str(tmp_path / "app")
     fx.scdb(app, [(fx.SNAP_A, fx.overlay([fx.geofilter("1", image=fx.IMAGE_URL),
                                           fx.geofilter("2", sky=fx.SKY_URL + "?")]), 1)])
-    index = cc.load_memory_index(app)
+    index = cc.load_memory_index(app, overlays=True)
     urls = index["overlay_urls"]
     assert set(urls) == {fx.IMAGE_URL, fx.SKY_URL}        # the empty trailing "?" dropped
     sid, user_hash, asset = urls[fx.IMAGE_URL][0]
     assert (sid, user_hash, asset["field"], asset["has_overlay_image"]) == (
         fx.SNAP_A, fx.HASH, "filters.geoFilters[0].imageUrl", 1)
+    # only a caller that matches filter assets pays for decoding every record (the Library/Caches
+    # report reads the same index for its URL keys alone)
+    plain = cc.load_memory_index(app)
+    assert plain["overlay_urls"] == {} and plain["snap_ids"] == index["snap_ids"]
+
+
+def test_a_claim_keyed_by_a_sky_item_s_blimp_url_is_filter_listed(tmp_path):
+    blimp = "https://geofilter.example.net/blimp/0b0b0b0b-1111-4222-8333-444444444444"
+    app = str(tmp_path / "app")
+    fx.scdb(app, [(fx.SNAP_A, fx.overlay([fx.geofilter("1", sky=fx.SKY_URL, blimp=blimp)]), 0)])
+    urls = cc.load_memory_index(app, overlays=True)["overlay_urls"]
+    links = cc._overlay_links_for([_claim(blimp)], urls)
+    assert [link["snap_id"] for link in links] == [fx.SNAP_A]
+    assert "the sky item (blimpUrl) of one of its geofilters" in links[0]["basis"]
+    assert "filters.geoFilters[0].arSegmentation.sky.blimpUrl" in links[0]["basis"]
+    assert "blimpUrl" in cc.FILTER_LISTED_BASIS          # the header's "?" names the field too
 
 
 def test_an_exact_url_links_and_says_what_the_record_is_and_is_not():
@@ -194,7 +211,7 @@ def _app(tmp_path, snaps=(fx.SNAP_A,), claims=None):
 
 
 def _entries(app, tmp_path):
-    index = cc.load_memory_index(app)
+    index = cc.load_memory_index(app, overlays=True)
     scfull, scparts = cc.index_sccontent(app)
     ms_fmt, _label = cc.make_ms_formatter("utc")
     entries, _virtual, _wal = cc.build_entries(cc.find_cache_controllers(app)[0], app, scfull,
@@ -233,9 +250,51 @@ def test_several_memories_are_one_chip_that_opens_all_of_them(tmp_path):
     narrowed = cc._links_html(entry, "../", compact=True, closure=closure)
     assert report_ui.find_fragment([fx.SNAP_B]) in narrowed and "1 Memory · filter listed" in narrowed
     assert fx.SNAP_A not in narrowed
+    # and its title speaks of one Memory, as its label does
+    assert "1 Memories" not in narrowed and "the Memory whose overlay record lists" in narrowed
+    assert "expanded — not its media" in narrowed and "their media" not in narrowed
+    assert "the 2 Memories whose overlay record lists" in chip
+    # its "?" counts the one left out in the singular
+    full_narrowed = cc._links_html(entry, "../", closure=closure)
+    assert "1 further Memory whose record lists it is not part" in full_narrowed
     # and holding neither, it is marked absent rather than dropped
     gone = cc._links_html(entry, "../", compact=True, closure=_closure(cc=[f"ck-{CK}"]))
     assert report_ui.XOUT_MARK in gone and "href" not in gone
+
+
+def test_a_widely_listed_asset_s_detail_is_bounded_and_its_chip_and_search_are_whole(tmp_path):
+    """One asset (a font, say) can be listed by a large share of a gallery's Memories. The detail
+    shows at most FILTER_DETAIL_ROWS of them, a Memory whose record names the filter as selected
+    first, and says how many more there are; the method is stated once, not on every row. The chip
+    and the search still carry every one of them."""
+    from scripts import report_ui
+    entry = _entries(_app(tmp_path), tmp_path)[CK]
+    one = entry["filter_memories"][0]
+    sids = [f"{n:08x}-0000-4000-8000-000000000001" for n in range(1000)]
+    entry["filter_memories"] = [dict(one, snap_id=sid, page=None, selected=None) for sid in sids]
+    entry["filter_memories"][-1]["selected"] = True            # sorts last, and is still shown
+    cap = cc.FILTER_DETAIL_ROWS
+
+    detail = cc._filter_memories_html(entry, "../")
+    assert detail.count("<tr>") == cap + 1                       # the header row and the shown ones
+    assert len(detail) < cap * 2000
+    assert f"+{1000 - cap} more Memories list this asset" in detail
+    assert sids[-1] in detail and sids[cap - 2] in detail and sids[cap - 1] not in detail
+    assert detail.count("SOJUGallerySnapOverlay") == 1           # the method, once: the section's "?"
+    # in a partial report, a Memory the extract holds is shown before one it does not
+    held = cc._filter_memories_html(entry, "../", closure=_closure(mem=[f"mem-{sids[500]}"],
+                                                                     cc=[f"ck-{CK}"]))
+    assert sids[500] in held and held.count("<tr>") == cap + 1
+    # the chip opens all of them, and the search finds the file by each one's snap id
+    assert report_ui.find_fragment(sids) in cc._links_html(entry, "../", compact=True)
+    out = str(tmp_path / "out" / "CacheController")
+    cc.generate_report([entry], [], out, "UTC", "../", None, None, "db")
+    row = next(r for r in _rows(os.path.join(out, "data", "index.js")) if r[0] == f"ck-{CK}")
+    assert all(sid in row[2] for sid in (sids[0], sids[cap], sids[-1]))
+    # a section under the cap is whole, with no such line
+    entry["filter_memories"] = entry["filter_memories"][:3]
+    small = cc._filter_memories_html(entry, "../")
+    assert small.count("<tr>") == 4 and "more Memor" not in small
 
 
 def _rows(path):

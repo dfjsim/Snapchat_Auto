@@ -3,11 +3,13 @@
 An NSKeyedArchiver binary plist stores an object graph flat: ``$objects`` is a table, every reference
 is a ``UID`` index into it, ``$top`` names the root, and each object names its class through a
 ``$class`` reference to a ``{"$classname", "$classes"}`` entry. Several Snapchat columns are such
-archives. Two readers resolve them here — a Memory's MemData identifiers (``ZGALLERYSNAP.ZMEMDATAIDS``,
-``memories_media_report.decode_memdata``) and its overlay record (``ZGALLERYSNAPDETAIL.ZOVERLAY``,
-``snap_overlay``); the older readers built on ``ccl_bplist.deserialise_NsKeyedArchiver`` (the
-``ZENCRYPTION`` keys, the keychain's persisted key, ``arroyo_content``, ``ParseSnapchat_iOS``) and
-``ufed_keychain`` still follow the ``UID`` references themselves.
+archives. Three readers resolve them here — a Memory's MemData identifiers
+(``ZGALLERYSNAP.ZMEMDATAIDS``, ``memories_media_report.decode_memdata``), its overlay record
+(``ZGALLERYSNAPDETAIL.ZOVERLAY``, ``snap_overlay``) and the creative-tools feed tree (``ctp__feedtree.p``
+slot 2, ``ctp_items.decode_feed_tree``, which reads a None as "tree not read"); the older readers
+built on ``ccl_bplist.deserialise_NsKeyedArchiver`` (the ``ZENCRYPTION`` keys, the keychain's persisted
+key, ``arroyo_content``, ``ParseSnapchat_iOS``) and ``ufed_keychain`` still follow the ``UID``
+references themselves.
 
 :func:`unarchive` follows them once and hands back ordinary Python values:
 

@@ -115,7 +115,12 @@ records (`mtimes`, `fs`), the renamed files, and the duplicate / symlink / hash 
 ## The reports
 
 The Android run (`scripts/ParseSnapchat_Android.py`) builds the Conversations, Contacts, Memories and
-cache_controller reports into the same folders, with the same cross-report links, as the iOS run.
+cache_controller reports into the same folders as the iOS run, with the same cross-report links except
+those whose source the Android app folder was not examined for: the link from a cached filter asset to
+the Memories whose overlay record lists it (`ZGALLERYSNAPDETAIL.ZOVERLAY`) and the creative-tools items
+(`primary.docobjects`) are read on iOS only, and so are the MemData-id link and the *Possible Memory*
+leads, the Android Memories index having neither — see
+[report_cache_controller.md](report_cache_controller.md#android).
 There is no Library/Caches report — Android has no such folder, and the app's own
 `files/file_manager` caches are not yet listed as a whole anywhere (the Memories report finds a
 snap's files in them, the legacy report its chat snaps) — and no partial reports yet (`--selection`
@@ -229,7 +234,11 @@ columns (`memories_snap._id`, `memories_snap.media_id`) in its explanation.
 
 The iOS report unchanged apart from where it looks (`cache_controller_paths`, `index_sccontent`,
 `find_app_container` all recognise an Android app folder) and the words a few explanations use
-(`PLATFORM_WORDS`). Device paths are shown as `/data/data/com.snapchat.android/…`.
+(`PLATFORM_WORDS`). Device paths are shown as `/data/data/com.snapchat.android/…`. The overlay-record
+filter link and the *Creative tools asset* items are iOS-only (their Android counterparts were not
+examined), so an Android report has none of their chips, category, sections or header lines. The tie of
+a claim naming an absent message to its conversation works on both, because `arroyo.db` and its
+`required_values` `USERID` are the same. See [report_cache_controller.md](report_cache_controller.md#android).
 
 ### Communications (legacy)
 

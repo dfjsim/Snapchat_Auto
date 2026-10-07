@@ -25,6 +25,7 @@ Typical use::
 :data:`BOTH`, :data:`WAL_ONLY` or :data:`MAIN_ONLY`.
 """
 
+import gc
 import os
 import shutil
 import sqlite3
@@ -161,6 +162,13 @@ class Views:
         self.merged = self.main_only = None
         if self._tmpdir and os.path.isdir(self._tmpdir):
             shutil.rmtree(self._tmpdir, ignore_errors=True)
+            if os.path.isdir(self._tmpdir):
+                # a connection some caller left open still holds a staged file: collect it, retry
+                gc.collect()
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            if os.path.isdir(self._tmpdir):
+                logger.warning(f"A staged copy of {self.info.get('path')} could not be removed: "
+                               f"{self._tmpdir}")
             self._tmpdir = None
 
     def __enter__(self):
@@ -195,12 +203,18 @@ def _stage(src, dest_dir, sidecars):
 
 def _open_ro(path):
     """Open a staged copy read-only, or None if it is not a usable database."""
+    conn = None
     try:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         conn.execute("SELECT count(*) FROM sqlite_master").fetchone()   # force a real read
         return conn
     except sqlite3.DatabaseError as error:
         logger.debug(f"Could not open {path} read-only: {error}")
+        if conn is not None:
+            # A connection is in a reference cycle with its statement cache: left unclosed it holds
+            # the staged copy open until the garbage collector runs, and on Windows Views.close()
+            # then cannot remove it — a copy of the evidence left behind in the temp folder.
+            conn.close()
         return None
 
 

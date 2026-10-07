@@ -72,17 +72,21 @@ def archive(root, archiver="NSKeyedArchiver"):
 
 
 def geofilter(ident, image=None, params=None, sky=None, fonts=(), kind="STATIC",
-              group="GEO_GROUP"):
-    """One ``SOJUGalleryGeoFilter``."""
+              group="GEO_GROUP", blimp=None):
+    """One ``SOJUGalleryGeoFilter``. ``blimp`` sets its sky item's ``blimpUrl`` (where it has been
+    seen it is present and empty)."""
     fields = {"idValue": ident, "type": kind, "imageUrlParams": dict(params or {}),
               "unlockableContentType": "UNRECOGNIZED_VALUE",
               "carouselGroup": Obj("SOJUUnlockablesCarouselGroup", groupName=group,
                                    carouselScore=1.0)}
     if image is not None:
         fields["imageUrl"] = image
-    if sky is not None:
-        fields["arSegmentation"] = Obj("SOJUUnlockablesArSegmentationFilter", sky=Obj(
-            "SOJUContextFilterSkyItem", replacementSkyUrl=sky, skyType="SKY", styleType="STYLE"))
+    if sky is not None or blimp is not None:
+        item = {"skyType": "SKY", "styleType": "STYLE"}
+        item.update({"replacementSkyUrl": sky} if sky is not None else {})
+        item.update({"blimpUrl": blimp} if blimp is not None else {})
+        fields["arSegmentation"] = Obj("SOJUUnlockablesArSegmentationFilter",
+                                       sky=Obj("SOJUContextFilterSkyItem", **item))
     if fonts:
         fields["geofilterMarkups"] = [
             Obj("SOJUGeofilterMarkup", displayParameters=Obj("SOJUGeofilterDisplayParameters",

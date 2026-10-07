@@ -1,5 +1,5 @@
-"""The strict NSKeyedArchiver resolver (scripts/data/keyed_archive.py) behind the MemData and overlay
-readers.
+"""The strict NSKeyedArchiver resolver (scripts/data/keyed_archive.py) behind the MemData, overlay and
+creative-tools feed-tree readers.
 
 It must hand back plain values decided by the archive's own class names, and give None — never a
 partial tree — for anything that is not such an archive or does not hold together. Every input is

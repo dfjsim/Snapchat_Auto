@@ -6,8 +6,9 @@ item's own id, slot 4 its feed); the feed is named only from the store's feed tr
 matched when its whole key, or the key after a word and ``:`` or ``~``, is a text the item holds — or,
 failing that, the same bytes as the item's own id in another base64 alphabet. Never on a query value,
 a path segment or a part of a text, and never to one of several items holding the same text. The
-cache_controller report shows the items on the entry and, when no chat or Memory link says what the
-file is, files it under its own category; it is never a link and never a lead.
+cache_controller report shows the items on the entry and, when no chat message, conversation tie or
+Memory link says what the file is, files it under its own category; it is never a link and never a
+lead.
 
 Every input is synthetic (``ctp_fixture``, ``overlay_fixture``).
 """
@@ -495,6 +496,26 @@ def test_reading_leaves_no_copy_of_the_store_anywhere(tmp_path, monkeypatch):
     assert glob.glob(os.path.join(out, "**", "primary.docobjects*"), recursive=True) == []
 
 
+def test_a_store_that_will_not_open_leaves_no_copy_of_it_either(tmp_path):
+    """The account's primary.docobjects holds its contacts too: a copy staged to find out it will not
+    open must not stay behind — whenever the garbage collector happens to run."""
+    import gc
+    folder = os.path.join(str(tmp_path / "app"), "Documents", "user_scoped", fx.HASH, "DocObjects")
+    os.makedirs(folder)
+    with open(os.path.join(folder, "primary.docobjects"), "wb") as fh:
+        fh.write(b"\x5a" * 8192)
+    staged = os.path.join(tempfile.gettempdir(), "scauto_sqlite_*")
+    before = set(glob.glob(staged))
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert ctp_items.read(str(tmp_path / "app"))["stores"] == []
+    finally:
+        if enabled:
+            gc.enable()
+    assert set(glob.glob(staged)) <= before
+
+
 def test_base64_ids_are_read_by_one_rule_shared_with_trace_ids():
     assert trace_ids.base64_bytes is base64_text.base64_bytes
     assert base64_text.base64_bytes(fx.STICKER_URLSAFE) == fx.STICKER
@@ -529,7 +550,8 @@ def _entries(app, tmp_path, mem_index=None, chat_links=None):
     scfull, scparts = cc.index_sccontent(app)
     ms_fmt, _label = cc.make_ms_formatter("utc")
     entries, _virtual, _wal = cc.build_entries(
-        cc.find_cache_controllers(app)[0], app, scfull, scparts, mem_index or cc.load_memory_index(app),
+        cc.find_cache_controllers(app)[0], app, scfull, scparts,
+        mem_index or cc.load_memory_index(app, overlays=True),
         chat_links or {}, ms_fmt, {}, {}, workdir=str(tmp_path / "work"),
         ctp_index=ctp_items.read(app))
     return {e["cache_key"]: e for e in entries}
@@ -565,6 +587,51 @@ def test_a_filter_listing_does_not_keep_the_category(tmp_path):
     entry = _entries(app, tmp_path)[CK_CDN]
     assert entry["filter_memories"] and entry["memory"] is None
     assert entry["category"] == cc.CTP_CATEGORY and entry["ctp_items"]
+
+
+def test_a_conversation_tie_keeps_the_key_s_category_and_its_chat_key_gets_no_note(tmp_path):
+    """A custom sticker sent in a message arroyo.db does not hold: the file is claimed under the
+    message's key (context 3) and as the sticker (context 2). No chat message links to it, but the
+    key names whose conversation's file it is — the tie says what the file is, so the category stays
+    the key's, and the note that "Chat media" is only a reading of the context is not put beside a
+    key that names a conversation and a message itself. The item is still shown."""
+    from scripts import conversations_report
+
+    def run(root, store, held):
+        app = _report_app(root, store=False,
+                          claims=[(CK_X, 3, f"animationmedia~1:{CONV}:404:2:0"),
+                                  (CK_X, 2, "customSticker~" + fx.STICKER_ID)])
+        if store:
+            fx.store(app, [_sticker_item()])
+        reports = root / "Reports"
+        os.makedirs(reports / "Conversations")
+        conversation = {"id": CONV, "title": "Chat", "page": "pages/c.html", "in_arroyo": True,
+                        "n_messages": 2, "messages": [{"smid": s, "anchor": f"msg-{s}", "atts": []}
+                                                      for s in ("7.0", "9.0")]}
+        conversations_report.write_cache_links(
+            [conversation], str(reports / "Conversations"),
+            arroyo={"read": True, "conversations_read": True, "account": ofx.USER,
+                    "held": {CONV.lower(): set(held)}})
+        stage = cc.index(app, outdir=str(reports / "CacheController"), tz="utc")
+        return next(e for e in stage.model if e["cache_key"] == CK_X)
+
+    entry = run(tmp_path / "tied", store=True, held={"7", "9"})
+    assert entry["category"] == "Chat media" and entry["chats"] == []
+    assert [t["held"] for t in entry["conv_links"]] == [False] and entry["ctp_items"]
+    assert not entry["leads"]
+    detail = html.unescape(cc._detail_html(entry, "../", None, None))
+    assert cc.MCT_CTP_NOTE not in detail
+    assert "chip chat gone" in detail and fx.STICKER_ID in detail          # the tie and the item
+    # control: arroyo.db holds message 404, so there is no tie — and no chat link either (no report
+    # lists the message), so the item says what the file is; the note still keeps off the chat key
+    untied = run(tmp_path / "untied", store=True, held={"7", "9", "404"})
+    assert untied["conv_links"] == [] and untied["chats"] == []
+    assert untied["category"] == cc.CTP_CATEGORY
+    plain = html.unescape(cc._detail_html(untied, "../", None, None))
+    assert plain.count(cc.MCT_CTP_NOTE) == 1                              # beside customSticker~ only
+    claims = plain[plain.index("CACHE_FILE_CLAIM"):]
+    chat_row = claims[claims.index("animationmedia~1:"):]
+    assert cc.MCT_CTP_NOTE not in chat_row[:chat_row.index("</tr>")]
 
 
 def test_a_file_an_item_names_is_never_a_possible_memory(tmp_path):

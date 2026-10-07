@@ -335,16 +335,17 @@ that names the selected one: `geoFilters` with `geoFilterSelectedId` / `geoFilte
 `visualFilters` with `visualFilterSelectedType`, `infoFilters` with `infoFilterSelectedType`,
 `contextFilters` with `contextFilterSelectedId`, `venueFilter` with `venueFilterSelected`, `streakFilter`
 with `streakFilterSelected`. A geofilter (`SOJUGalleryGeoFilter`) carries an `idValue`, a `type`, an
-`unlockableContentType`, a `carouselGroup` (`groupName`), an `imageUrlParams` dictionary, and three
-fields that hold a URL:
+`unlockableContentType`, a `carouselGroup` (`groupName`), an `imageUrlParams` dictionary, and four
+fields read for a URL (`snap_overlay.ASSET_FIELDS`):
 
 | Field, in `filters.geoFilters[i]` | Asset |
 |---|---|
 | `imageUrl` | the filter image |
 | `arSegmentation.sky.replacementSkyUrl` | the sky image |
+| `arSegmentation.sky.blimpUrl` | the sky item's blimpUrl — read the same way when it holds a URL; where it has been seen it is present and empty, which gives no asset |
 | `geofilterMarkups[j].displayParameters.font` | the font of the filter's text |
 
-`arSegmentation.sky.blimpUrl` is read the same way when it holds a URL. A geofilter whose
+A geofilter whose
 `imageUrlParams` has entries (the Bitmoji filters) gives one shared address as its `imageUrl`, the
 image being in the parameters, so that URL is never an asset.
 
