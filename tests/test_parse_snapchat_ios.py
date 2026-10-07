@@ -206,3 +206,100 @@ def test_message_content_is_always_a_string(tmp_path, monkeypatch):
         if not row["Message Content"].startswith("<a href"):
             df = df.drop(index)
     assert df.empty
+
+
+def _media_references(*media_ids):
+    """local_message_references as the app writes it: per media item, an 8-byte little-endian length
+    and a keyed archive naming it."""
+    import plistlib
+    out = b""
+    for media_id in media_ids:
+        archive = plistlib.dumps({
+            "$archiver": "NSKeyedArchiver", "$version": 100000, "$top": {"root": plistlib.UID(1)},
+            "$objects": ["$null", {"MEDIA_ID": plistlib.UID(2), "$class": plistlib.UID(3)},
+                         media_id, {"$classname": "SCRef", "$classes": ["SCRef", "NSObject"]}]},
+            fmt=plistlib.FMT_BINARY)
+        out += len(archive).to_bytes(8, "little") + archive
+    return out
+
+
+def test_every_photo_of_a_message_sent_with_several_is_attached(tmp_path, monkeypatch):
+    """A message sent with several photos or videos has one local_message_references record per
+    item. Only the first was read, so the others' cached files were never attached."""
+    import sqlite3
+    from scripts.data import arroyo_content
+    monkeypatch.setattr(parse_snapchat_ios, "uuid", "owner-id", raising=False)
+    conv = "11111111-2222-4333-8444-555555555555"
+    media = ["AAAAAAAA-0000-4000-8000-00000000000%d" % n for n in (1, 2, 3)]
+    refs = _media_references(*media)
+    assert arroyo_content.media_references(refs) == media
+    assert arroyo_content.media_reference(refs) == media[0]
+    db = str(tmp_path / "arroyo.db")
+    conn = sqlite3.connect(db)
+    conn.execute("create table conversation_message (client_conversation_id text, "
+                 "server_message_id integer, local_message_references blob, content_type integer, "
+                 "message_content blob)")
+    conn.execute("insert into conversation_message values (?, 12, ?, 2, ?)", (conv, refs, b"\x00"))
+    conn.commit()
+    conn.close()
+    keys = ["%032x" % n for n in (1, 2, 3)]
+    cache_df = pd.DataFrame({"CACHE_KEY": keys, "EXTERNAL_KEY": media, "MEDIA_CONTEXT_TYPE": [3] * 3,
+                             "USER_ID": ["owner-id"] * 3})
+    arroyo_df = parse_snapchat_ios.getCacheArroyo(db, cache_df)
+    assert sorted(arroyo_df["message_content"]) == keys
+    chats_df = _chats_frame([(conv, 5, 12, "media", 2)])
+    result = parse_snapchat_ios.mergeCacheChats(cache_df, chats_df, None, arroyo_df)
+    assert sorted(result["Message Content"]) == keys
+    assert set(result["Server Message ID"]) == {12}
+
+
+def test_further_photos_survive_a_claim_keyed_by_the_message(tmp_path, monkeypatch):
+    """A claim naming the message by conversation and number replaces the file of every row it
+    joins: the further photos join after it, so theirs stay."""
+    import sqlite3
+    monkeypatch.setattr(parse_snapchat_ios, "uuid", "owner-id", raising=False)
+    conv = "11111111-2222-4333-8444-555555555555"
+    media = ["AAAAAAAA-0000-4000-8000-00000000000%d" % n for n in (1, 2, 3)]
+    db = str(tmp_path / "arroyo.db")
+    conn = sqlite3.connect(db)
+    conn.execute("create table conversation_message (client_conversation_id text, "
+                 "server_message_id integer, local_message_references blob, content_type integer, "
+                 "message_content blob)")
+    conn.execute("insert into conversation_message values (?, 12, ?, 2, ?)",
+                 (conv, _media_references(*media), b"\x00"))
+    conn.commit()
+    conn.close()
+    keys = ["%032x" % n for n in (1, 2, 3)]
+    cache_df = pd.DataFrame({
+        "CACHE_KEY": keys + ["%032x" % 9],
+        "EXTERNAL_KEY": media + [f"1:{conv}:12:0:0"],
+        "MEDIA_CONTEXT_TYPE": [3] * 4, "USER_ID": ["owner-id"] * 4})
+    arroyo_df = parse_snapchat_ios.getCacheArroyo(db, cache_df)
+    result = parse_snapchat_ios.mergeCacheChats(cache_df, _chats_frame([(conv, 5, 12, "m", 2)]), None,
+                                                arroyo_df)
+    contents = set(result["Message Content"])
+    assert {keys[1], keys[2]} <= contents
+
+
+def test_further_files_of_a_shared_item_keep_its_label(tmp_path, monkeypatch):
+    import sqlite3
+    monkeypatch.setattr(parse_snapchat_ios, "uuid", "owner-id", raising=False)
+    conv = "11111111-2222-4333-8444-555555555555"
+    media = ["AAAAAAAA-0000-4000-8000-00000000000%d" % n for n in (1, 2)]
+    db = str(tmp_path / "arroyo.db")
+    conn = sqlite3.connect(db)
+    conn.execute("create table conversation_message (client_conversation_id text, "
+                 "server_message_id integer, local_message_references blob, content_type integer, "
+                 "message_content blob)")
+    conn.execute("insert into conversation_message values (?, 12, ?, 3, ?)",
+                 (conv, _media_references(*media), b"\x00"))
+    conn.commit()
+    conn.close()
+    keys = ["%032x" % n for n in (1, 2)]
+    cache_df = pd.DataFrame({"CACHE_KEY": keys, "EXTERNAL_KEY": media, "MEDIA_CONTEXT_TYPE": [3, 3],
+                             "USER_ID": ["owner-id"] * 2})
+    arroyo_df = parse_snapchat_ios.getCacheArroyo(db, cache_df)
+    result = parse_snapchat_ios.mergeCacheChats(cache_df, _chats_frame([(conv, 5, 12, "m", 3)]), None,
+                                                arroyo_df)
+    assert sorted(result["Message Content"]) == keys
+    assert set(result["Content Type"]) == {"Shared content"}

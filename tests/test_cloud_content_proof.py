@@ -123,3 +123,23 @@ def test_a_library_caches_file_identical_to_device_media():
         ("memory", "device", "device")]
     assert "cd" * 32 in links[0]["basis"]                 # the digest it matched on, not a blank
     assert "≡" in cmr._links_cell(dict(entry, links=links, copies=[{}]), "../")
+
+
+def test_a_memorys_snap_id_in_a_key_of_another_shape_links_to_it(tmp_path):
+    """A context-19 claim keyed ``<snapId>~1`` is no Memory-scoped shape, but the UUID it carries is
+    the Memory's own ZSNAPID: an exact identifier, so it links. A key whose UUID is no snap id
+    (the editor's ``<UUID>~1``) still does not."""
+    path = _db(tmp_path)
+    conn = sqlite3.connect(path)
+    conn.execute("insert into CACHE_FILE_CLAIM (USER_ID, CACHE_KEY, MEDIA_CONTEXT_TYPE, EXTERNAL_KEY, "
+                 "CREATION_TIMESTAMP_MILLIS) values (?, ?, 19, ?, 0)", (USER, "d" * 32, f"{SNAP}~1"))
+    conn.commit()
+    conn.close()
+    mem_index = {"snap_ids": {SNAP.upper(): (SNAP, "h")}, "url_keys": {}, "media_ids": {},
+                 "snap_urls": {}}
+    entries, _virt, _wal = cc.build_entries(path, str(tmp_path), {}, {}, mem_index, {},
+                                            lambda ms: str(ms), workdir=str(tmp_path / "w"))
+    by_key = {e["cache_key"]: e for e in entries}
+    assert by_key["d" * 32]["memory"]["snap_id"] == SNAP
+    assert "not one of the Memory-scoped shapes" in by_key["d" * 32]["memory_basis"]
+    assert by_key[KEY_EDITOR]["memory"] is None

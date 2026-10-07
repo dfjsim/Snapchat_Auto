@@ -501,8 +501,18 @@ def _merge_rows(rows):
             continue
         folded += 1
         for att in row["atts"]:
-            if att and all(att["name"] != have["name"] for have in first["atts"]):
+            if not att or any(att["name"] == have["name"] for have in _all_files(first["atts"])):
+                continue
+            same = next((i for i, have in enumerate(first["atts"])
+                         if att.get("sha256") and have.get("sha256") == att["sha256"]), None)
+            if same is None:
                 first["atts"].append(att)
+            else:
+                # The same bytes under another name — the copy saved in the chat and the cached
+                # file, say. Shown once, with the other copy listed (and linked) beside it. A copy
+                # of the dict: the published-file cache hands the same one to every message.
+                have = first["atts"][same]
+                first["atts"][same] = dict(have, same_as=list(have.get("same_as") or ()) + [att])
         for ctype in row["types"]:
             if ctype not in first["types"]:
                 first["types"].append(ctype)
@@ -557,6 +567,54 @@ def _arroyo_blank():
     return {"type": None, "user_ids": [], "server_id": "", "created_ms": None,
             "feed_first_ms": None, "feed_last_ms": None, "feed_title": "", "feed_type": None,
             "in_arroyo": False}
+
+
+def load_content_ids(arroyo):
+    """``{(conversation id, message key): [(id, rule)]}`` for every message of ``arroyo.db`` — the key
+    is ``arroyo_content.message_key``: the message number, or ``c<client message id>`` for a message
+    the server never numbered.
+
+    The ids a message names its media by (``arroyo_content.content_ids``): the media id of its
+    ``local_message_references``, a shared item's id, a sticker's id. The cache_controller report
+    links every claim whose key carries one of them to the message, not only the one file the chat
+    join attached. Both readings, so a message the write-ahead log has since dropped keeps its ids.
+    """
+    out = {}
+    if not (arroyo and os.path.isfile(arroyo)):
+        return out
+    try:
+        columns = set(sqlite_open.table_columns(arroyo, "conversation_message"))
+    except Exception:                                              # noqa: BLE001 - no such table
+        return out
+    wanted = ("client_conversation_id", "server_message_id", "content_type", "message_content")
+    if not set(wanted) <= columns:
+        return out
+    optional = tuple(c for c in ("local_message_references", "client_message_id") if c in columns)
+    select = ", ".join(wanted + optional)
+    try:
+        frame, _info = sqlite_open.read_sql(arroyo, f"SELECT {select} FROM conversation_message")
+    except Exception as error:                                     # noqa: BLE001
+        logger.debug(f"Conversations: content ids not read from arroyo.db ({error})")
+        return out
+    if frame is None or not set(wanted) <= set(frame.columns):     # read_sql's own failure path
+        logger.debug("Conversations: content ids not read from arroyo.db (the query returned "
+                     "nothing usable)")
+        return out
+
+    def column(name):
+        return frame[name] if name in frame.columns else [None] * len(frame)
+    for conv, smid, cmid, ctype, content, ref in zip(
+            frame["client_conversation_id"], frame["server_message_id"],
+            column("client_message_id"), frame["content_type"], frame["message_content"],
+            column("local_message_references")):
+        key = arroyo_content.message_key(smid, cmid)
+        if not (isinstance(conv, str) and key):
+            continue
+        ids = arroyo_content.content_ids(ctype, content, ref)
+        if ids:
+            bucket = out.setdefault((conv.lower(), key), [])
+            bucket.extend(i for i in ids if i not in bucket)
+    return out
 
 
 def load_arroyo_conversations(arroyo, msg_df=None):
@@ -1126,6 +1184,21 @@ _CREATED_HINT = ("arroyo.db conversation_message.creation_timestamp (Unix millis
                  "cache claim and carries no message timestamp.")
 
 
+def _all_files(atts):
+    """Every file of a message's attachments: each one, and the copies folded into it because they
+    hold the same bytes (``same_as``) — each is still published, searchable and a cache link."""
+    for att in atts or ():
+        if att:
+            yield att
+            yield from att.get("same_as") or ()
+
+
+SAME_BYTES_BASIS = (
+    "The message's files include this one more than once, under different names — identical SHA-256 "
+    "— e.g. the copy saved in the chat (Library/Caches/SCPersistentMedia) and the cached file. The "
+    "bytes are shown once; each name is listed, and each copy is published next to this report.")
+
+
 def _attachment_detail(att, prefix, index=None, total=1, closure=None):
     """One attachment's block inside an expanded message: the file, its hashes and its cache link."""
     parts = []
@@ -1162,7 +1235,14 @@ def _attachment_detail(att, prefix, index=None, total=1, closure=None):
         ("MD5", _esc(att["md5"]), "hex"),
         ("SHA-256", _esc(att["sha256"]), "hex"),
         ("published as", _esc(att["rel"] or "") + report_ui.info_icon(att["how"]), "mono"),
-    ]))
+    ] + [("same bytes as", (f'<a href="{_esc(prefix + other["rel"])}" target="_blank">'
+                            f'{_esc(other["name"])}</a>' if other.get("rel")
+                            else _esc(other["name"]))
+          + report_ui.info_icon(SAME_BYTES_BASIS
+                                + (f" Its cache_controller entry: {other['cache_key']}. "
+                                   + (other.get("cache_key_how") or "")
+                                   if other.get("cache_key") else "")), "mono")
+         for other in att.get("same_as") or ()]))
     if att["cache_key"]:
         parts.append(
             '<div class="chips">'
@@ -1365,7 +1445,7 @@ def _message_rows(conv, chunk_of):
         searchable = [msg["sender"], types, msg["smid"], msg["cmid"], msg["created_utc"],
                       msg["read_utc"], msg["created"], text, msg["raw_text"], body,
                       msg.get("body") or "", msg.get("sender_uid") or ""]   # names AND ids
-        for att in atts:
+        for att in _all_files(atts):
             searchable += [att["name"], att["ext"], att["md5"], att["sha256"],
                            att["cache_key"] or ""]
             # the Snapchat app's tag and an edit's source file names only, not every embedded
@@ -1901,32 +1981,59 @@ def write_cache_links(conversations, outdir):
     with per-conversation pages the target is no longer one document:
 
     * ``by_key``     : CACHE_KEY -> [{conversation_id, server_message_id, anchor, href, title}]
-    * ``by_message`` : "<conversation id>|<server message id>" -> the same records
+    * ``by_message`` : "<conversation id>|<server message id>" -> the same records, for the
+      messages that have an attachment
+
+    and two more, which link a cache entry to a message this report attached no file to:
+
+    * ``messages``      : conversation id -> {title, href (the page), anchors: {server message id:
+      anchor}} — every message, compactly: a claim's key can name a message whose file the chat
+      join did not attach (a kind it does not display, a file it did not choose);
+    * ``by_content_id`` : id -> [{conversation_id, server_message_id, rule}] — the ids each message
+      names its media by (``arroyo_content.content_ids``), for every claim whose key carries one.
 
     ``by_message`` is what lets a cache entry link back even when it is not the exact file this
     report displayed — a chat video is typically a full-media claim, a thumbnail claim and a raw
     content claim, and only one of them is shown.
     """
-    manifest = {"version": 3, "report": "Conversations", "by_key": {}, "by_message": {}}
+    manifest = {"version": 3, "report": "Conversations", "by_key": {}, "by_message": {},
+                "messages": {}, "by_content_id": {}}
     for conv in conversations:
         # the title travels as plain text: it is a value for another report to escape, not markup
         # (the parser encodes emoji as &#NNNN; character references)
         title = html.unescape(conv["title"])
+        anchors, numbered = {}, set()
         for msg in conv["messages"]:
-            # Only messages that actually have a recovered attachment are listed — as in the legacy
-            # manifest. A message with no cached file can never be what a cache entry points at, and
-            # indexing every message would make this file grow with the whole chat history.
+            # a message the server never numbered is listed by its client id, as it is anchored
+            ident = msg["smid"] or (f'c{msg["cmid"]}' if msg.get("cmid") else "")
+            if ident:
+                anchors.setdefault(ident, msg["anchor"])
+            # the rows of one message (one per part) carry the same ids: one record per message
+            key = arroyo_content.message_key(msg["smid"], msg.get("cmid"))
+            if msg.get("content_ids") and ident and key not in numbered:
+                numbered.add(key)
+                for cid, rule in msg["content_ids"]:
+                    manifest["by_content_id"].setdefault(cid, []).append(
+                        {"conversation_id": conv["id"], "server_message_id": ident,
+                         "rule": rule})
             if not msg["atts"]:
                 continue
             record = {"conversation_id": conv["id"], "server_message_id": msg["smid"],
                       "anchor": msg["anchor"], "title": title,
                       "href": f'Conversations/{conv["page"]}#{msg["anchor"]}'}
             manifest["by_message"].setdefault(f'{conv["id"]}|{msg["smid"]}', []).append(record)
-            # one message can hold several cached files; each is a way into the same message
-            for att in msg["atts"]:
+            # one message can hold several cached files; each is a way into the same message —
+            # once per key, though two of its files (the same bytes) can name the same entry
+            keys = []
+            for att in _all_files(msg["atts"]):
                 key = att.get("cache_key")
-                if key:
+                if key and key not in keys:
+                    keys.append(key)
                     manifest["by_key"].setdefault(key, []).append(record)
+        if anchors:
+            manifest["messages"][conv["id"]] = {"title": title,
+                                                "href": f'Conversations/{conv["page"]}',
+                                                "anchors": anchors}
     try:
         with open(os.path.join(outdir, "cache_links.json"), "w", encoding="utf-8") as fh:
             json.dump(manifest, fh)
@@ -2020,6 +2127,13 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
     conversations = build_conversations(by_conv, contacts, groups,
                                         load_arroyo_conversations(arroyo, msg_df), contact_links,
                                         timefmt)
+    content_ids = load_content_ids(arroyo)
+    for conv in conversations:
+        for msg in conv.get("messages") or ():
+            ids = content_ids.get((conv["id"].lower(),
+                                   arroyo_content.message_key(msg.get("smid"), msg.get("cmid"))))
+            if ids:
+                msg["content_ids"] = ids
 
     # The closure's view: two kinds, because a conversation and the messages inside it are separately
     # selectable. A message's *store* id is qualified with its conversation — a message number
@@ -2070,8 +2184,8 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             sender_ct = (contact_links.get(str(msg.get("sender_uid") or "").lower()) or {}).get("anchor")
             if sender_ct:
                 sel_msg.link(partial_report.EDGE_MESSAGE_SENDER, msg_row, "ct", sender_ct)
-            for att in msg.get("atts") or ():
-                if att and att.get("cache_key"):
+            for att in _all_files(msg.get("atts")):
+                if att.get("cache_key"):
                     sel_msg.link(partial_report.EDGE_MESSAGE_CACHE, msg_row, "cc",
                                  f'ck-{att["cache_key"]}')
 
@@ -2098,7 +2212,7 @@ def _prune_media(outdir, conversations):
         return 0
     keep = {os.path.basename(att["rel"])
             for conv in conversations for msg in conv.get("messages") or ()
-            for att in msg.get("atts") or () if att and att.get("rel")}
+            for att in _all_files(msg.get("atts")) if att.get("rel")}
     removed = 0
     for name in os.listdir(media_dir):
         if name in keep:

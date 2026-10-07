@@ -44,6 +44,7 @@ from scripts import partial_report
 from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
+from scripts.data import arroyo_content
 from scripts.data import snap_session
 from scripts import memory_leads
 from scripts import progress
@@ -417,12 +418,95 @@ def load_chat_links(report_dir):
             by_key, by_message = data.get("by_key") or {}, data.get("by_message") or {}
         else:
             by_key, by_message = data, {}                      # legacy (v1) manifest
+        # The Conversations manifest also lists every message, attachment or not: a claim's key can
+        # name a message whose file the chat join did not attach (see write_cache_links).
+        for conv, info in (data.get("messages") or {}).items():
+            for smid, anchor in (info.get("anchors") or {}).items():
+                by_message.setdefault(f"{conv}|{smid}", [{
+                    "conversation_id": conv, "server_message_id": smid, "anchor": anchor,
+                    "title": info.get("title") or "", "href": f'{info.get("href")}#{anchor}'}])
         if document:                                           # single-document report: one base
             for records in list(by_key.values()) + list(by_message.values()):
                 for rec in records:
                     rec.setdefault("base", f"{report}/{document}")
         return by_key, by_message
     return {}, {}
+
+
+class ChatIdIndex:
+    """What the chat manifest says about messages beyond the files it attached to them.
+
+    * ``by_number``: every message by its conversation and bare message number, so a claim key that
+      names message 12 finds it whether the report lists it as ``12.0`` or under another part;
+    * the ids each message names its media by (``by_content_id``, see
+      ``arroyo_content.content_ids``), indexed by the token a claim key would carry them as.
+    """
+
+    def __init__(self, by_message, by_content_id=None):
+        self.by_number = {}
+        for key, records in by_message.items():
+            conv, _bar, smid = key.partition("|")
+            number = arroyo_content.message_number(smid)
+            if number:
+                self.by_number.setdefault(f"{conv.lower()}|{number}", []).extend(records)
+        self.by_token = {}
+        for cid, refs in (by_content_id or {}).items():
+            records = []
+            for ref in refs:
+                found = by_message.get(f'{ref.get("conversation_id")}|{ref.get("server_message_id")}')
+                if found:
+                    records.append((ref.get("rule") or "", found[0]))
+            token = _content_token(cid)
+            if records and token:
+                self.by_token.setdefault(token, []).append((cid, records))
+
+    def message(self, conv, number):
+        """Every record of message ``number`` in conversation ``conv``, lowest part first."""
+        records = self.by_number.get(f"{str(conv).lower()}|{arroyo_content.message_number(number)}")
+        return sorted(records or (), key=lambda r: str(r.get("server_message_id")))
+
+    def content_links(self, external_key):
+        """``[(id, rule, record)]`` for each message id a claim key contains."""
+        ek = str(external_key or "")
+        tokens = {m.group(0).lower() for m in _CONTENT_UUID.finditer(ek)}
+        tokens |= {r.lower() for pattern in (_CONTENT_RUN, _CONTENT_B64) for r in pattern.findall(ek)}
+        out = []
+        for token in tokens:
+            for cid, records in self.by_token.get(token, ()):
+                # a UUID-based id in any letter case; anything else (base64 above all) exactly
+                inside = (cid.lower() in ek.lower()) if _CONTENT_UUID.search(cid) else (cid in ek)
+                if inside:
+                    out.extend((cid, rule, record) for rule, record in records)
+        return out
+
+
+_CONTENT_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{12}")
+_CONTENT_RUN = re.compile(r"[A-Za-z0-9+/=_-]{8,}")
+_CONTENT_B64 = re.compile(r"[A-Za-z0-9+/=]{8,}")
+
+
+def _content_token(cid):
+    """What a claim key holds a content id as: its UUID when it has one, else its longest run."""
+    mo = _CONTENT_UUID.search(cid)
+    if mo:
+        return mo.group(0).lower()
+    runs = _CONTENT_RUN.findall(cid)
+    return max(runs, key=len).lower() if runs else ""
+
+
+def load_chat_ids(report_dir, by_message):
+    """A :class:`ChatIdIndex` over the chat manifest ``load_chat_links`` read (Conversations only:
+    the legacy manifests carry no content ids)."""
+    content = {}
+    cand = os.path.join(report_dir or "", "Conversations", "cache_links.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                content = (json.load(fh) or {}).get("by_content_id") or {}
+        except Exception as error:                                 # noqa: BLE001
+            logger.debug(f"Could not read the content ids of {cand}: {error}")
+    return ChatIdIndex(by_message, content)
 
 
 def load_memory_media(report_dir):
@@ -931,13 +1015,21 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 _CHAT_EK_RE = re.compile(r"^(?P<type>[^:]*):(?P<conv>[0-9a-fA-F-]{36}):(?P<msg>\d+):(?P<part>\d+)")
 
 
-def _chat_links_for(clist, cache_key, by_key, by_message):
-    """Chat messages this cache entry belongs to, with an explanation of how each was matched."""
+def _chat_links_for(clist, cache_key, by_key, by_message, ids=None):
+    """Chat messages this cache entry belongs to, with an explanation of how each was matched.
+
+    In order: the file the chat report attached (``route`` "file"); the message a claim key names by
+    conversation and number ("key"); the message whose own id for its media a claim key carries
+    ("content" — ``ids``, a :class:`ChatIdIndex`).
+    """
     out, seen = [], set()                                      # one chip per (conversation, message)
     for rec in by_key.get(cache_key, []):
         anchor = rec.get("anchor") or f"cf-{cache_key}"
-        seen.add((rec.get("conversation_id"), rec.get("server_message_id")))
-        out.append(dict(rec, anchor=anchor, basis=(
+        ident = (rec.get("conversation_id"), rec.get("server_message_id"))
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(dict(rec, anchor=anchor, route="file", basis=(
             f"This CACHE_KEY is the attachment file the chat report recorded for "
             f"message {rec.get('server_message_id') or '(unknown)'} in conversation "
             f"{rec.get('conversation_id') or '(unknown)'} (via its local_message_references / "
@@ -947,23 +1039,47 @@ def _chat_links_for(clist, cache_key, by_key, by_message):
         if not mo:
             continue
         smid = f"{mo.group('msg')}.{mo.group('part')}"
-        for rec in by_message.get(f"{mo.group('conv')}|{smid}", []):
+        records = by_message.get(f"{mo.group('conv')}|{smid}", [])
+        exact = bool(records)
+        if not records and ids is not None:
+            # the report lists the message under another part (a message is "12.0" there unless a
+            # claim of that part was joined onto it), or a file it did not attach: still message 12
+            records = ids.message(mo.group("conv"), mo.group("msg"))[:1]
+        for rec in records:
             anchor = rec.get("anchor")
             ident = (rec.get("conversation_id"), rec.get("server_message_id"))
             if not anchor or ident in seen:
                 continue
             seen.add(ident)
-            out.append(dict(rec, anchor=anchor, basis=(
+            listed = (f"message {smid}, which the chat report reported for that message" if exact
+                      else f"message number {mo.group('msg')} (part {mo.group('part')}), which "
+                           f"the chat report lists as message "
+                           f"{rec.get('server_message_id')}")
+            out.append(dict(rec, anchor=anchor, route="key", basis=(
                 f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries the conversation id "
-                f"{mo.group('conv')} and message {smid}, which the chat report reported "
-                f"for that message. The link therefore points at the message rather than at this "
-                f"exact file — a message can have several cached files (full media, thumbnail, raw "
-                f"content claim), and only one of them is displayed in the chat report.")))
+                f"{mo.group('conv')} and {listed}. The link therefore points at the message "
+                f"rather than at this exact file — a message can have several cached files (full "
+                f"media, thumbnail, raw content claim), and only one of them is displayed in the "
+                f"chat report.")))
+    for c in clist if ids is not None else ():
+        for cid, rule, rec in ids.content_links(c["external_key"]):
+            anchor = rec.get("anchor")
+            ident = (rec.get("conversation_id"), rec.get("server_message_id"))
+            if not anchor or ident in seen:
+                continue
+            seen.add(ident)
+            out.append(dict(rec, anchor=anchor, route="content", basis=(
+                f"The claim EXTERNAL_KEY \"{c['external_key']}\" contains {cid}: "
+                f"{arroyo_content.CONTENT_ID_RULES.get(rule, rule)} of message "
+                f"{rec.get('server_message_id')} in conversation {rec.get('conversation_id')} "
+                f"(arroyo.db). An exact identifier match, not one by time or content. The link "
+                f"points at the message: the chat report displays at most one of its cached files, "
+                f"and this is another one stored under the same id.")))
     return out
 
 
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
-                  chat_by_message=None, workdir=None, memory_content=None):
+                  chat_by_message=None, workdir=None, memory_content=None, chat_ids=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows, wal_info). Each entry aggregates its claims, metadata,
@@ -1075,6 +1191,18 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     basis = (f"Fallback: EXTERNAL_KEY UUID {mo.group(0)} matches this Memory's "
                              f"{labels['media']} (Memory {canonical}).")
                     break
+        if not memory:                                         # 3b. ZSNAPID in a full-media
+            for c in clist:                                    #     key of no Memory-scoped shape
+                mo = _UUID_RE.search(c["external_key"])
+                if mo and not c["snap_uuid"] and c["mct"] == 19 \
+                        and mo.group(0).upper() in snap_ids:
+                    canonical, user_hash = snap_ids[mo.group(0).upper()]
+                    memory = {"snap_id": canonical, "user_hash": user_hash}
+                    basis = (f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries "
+                             f"{mo.group(0)}, this Memory's {labels['snap']} — an exact identifier, "
+                             f"in a key that is not one of the Memory-scoped shapes "
+                             f"(MEDIA_CONTEXT_TYPE {c['mct']}).")
+                    break
         if not memory:                                         # 4. a MemData id the Memory records
             memory, basis = _memdata_link(clist, memdata_ids)
         proofs = (memory_content or {}).get(key.lower()) or []
@@ -1087,7 +1215,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
-        chats = _chat_links_for(clist, key, chat_links, chat_by_message or {})
+        chats = _chat_links_for(clist, key, chat_links, chat_by_message or {}, chat_ids)
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
                        or {t["user_id"] for t in tomb_by_key.get(key, []) if t["user_id"]})
@@ -2417,6 +2545,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     # evidence read by the same build (see docs/report_partial.md).
     ldir = links_dir or rdir
     chat_links, chat_by_message = load_chat_links(ldir)
+    chat_ids = load_chat_ids(ldir, chat_by_message)
     memory_pages = load_memory_pages(ldir)
     memory_media = load_memory_media(ldir)
     memory_content = (load_memory_content(ldir) or {}).get("by_cache_key") or {}
@@ -2431,7 +2560,8 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     for db in dbs:
         entries, virt, wal_info = build_entries(db, app, scfull, scparts, mem_index, chat_links,
                                                 ms_fmt, memory_pages, chat_by_message,
-                                                workdir=outdir, memory_content=memory_content)
+                                                workdir=outdir, memory_content=memory_content,
+                                                chat_ids=chat_ids)
         all_entries.extend(entries)
         virtual.extend(virt)
         wal_infos.append(wal_info)

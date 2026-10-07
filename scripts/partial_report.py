@@ -100,8 +100,11 @@ RELATIONS = (
              "The conversation's own messages, as arroyo.db records them."),
     Relation("msg_cache", "The cache_controller entry behind an included message's media",
              EDGE_MESSAGE_CACHE, "msg", "cc", True,
-             "A chat claim's EXTERNAL_KEY carries <type>:<conversation>:<message>:<part>, so the "
-             "entry names the message directly."),
+             "The cache_controller entries the message's chat links name: the file the chat "
+             "report shows for it, a claim whose EXTERNAL_KEY names the message "
+             "(<type>:<conversation>:<message>:<part>), or one whose EXTERNAL_KEY carries an id the "
+             "message names its media by (its local_message_references media id, a shared item's "
+             "or a sticker's id). Each link's own explanation says which."),
     Relation("msg_sender", "The contact record of an included message's sender",
              EDGE_MESSAGE_SENDER, "msg", "ct", True,
              "The sender's permanent user id on the message (arroyo.db "
@@ -130,8 +133,11 @@ RELATIONS = (
              "The same claim shapes as mem_cache, read in the other direction."),
     Relation("cache_message", "The chat message a selected cache entry belongs to",
              EDGE_MESSAGE_CACHE, "cc", "msg", True,
-             "The conversation and message id in the claim's EXTERNAL_KEY, matched against the "
-             "chat report's manifest."),
+             "The chat links of the entry: the file the chat report shows for a message, the "
+             "conversation and message its claim's EXTERNAL_KEY names, or an id in that key which a "
+             "message names its media by. A sticker or a shared item can be in several messages, "
+             "and its entry then links to each. Each link's own explanation says which way it was "
+             "made."),
     Relation("cache_cachemedia", "Library/Caches copies of a selected cache entry",
              EDGE_CACHE_CACHEMEDIA, "cc", "cm", False,
              "The same CACHE_KEY appearing under Library/Caches as well as in the SCContent "

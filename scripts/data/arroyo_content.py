@@ -31,11 +31,13 @@ number, never guessed at.
 """
 from __future__ import annotations
 
+import base64
 import re
 import struct
 import uuid
+from io import BytesIO
 
-from scripts.data import protobuf_wire
+from scripts.data import ccl_bplist, protobuf_wire
 
 # --------------------------------------------------------------------------- content_type
 
@@ -507,6 +509,142 @@ def describe(blob):
 
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+# --------------------------------------------------------------------------- content ids
+
+#: The ids a message names its media by — what a cache claim's key can carry — and where each is
+#: read. Each one is a link rule of its own, and the cache_controller report says which one made a
+#: link. An id shorter than MIN_CONTENT_ID characters is not used: inside a claim key it could match
+#: by chance.
+CONTENT_ID_RULES = {
+    "media": "a media id the message's local_message_references names (a MEDIA_ID — one per "
+             "photo or video of the message)",
+    "share": "the id of the item shared in the message (message_content field 4.4.5.5.1)",
+    "sticker": "the id of the sticker the message carries (message_content field 4.4.14.2.6), "
+               "in base64",
+    "sticker-name": "the sticker the message names (message_content field 4.4.4.1.2)",
+}
+MIN_CONTENT_ID = 8
+
+
+def _first_text(blob, *path):
+    try:
+        values = protobuf_wire.values(blob, *path)
+    except (protobuf_wire.Malformed, TypeError):
+        return None
+    try:
+        return bytes(values[0]).decode("utf-8") if values and values[0] else None
+    except UnicodeDecodeError:
+        return None
+
+
+def sticker_id(blob):
+    """``(id, rule)`` of the sticker a Sticker message (content_type 5) carries, or ``(None, None)``.
+
+    A sticker carried as a creative tool item (body 4.4.14) is named by the bytes at 4.4.14.2.6; the
+    claim on its cached file holds them in base64, so that is the form returned. A sticker from a
+    pack is named by the text at 4.4.4.1.2.
+    """
+    try:
+        ids = protobuf_wire.values(blob, 4, 4, 14, 2, 6)
+    except (protobuf_wire.Malformed, TypeError):
+        ids = []
+    if ids and ids[0]:
+        return base64.b64encode(bytes(ids[0])).decode("ascii"), "sticker"
+    name = _first_text(blob, 4, 4, 4, 1, 2)
+    return (name, "sticker-name") if name else (None, None)
+
+
+def shared_item_id(blob):
+    """The id of the item a Shared content message (content_type 3) shares (4.4.5.5.1), or None."""
+    return _first_text(blob, 4, 4, 5, 5, 1)
+
+
+def _media_id(archive_bytes):
+    """The ``MEDIA_ID`` of one keyed archive, read up to the end of its (last) UUID, as the chat join
+    reads it — in any letter case. None when the bytes are not such an archive."""
+    try:
+        archive = ccl_bplist.deserialise_NsKeyedArchiver(ccl_bplist.load(BytesIO(archive_bytes)))
+        value = archive["MEDIA_ID"]
+    except Exception:                                              # noqa: BLE001 - not this plist
+        return None
+    last = None
+    for last in _UUID_RE.finditer(value if isinstance(value, str) else ""):
+        pass
+    return value[:last.end()] if last else None
+
+
+def media_references(blob):
+    """Every media id a row's ``local_message_references`` names, in order.
+
+    The column is a sequence of records, one per media item of the message: an 8-byte little-endian
+    length, then an NSKeyedArchiver plist of that many bytes whose ``MEDIA_ID`` names the item. A
+    message sent with several photos or videos has a record for each; reading only the first lost
+    the others. A column that does not divide into such records is read as one archive after its
+    first 8 bytes, as before.
+    """
+    if not isinstance(blob, (bytes, bytearray, memoryview)) or len(blob) <= 8:
+        return []
+    data, out, pos = bytes(blob), [], 0
+    while pos + 8 < len(data):
+        size = int.from_bytes(data[pos:pos + 8], "little")
+        if size <= 0 or pos + 8 + size > len(data):
+            break
+        media = _media_id(data[pos + 8:pos + 8 + size])
+        if media and media not in out:
+            out.append(media)
+        pos += 8 + size
+    if not out:
+        media = _media_id(data[8:])
+        out = [media] if media else []
+    return out
+
+
+def media_reference(blob):
+    """The first media id a row's ``local_message_references`` names, or None — see
+    :func:`media_references`."""
+    refs = media_references(blob)
+    return refs[0] if refs else None
+
+
+def content_ids(content_type, message_content, local_message_references=None):
+    """``[(id, rule)]``: every id this message names its media by (see CONTENT_ID_RULES)."""
+    out = [(media, "media") for media in media_references(local_message_references)]
+    try:
+        kind = int(content_type)
+    except (TypeError, ValueError):
+        kind = None
+    if kind == 3:
+        shared = shared_item_id(message_content)
+        if shared:
+            out.append((shared, "share"))
+    elif kind == 5:
+        sticker, rule = sticker_id(message_content)
+        if sticker:
+            out.append((sticker, rule))
+    return [(cid, rule) for cid, rule in out if len(cid) >= MIN_CONTENT_ID]
+
+
+def message_key(server_message_id, client_message_id=None):
+    """How a message is found again across the reports: ``"<number>"`` by its server message id, or
+    ``"c<client message id>"`` for one the server never numbered (not sent, or still sending) — the
+    same ``c`` the Conversations report anchors such a message with. "" when it has neither."""
+    number = message_number(server_message_id)
+    if number:
+        return number
+    text = str(client_message_id if client_message_id is not None else "").strip()
+    text = text[:-2] if text.endswith(".0") else text
+    return f"c{text}" if text.lstrip("-").isdigit() else ""
+
+
+def message_number(smid):
+    """A server message id as its bare number: ``12``, ``"12"``, ``12.0`` and ``"12.0"`` are all
+    ``"12"``. The reports write a message's id as ``<number>.<part>`` (the part a cache claim names,
+    or ``.0`` from a float column); arroyo.db and a claim's key hold the number. "" when not one."""
+    text = str(smid if smid is not None else "").strip()
+    head = text.split(".")[0]
+    return head if head.lstrip("-").isdigit() else ""
 
 
 def name_users(text, names):

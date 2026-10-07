@@ -1,5 +1,6 @@
 import os
 import glob
+import html
 import json
 import sqlite3
 import pandas as pd
@@ -27,6 +28,7 @@ from scripts import source_fingerprint
 from scripts import partial_report
 from scripts import selection_file
 from scripts import progress
+from scripts import chat_media
 import math
 import logging
 import numpy as np
@@ -288,11 +290,12 @@ def path_to_image_html(filename):
                     result = ('<a href="' + (relpath) + '"><img src="' + (
                         relpath) + '" width="150" ><br>' + basename + '</a>')
                 # Stable anchor the cache_controller report can jump to, plus the link back to that
-                # report's row for this file — via the CACHE_KEY, which for a saved-media copy is
-                # not the filename (see cacheControllerKey).
-                cache_key, how = cacheControllerKey(basename)
+                # report's row for this file — via the CACHE_KEY, which for a saved-media copy or a
+                # rebuilt file is not simply the filename (see chat_media.chat_cache_key).
+                cache_key, how = chat_media.chat_cache_key(basename)
                 if cache_key:
-                    cc_link = ('<br><a class="cclink" target="scauto_cache" title="' + how + '" '
+                    cc_link = ('<br><a class="cclink" target="scauto_cache" title="'
+                               + html.escape(how, quote=True) + '" '
                                'href="../CacheController/CacheController_report.html#ck-'
                                + cache_key + '">&#128451; cache_controller entry</a>')
                 else:
@@ -997,6 +1000,17 @@ def _share_claim_order(claims):
     return sorted(claims, key=lambda claim: "thumbnail" in claim[0].lower())
 
 
+def _sticker_key_text(blob):
+    """What a Sticker message (content_type 5) names its sticker by, as a claim's key holds it.
+
+    A sticker from a pack is named by text at 4.4.4.1.2. A sticker carried as a creative tool item
+    (body 4.4.14) is named by the bytes at 4.4.14.2.6, and the ``customSticker…`` claim on its cached
+    file holds those bytes in base64 within its EXTERNAL_KEY. None when the message has neither.
+    Read by ``arroyo_content.sticker_id``, which the cache_controller report's links share.
+    """
+    return arroyo_content.sticker_id(blob)[0]
+
+
 def getCacheArroyo(arroyo, cache_df):
     cache_df = cache_df.reset_index()
     logger.info("Getting cache files from " + ntpath.basename(arroyo))
@@ -1012,6 +1026,7 @@ def getCacheArroyo(arroyo, cache_df):
             """
 
     df_arroyo, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
+    extra_media = []
 
     # Each claim once, in cache_controller.db's order: the first claim of an exact EXTERNAL_KEY (what
     # a local message reference names), and every claim for the substring match a share needs.
@@ -1026,23 +1041,29 @@ def getCacheArroyo(arroyo, cache_df):
             data = row['local_message_references']
             if not isinstance(data, bytes):
                 continue
-            try:
-                plist = ccl_bplist.load(BytesIO(data[8:]))
-                data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
-                data = re.search(".*[A-F0-9-]{36}", data1['MEDIA_ID'])
-                if data and data.group() in first_by_key:
-                    df_arroyo.loc[index, 'message_content'] = first_by_key[data.group()]
-            except Exception:
-                pass
+            # one record per photo or video of the message: the first file found is the message's,
+            # each further one a row of its own that the reports fold into the same message
+            files = [first_by_key[media] for media in arroyo_content.media_references(data)
+                     if media in first_by_key]
+            if files:
+                df_arroyo.loc[index, 'message_content'] = files[0]
+                for cache_key in dict.fromkeys(files[1:]):
+                    if cache_key != files[0]:
+                        extra_media.append(dict(row.to_dict(), message_content=cache_key,
+                                                extra_media=True))
 
         elif row["content_type"] in (3, 5):
             # a Sticker (5) or Shared content (3): the media id inside it, within a claim's key
-            try:
-                message, _typedef = blackboxprotobuf.decode_message(row["message_content"])
-                found = (message['4']['4']['4']['1']['2'] if row["content_type"] == 5
-                         else message['4']['4']['5']['5']['1']).decode()
-            except Exception:
-                continue
+            if row["content_type"] == 5:
+                found = _sticker_key_text(row["message_content"])
+                if not found:
+                    continue
+            else:
+                try:
+                    message, _typedef = blackboxprotobuf.decode_message(row["message_content"])
+                    found = message['4']['4']['5']['5']['1'].decode()
+                except Exception:
+                    continue
             matches = _share_claim_order([(ek, ck) for ek, ck in claims if found in ek])
             if not matches:
                 continue
@@ -1054,6 +1075,10 @@ def getCacheArroyo(arroyo, cache_df):
         logger.info(f"{several} shared item(s) or sticker(s) match more than one cached file: the "
                     f"media is shown with the message (rather than its thumbnail); every one of the "
                     f"files is in the cache_controller report")
+    if extra_media:
+        logger.info(f"{len(extra_media)} more cached file(s) attached to messages sent with several "
+                    f"photos or videos (one local_message_references record each)")
+        df_arroyo = pd.concat([df_arroyo, pd.DataFrame(extra_media)], ignore_index=True)
     
     if os.path.exists("temp.plist"):
         os.remove("temp.plist")
@@ -1598,12 +1623,23 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
         key = (_id_key(conv), _id_key(smid))
         if None not in key:
             chat_rows.setdefault(key, []).append(index_chat)
+    more_files = []
     for _index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
         content = row_arroyo['message_content']
         if isinstance(content, (float, bytes)):
             continue
         key = (_id_key(row_arroyo['client_conversation_id']), _id_key(row_arroyo['server_message_id']))
         for index_chat in chat_rows.get(key, ()):
+            if row_arroyo.get("extra_media") in (True,):     # NaN on every other row
+                # a further photo or video of the same message: a row of its own, which the reports
+                # fold into the message as another attachment — labelled by the same rule as the
+                # message's first file
+                more_files.append(dict(
+                    chats_df.loc[index_chat].to_dict(), message_content=content,
+                    content_type=(chats_df.loc[index_chat, 'content_type']
+                                  if row_arroyo["content_type"] in (3, 5)
+                                  else 'local_message_reference')))
+                continue
             chats_df.loc[index_chat, 'message_content'] = content
             if row_arroyo["content_type"] not in [3, 5]:
                 chats_df.loc[index_chat, 'content_type'] = 'local_message_reference'
@@ -1684,6 +1720,12 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     cache_df_v2 = pd.concat(frames, ignore_index=True, axis=0)
     chats_df['server_message_id'] = chats_df.server_message_id.astype(str)
     merge_df = chats_df.merge(cache_df_v2, on=["client_conversation_id", 'server_message_id'], how="left")
+    if more_files:
+        # The further photos and videos of a message join after the claims do: a claim keyed by the
+        # message's conversation and number would otherwise replace each of their files with its own.
+        extra = pd.DataFrame(more_files)
+        extra['server_message_id'] = extra['server_message_id'].astype(str)
+        merge_df = pd.concat([merge_df, extra], ignore_index=True)
     merged_cache_keys = merge_df['CACHE_KEY'].tolist()
     # logger.info(type(merged_cache_keys))
     # logger.info(cache_df_v2['CACHE_KEY'])
@@ -2232,7 +2274,19 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     cache_df = getCache(cacheController[0])
     all_claims_df = cache_df.copy()                            # before mergeCache filters it
     content_df = getContentmanager(contentmanager)
+    # Chat media kept as a bundle (the file named after the CACHE_KEY is a descriptor, the video a
+    # child file) or as byte-range shards is rebuilt into a folder the join searches first, so the
+    # message shows it — as on Android (scripts/chat_media.py). Only bytes that are media are written.
+    progress.step("rebuilding chat media kept in pieces")
+    folders = [f for f in (SCContentFolder if isinstance(SCContentFolder, list)
+                           else [SCContentFolder]) if f]
+    rebuilt = os.path.join(outputDir, "_rebuilt")
+    if chat_media.materialize_chat_media(cache_df, snapchatFolder, rebuilt,
+                                         chat_media.message_blobs(arroyo[0])):
+        SCContentFolder = [rebuilt.replace("\\", "/") + "/"] + folders
     cache_df = mergeCache(cache_df, content_df)
+    SCContentFolder = folders                       # the copies are in cacheFiles/ now
+    shutil.rmtree(rebuilt, ignore_errors=True)
     progress.step("matching messages to cache claims")
     cache_arroyo_df = getCacheArroyo(arroyo[0], cache_df)
     progress.step("media saved in chat")
@@ -2390,7 +2444,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         "conv": dict(msg_df=msg_df, friends_df=friends_df, group_df=group_df,
                      outdir=report_dir + "/Conversations", cachefiles_dir=cachefiles_dir,
                      arroyo=arroyo[0] if arroyo else None, tz=tz, owner_user_id=uuid,
-                     owner_username=current_username, cache_key_for=cacheControllerKey,
+                     owner_username=current_username, cache_key_for=chat_media.chat_cache_key,
                      report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
         "ct": dict(friends_df=friends_df, outdir=report_dir + "/Contacts", owner_user_id=uuid,
                    owner_username=current_username, friends_source=friends_source, tz=tz,

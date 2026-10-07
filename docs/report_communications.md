@@ -61,10 +61,33 @@ choice is stated — and logged with a count when it happens:
 On the four test devices none of these cases occurs, and the reports are byte-identical to what the
 loops produced.
 
+**Which id a sticker is matched by** (`_sticker_key_text`). A Sticker message (`content_type` 5) names
+its sticker in one of two places. A sticker from a pack is named by the text at `4.4.4.1.2`. A sticker
+carried as a creative tool item (body `4.4.14`) is named by the bytes at `4.4.14.2.6`, and the
+`customSticker…` claim on its cached file holds those bytes **in base64** in its `EXTERNAL_KEY` — so the
+join looks for the base64 text. The join used to read `4.4.4.1.2` only, which such a message does not
+have, so its file was never attached to it. A sticker message with neither field is not matched.
+
 `getCache` reads claims with `MEDIA_CONTEXT_TYPE IN (2, 3, 19)` (chat-media contexts) for the
 logged-in `USER_ID`; `mergeCache` merges in the `contentManagerDb` rows and **copies each matched
 `CACHE_KEY` file into `cacheFiles/`**. `path_to_image_html` then renders it (video/image/sticker)
 by file type.
+
+**A message sent with several photos or videos** has one `local_message_references` record per item
+(`arroyo_content.media_references`): an 8-byte little-endian length, then a keyed archive whose
+`MEDIA_ID` names the item. The join used to read the first only; every item's file is now attached
+(`getCacheArroyo` adds a row per further file, which the reports fold into the message).
+
+**Chat media kept in pieces** (`scripts/chat_media.py`, both platforms). `mergeCache` copies a claim's
+file only when a *whole* file named after its `CACHE_KEY` is media. A chat video is regularly a
+**bundle** — the file named after the key is a small descriptor, the video and its overlay are child
+files `<CACHE_KEY>_<child>` — and media can also be stored as byte-range shards. Before the join,
+`materialize_chat_media` rebuilds those under their `CACHE_KEY` in a folder the join searches first:
+shards concatenated in offset order, a bundle's largest media child, and a file that is not plaintext
+decrypted with a key / IV pair its message carries. Only bytes that are media by their magic bytes are
+written. Without it a message whose only file was a bundle showed *Media (no cached file)* — unless a
+saved copy named after its conversation, message and part stood in for it. The attachment's "?"
+(`chat_cache_key`) says how the file was put together.
 
 ## Attachment files and their names
 Two kinds of file end up in `cacheFiles/`:

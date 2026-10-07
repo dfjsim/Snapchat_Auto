@@ -1854,9 +1854,8 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     for sid, m in memories.items():
         for rec in m.get("memdata") or []:
             memdata_owners.setdefault(rec["uuid"], set()).add(sid)
-    if memdata_owners and claim_uuids is None:
+    if claim_uuids is None:
         claim_uuids = index_claim_uuids(app)
-    claim_uuids = claim_uuids or {}
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
@@ -1912,6 +1911,16 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                          + (f" ({rec['slot']})" if rec["slot"] else "")
                          + f", and points at CACHE_KEY {ck}.")
                 targets.append(("rendered" if context == 26 else "full", ck, basis))
+        # A full-media claim (MEDIA_CONTEXT_TYPE 19) whose key is none of the Memory-scoped shapes
+        # but carries this Memory's ZSNAPID — "<snapId>~1" — names it exactly. The cache_controller
+        # report makes the same link (its fallback after ZMEDIAID). A claim of a Memory-scoped shape
+        # was already located above, and a cache key is decrypted once.
+        for ck, context in claim_uuids.get(sid.upper(), []):
+            if context == 19:
+                basis = (f"Located via cache_controller.db: a full-media CACHE_FILE_CLAIM "
+                         f"(MEDIA_CONTEXT_TYPE 19) whose EXTERNAL_KEY is none of the Memory-scoped "
+                         f"shapes carries this Memory's ZSNAPID and points at CACHE_KEY {ck}.")
+                targets.append(("full", ck, basis))
 
         seen, found = set(), []
         for role, cache_key, addr_basis in targets:

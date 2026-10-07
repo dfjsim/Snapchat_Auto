@@ -26,6 +26,9 @@ Memories / My Eyes Only.
   chat media, and the cached documents). Disjoint from the cache_controller report by design. It renders
   after the Memories report, so what it links to a Memory reaches the Memory's page as a data file
   (`scripts/memory_backlinks.py`), as the cache_controller report's leads do (`scripts/memory_leads.py`).
+- Chat media kept in pieces: `scripts/chat_media.py` — rebuilds a chat claim's media the cache keeps as
+  a bundle (descriptor + child files) or as byte-range shards, before the shared join, on both
+  platforms; only bytes that are media are written, and `chat_cache_key` explains each attachment.
 - Android: `scripts/ParseSnapchat_Android.py` — the Android run. The chat database (`arroyo.db`) and
   the cached-file index (`cache_controller.db` + `com.snap.file_manager_*_SCContent_*`) are the **same
   databases as on iOS**, so the chat parsing is `ParseSnapchat_iOS`'s functions called unchanged and

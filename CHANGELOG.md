@@ -13,6 +13,40 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   Conversations reports.
 
 ### Fixed
+- **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`
+  (`_sticker_key_text`). A Sticker message whose body is a creative tool item (`4.4.14`) names its
+  sticker by the bytes at `4.4.14.2.6`, and the `customSticker…` claim on the cached file holds them in
+  base64; the join read only the pack sticker's text id (`4.4.4.1.2`), so these messages never got
+  their file — not in the chat reports, and not as a chat link on the claim in the cache_controller
+  report. See [docs/report_communications.md](docs/report_communications.md).
+- **A cached file links to the chat message it belongs to even when it is not the file the chat
+  report shows** — `cache_controller_report._chat_links_for`, `ChatIdIndex`. Two kinds of claim were
+  left without a chat link: a key naming a message (`animationmedia~1:<conversation>:<message>:<part>`)
+  whose file the chat join had not attached, or under a part the report does not list — the manifest
+  listed only messages with an attachment; and a key carrying an id the message names its media by —
+  `content~`, `thumbnail~` or `SnapVideoFilterState-` with the media id of the message's
+  `local_message_references`, or a shared item's or a sticker's other files. The Conversations
+  manifest now lists every message and those ids (`conversations_report.load_content_ids`,
+  `arroyo_content.content_ids`); each link's "?" names the id and the field it came from. See
+  [docs/cross_report_linking.md](docs/cross_report_linking.md). A message the server never numbered
+  (not sent, or still sending) is found by its `client_message_id`, and a `local_message_references`
+  media id is read in any letter case.
+- **Every photo or video of a message sent with several is attached** — `arroyo_content.media_references`,
+  `ParseSnapchat_iOS.getCacheArroyo`. `local_message_references` holds one record per media item (an
+  8-byte length, then a keyed archive); only the first was read, so the others' cached files were never
+  attached and their claims linked to nothing.
+- **A full-media claim keyed by a Memory's own snap id links to that Memory, in both reports** —
+  `cache_controller_report` (fallback after `ZMEDIAID`) and `memories_media_report.collect_media`. A
+  context-19 claim keyed `<snapId>~1` carries the Memory's `ZSNAPID` exactly, but only the Memory-scoped
+  key shapes were read for one; the Memories report now locates and decrypts that file for the Memory.
+- **A chat video kept as a bundle is shown with its message on iOS** — `scripts/chat_media.py`. The
+  file named after a bundle's CACHE_KEY is a descriptor and the video is a child file, so the join, which
+  copies only a whole file that is media, left such a message showing *Media (no cached file)* unless a
+  saved copy named after its conversation, message and part stood in. The rebuild the Android run used
+  (shards concatenated, a bundle's largest media child, a file decrypted with its message's key) moved
+  out of `ParseSnapchat_Android` into a shared module and now runs on iOS too. Where the saved copy and
+  the cached file are the same bytes, the Conversations report shows them as one attachment and lists
+  the other name (`same_as`).
 - **A Library/Caches file byte-identical to a bundle's child or a byte-range part links to its cache
   entry** — `cache_media_report.sccontent_key`. The link named the piece's file name
   (`<CACHE_KEY>_<child>`), which is a cache_controller row only when no claimed bundle lists the child,

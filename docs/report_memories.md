@@ -307,6 +307,11 @@ are NSKeyedArchiver plists of one small record — a `uuid`, a `creationTimeMs` 
 two of them, under `snapMemDataId` and `entryMemDataId`; `ZMEMDATAID`'s root *is* one record
 (`SOJUGalleryServletMemDataId`). The uuids are not the snap's `ZSNAPID` or the entry's `ZENTRYID`.
 
+A claim whose `EXTERNAL_KEY` carries one of these uuids locates its cached file for the Memory
+(`collect_media`, through `index_claim_uuids`), and so does a full-media claim (`MEDIA_CONTEXT_TYPE` 19)
+keyed by the Memory's own `ZSNAPID` in a shape that is none of the Memory-scoped ones (`<snapId>~1`) —
+the cache_controller report links both the same way.
+
 `decode_memdata` reads them strictly — the archive's classes must be those records and every uuid must
 parse, as a string or an `NSUUID` — and the value cell then reads
 `snap <uuid> · created <time> · entry type <n>; entry …` instead of `<blob N bytes>`. Anything else keeps

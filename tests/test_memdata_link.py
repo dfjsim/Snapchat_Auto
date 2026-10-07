@@ -119,3 +119,24 @@ def test_the_memories_report_leaves_a_shared_id_alone(tmp_path):
     mems = {SNAP: _memory(SNAP, [rec]), OTHER: _memory(OTHER, [dict(rec)])}
     mr.collect_media(mems, app, str(tmp_path / "out"))
     assert mems[SNAP]["media_files"] == [] and mems[OTHER]["media_files"] == []
+
+
+def test_a_full_media_claim_keyed_by_the_snap_id_reaches_the_memory_page(tmp_path):
+    """A context-19 claim keyed ``<snapId>~1`` is no Memory-scoped shape, but it carries the Memory's
+    own ZSNAPID: the cache_controller report links it, and the Memories report must locate the same
+    file — or the Memory's page would not show what the other report says belongs to it."""
+    app = _app_with_claim(tmp_path, f"{SNAP}~1")
+    mems = {SNAP: _memory(SNAP, [])}
+    mr.collect_media(mems, app, str(tmp_path / "out"))
+    files = mems[SNAP]["media_files"]
+    assert [(f["ext"], f["role"], f["cache_key"]) for f in files] == [("mp4", "full", CACHE_KEY)]
+    assert "carries this Memory's ZSNAPID" in files[0]["how"]
+    # a claim of another context with the same key shape locates nothing
+    other = _app_with_claim(tmp_path / "b", f"{OTHER}~1")
+    mems = {OTHER: _memory(OTHER, [])}
+    conn = sqlite3.connect(next((tmp_path / "b").rglob("cache_controller.db")).as_posix())
+    conn.execute("update CACHE_FILE_CLAIM set MEDIA_CONTEXT_TYPE = 34")
+    conn.commit()
+    conn.close()
+    mr.collect_media(mems, other, str(tmp_path / "out_b"))
+    assert mems[OTHER]["media_files"] == []

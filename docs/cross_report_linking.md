@@ -119,6 +119,12 @@ Tried in priority order; the first that matches wins, and the icon records which
    snap-scoped key.
 3. **ZMEDIAID (fallback).** A UUID inside an `EXTERNAL_KEY` matches the Memory's `ZMEDIAID`
    (used only when it is *not* also a `ZSNAPID`).
+   **ZSNAPID in a full-media key of another shape (fallback).** A full-media claim
+   (`MEDIA_CONTEXT_TYPE` 19) whose `EXTERNAL_KEY` is none of the Memory-scoped shapes carries the Memory's
+   `ZSNAPID` — `<snapId>~1`. An exact identifier, so it links, in both reports: the Memories report
+   locates the same file (`collect_media`, through `index_claim_uuids`) and decrypts it with the Memory's
+   key, so the Memory's page shows what the cache_controller report says belongs to it. A `<UUID>~<n>`
+   whose UUID is no snap id (the snap editor's, context 34) links to nothing.
 4. **A MemData identifier (fallback).** A UUID inside an `EXTERNAL_KEY` is one the Memory records
    about itself in `ZGALLERYSNAP.ZMEMDATAIDS` (`snapMemDataId` / `entryMemDataId`) or in its entry's
    `ZGALLERYENTRY.ZMEMDATAID` (newer app versions; `memories_media_report.decode_memdata`). An entry's
@@ -205,8 +211,21 @@ The Conversations report writes version 3:
  "by_key":     {"<CACHE_KEY>": [{"conversation_id": …, "server_message_id": "12.0",
                                  "anchor": "msg-12.0", "title": "…",
                                  "href": "Conversations/pages/<key>.html#msg-12.0"}]},
- "by_message": {"<conversation id>|<server message id>": [ …the same records… ]}}
+ "by_message": {"<conversation id>|<server message id>": [ …the same records… ]},
+ "messages":   {"<conversation id>": {"title": "…", "href": "Conversations/pages/<key>.html",
+                                      "anchors": {"12.0": "msg-12.0", "13.0": "msg-13.0"}}},
+ "by_content_id": {"<id>": [{"conversation_id": …, "server_message_id": "12.0",
+                             "rule": "media|share|sticker|sticker-name"}]}}
 ```
+
+`by_key` and `by_message` cover the messages that have an attachment. `messages` lists **every**
+message, compactly (one title and page per conversation, an anchor per message): a claim's key can
+name a message whose file the chat join did not attach — a kind it does not display, or a file it did
+not choose — and `load_chat_links` turns these into the same records. `by_content_id` holds the ids
+each message names its media by (`arroyo_content.content_ids`, read from arroyo.db by
+`conversations_report.load_content_ids`): the media id of its `local_message_references` (`media`), a
+shared item's id at `4.4.5.5.1` (`share`), a sticker's id at `4.4.14.2.6` in base64 (`sticker`) or its
+name at `4.4.4.1.2` (`sticker-name`).
 
 `href` (relative to the reports root) is the addition: with one page per conversation the anchor
 alone no longer says *which document* to open. The legacy Communications report still writes its
@@ -224,7 +243,16 @@ The cache_controller report links an entry to a chat message by, in order:
    **every** cache entry of a message — full media (`1:…`), thumbnail (`thumbnail~1:…`) and raw
    content claim (`content~1:…`) — and not just the one file the chat report happened to display.
    A message with two attachments (e.g. a thumbnail and a video) therefore links back from both.
+   When no row of that part is listed, the claim links to the message by its **number**
+   (`ChatIdIndex.message`): the report lists message 12 as `12.0` unless a claim of another part was
+   joined onto it, and a part of message 12 is still message 12 (e.g. `animationmedia~1:…:12:2:0`).
    The "?" spells out that such a link points at the *message*, not at that exact file.
+3. **`by_content_id`.** A claim whose `EXTERNAL_KEY` contains one of the ids a message names its media
+   by — the whole id, a UUID-based one in any letter case, base64 exactly — links to that message
+   (`ChatIdIndex.content_links`): `content~<MEDIA_ID>`, `thumbnail~<MEDIA_ID>`,
+   `SnapVideoFilterState-<MEDIA_ID>` and the like are other cached files of the media the message's
+   `local_message_references` names; a shared item's or a sticker's other claims, likewise. The "?"
+   names the id and the field it was read from.
 
 Chips are deduplicated per (conversation, message).
 

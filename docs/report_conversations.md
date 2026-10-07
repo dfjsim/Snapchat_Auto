@@ -372,11 +372,16 @@ to check in `arroyo.db`.
   conversation / message / part).
 * `cache_links.json` (version 3) is what the cache_controller report links **back** with. It has
   the same two indexes as the legacy manifest plus an `href` per record, because with one page per
-  conversation the target is no longer a single document. Only messages that **have a recovered
-  attachment** are listed (as in the legacy manifest): a message with no cached file is not
-  something a cache entry can point at, and indexing every message would make this file grow with
-  the whole chat history. Format and matching rules:
-  [cross_report_linking.md](cross_report_linking.md).
+  conversation the target is no longer a single document; those two list the messages that **have a
+  recovered attachment**. Two more indexes reach the others: `messages` (every message, one anchor
+  each, so that a claim key naming a message whose file was not attached still finds it) and
+  `by_content_id` (the ids each message names its media by, read from arroyo.db by
+  `load_content_ids`). Format and matching rules: [cross_report_linking.md](cross_report_linking.md).
+* **The same bytes under two names are one attachment.** A message's rows can bring the same file
+  twice — the copy saved in the chat (`SCPersistentMedia`) and the cached file, byte-identical. `_merge_rows`
+  folds an attachment whose SHA-256 is already on the message into it (`same_as`): the bytes are shown
+  once, and the detail lists each other name as *same bytes as*, linked. Every copy stays published,
+  searchable and a link to its cache_controller entry (`_all_files`).
 * `conversation_pages.json` (conversation id → detail page) is the equivalent of the Memories
   report's `memory_pages.json`, for any other report or tool that needs to resolve a conversation
   to its page. (The Contacts report does not read it — `main` returns the same mapping, with the

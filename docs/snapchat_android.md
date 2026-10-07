@@ -139,9 +139,8 @@ is given a file it cannot be tied to. Everything the run publishes has been show
 
 The shared join takes a claim's file only when a **whole** file named after the `CACHE_KEY` is media.
 The same cache also stores media as byte-range shards and as bundles (a small descriptor named after
-the key, the content in `<key>_<child>` files); on iOS a chat video stored that way reaches the report
-through `SCPersistentMedia`, which Android does not have. So the Android run rebuilds them first
-(`materialize_chat_media`): shards are concatenated in offset order, a bundle gives its largest media
+the key, the content in `<key>_<child>` files). So the run rebuilds them first
+(`scripts/chat_media.py` → `materialize_chat_media`, shared with the iOS run since 1.9): shards are concatenated in offset order, a bundle gives its largest media
 child, and — for a file that is encrypted at rest — decrypted with a key / IV pair carried in the
 message's own protobuf (`message_key_pairs`: every 32-byte value beside every 16-byte value, at any
 depth, tried against the file). **Only bytes that decode to media by their magic bytes are ever
