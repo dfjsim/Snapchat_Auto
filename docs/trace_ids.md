@@ -84,7 +84,11 @@ own.
            "where": "free page|unallocated space|freeblock", …}]}
 ```
 
-`field` is present only on a row-level hit inside a protobuf blob; `where` on a database-file hit
-only when it lies outside every live record.
+`field` is present only on a row-level hit inside a protobuf blob — the field path — or inside a keyed
+archive (a binary plist `NSKeyedArchiver` wrote, such as a Memory's `ZGALLERYSNAPDETAIL.ZOVERLAY`) — the
+path of the text that holds it, by the archive's own class and key names
+(`SOJUGallerySnapOverlay.filters.geoFilters[2].imageUrl`; a list's position in `[ ]`, a dictionary's
+entry as `{}`, since its keys are values, not names: `keyed_archive.text_paths`); `where` on a
+database-file hit only when it lies outside every live record.
 
 Exit code: **0** when anything was found, **1** when nothing was, **2** for bad arguments.

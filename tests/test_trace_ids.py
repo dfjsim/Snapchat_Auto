@@ -232,3 +232,23 @@ def test_a_damaged_page_size_costs_the_placement_not_the_trace(tmp_path):
     path = tmp_path / "broken.sqlite"
     path.write_bytes(trace_ids.SQLITE_MAGIC + b"\x00" * 200 + ID_MAIN.encode())
     assert trace_ids._free_places(str(path), [216]) == {}
+
+
+def test_a_hit_in_a_keyed_archive_names_the_path_of_the_text_that_holds_it(tmp_path):
+    from overlay_fixture import Obj, archive
+    url = "https://cf-st.example.net/d/SyntheticAsset?mo=QUJD%3D&uc=1"
+    docs = tmp_path / "run" / "ExtractedData" / "Documents"
+    docs.mkdir(parents=True)
+    blob = archive(Obj("SynthOverlay", filters=Obj("SynthFilters", geoFilters=[
+        Obj("SynthGeo", imageUrl="https://cf-st.example.net/d/Other?uc=1"),
+        Obj("SynthGeo", imageUrl=url, note=SECRET)])))
+    conn = sqlite3.connect(str(docs / "gallery.sqlite"))
+    conn.execute("create table detail (overlay blob)")
+    conn.execute("insert into detail values (?)", (blob,))
+    conn.commit()
+    conn.close()
+    payload = trace_ids.trace(str(tmp_path / "run"), ["SyntheticAsset"])
+    rows = [h for h in payload["hits"] if h["kind"] == "sqlite"]
+    assert [(h["table"], h.get("field"), h["cell"]) for h in rows] == [
+        ("detail", "SynthOverlay.filters.geoFilters[1].imageUrl", "blob: binary plist")]
+    assert SECRET not in json.dumps(payload)

@@ -46,7 +46,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from scripts.data import protobuf_wire, sqlite_open
+from scripts.data import keyed_archive, protobuf_wire, sqlite_open
 # when a text is read as base64, and the bytes it stands for: one rule, shared with the claim-link
 # survey and the creative-tools item matcher (re-exported here, where the survey has always taken it)
 from scripts.data.base64_text import base64_bytes  # noqa: F401 - re-exported
@@ -341,11 +341,26 @@ def _rows(conn, table):
         yield f"row #{n} (no rowid)", cols, row
 
 
-def _sql_hits(conn, needles):
-    """``{(table, column, row, id, form, case, cell kind, protobuf field)}`` for one reading.
+def _archive_path(data, needle):
+    """Where in a keyed archive (``keyed_archive.text_paths``) the text a hit found sits, or ""."""
+    texts = keyed_archive.text_paths(data)
+    try:
+        wanted = needle.data.decode("utf-8").lower()
+    except UnicodeDecodeError:
+        return ""
+    for path, text in texts or ():
+        if wanted in text.lower():
+            return path
+    return ""
 
-    The field is the dotted path of the protobuf field a blob hit lies in (``4.4.14.1``), and "" for
-    a text cell, a blob that is not a protobuf message, or a hit that is not inside one field.
+
+def _sql_hits(conn, needles):
+    """``{(table, column, row, id, form, case, cell kind, field)}`` for one reading.
+
+    The field is the dotted path of the protobuf field a blob hit lies in (``4.4.14.1``), or — a
+    keyed archive (a binary plist ``NSKeyedArchiver`` wrote) — the path of the text that holds it
+    (``SOJUGallerySnapOverlay.filters.geoFilters[2].imageUrl``), and "" for a text cell, another
+    blob, or a hit that is not inside one field.
     """
     found = set()
     if conn is None:
@@ -367,8 +382,13 @@ def _sql_hits(conn, needles):
                 if len(data) < MIN_NEEDLE:
                     continue
                 for needle, off, case in scan_bytes(data, needles):
-                    field = "" if isinstance(value, str) else ".".join(
-                        str(n) for n in protobuf_wire.field_path(data, off, off + len(needle.data)))
+                    if isinstance(value, str):
+                        field = ""
+                    elif data.startswith(b"bplist00"):
+                        field = _archive_path(data, needle)
+                    else:
+                        field = ".".join(str(n) for n in protobuf_wire.field_path(
+                            data, off, off + len(needle.data)))
                     found.add((table, col, label, needle.index, needle.form, case,
                                _cell_kind(value), field))
     return found

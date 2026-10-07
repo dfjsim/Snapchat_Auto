@@ -48,7 +48,7 @@ import uuid
 from dataclasses import dataclass
 
 from scripts import trace_ids
-from scripts.data import arroyo_content, ctp_items, protobuf_wire, sqlite_open
+from scripts.data import arroyo_content, ctp_items, keyed_archive, protobuf_wire, sqlite_open
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,8 @@ _HEX = re.compile(r"[0-9a-fA-F]+")
 _WORD = re.compile(r"[A-Za-z_-]+")
 _DIGITS = re.compile(r"\d+")
 _PRINTABLE = re.compile(rb"[\x20-\x7e]{8,}")
+#: A list position in a keyed archive's path (``geoFilters[3]``), folded to ``[]`` in the survey.
+_LIST_POSITION = re.compile(r"\[\d+\]")
 
 
 # ------------------------------------------------------------------------------- reading a key
@@ -550,7 +552,13 @@ def _row_values(row):
             if walked:
                 for path, inner, text in walked:
                     yield column, ".".join(str(n) for n in path), bytes(inner), text
-            else:                       # a binary plist or another container: its ASCII strings
+                continue
+            texts = keyed_archive.text_paths(data)
+            if texts:                   # a keyed archive: each text where the archive keeps it, a
+                for path, text in texts:  # list's positions folded, so one place is one line
+                    yield (column, _LIST_POSITION.sub("[]", path),
+                           text.encode("utf-8", "surrogatepass"), text)
+            else:                       # another binary plist or container: its ASCII strings
                 for mo in _PRINTABLE.finditer(data):
                     found = mo.group(0)
                     yield column, "(text inside the blob)", found, found.decode("ascii")

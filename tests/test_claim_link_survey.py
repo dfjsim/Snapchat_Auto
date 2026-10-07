@@ -738,3 +738,18 @@ def test_a_conversation_tie_comes_after_the_message_routes_and_before_a_memory(t
     # a message arroyo.db holds is no tie (the report lists no message 9 of it here: a missing rule)
     held = dict(claim, EXTERNAL_KEY=f"1:{CONV}:9:0:0")
     assert survey._link_status(held, by_key, by_message, ids) == "none"
+
+
+def test_an_id_in_a_keyed_archive_is_placed_by_the_archive_s_own_path():
+    """A binary plist NSKeyedArchiver wrote (a Memory's overlay record) is read as the archive: each
+    text with its path, so the survey says where the id sits; another blob still gives its strings."""
+    from overlay_fixture import Obj, archive
+    url = "https://cf-st.example.net/d/SyntheticAsset?uc=1"
+    blob = archive(Obj("SynthOverlay", filters=Obj("SynthFilters", geoFilters=[
+        Obj("SynthGeo", imageUrl=url)]), table={"data-as-key": "x" * 12}))
+    values = list(survey._row_values({"ZOVERLAY": blob}))
+    assert ("ZOVERLAY", "SynthOverlay.filters.geoFilters[].imageUrl", url.encode(), url) in values
+    assert not any("data-as-key" in path for _col, path, _raw, _text in values)
+    other = list(survey._row_values({"p": b"bplist00" + b"\x00" * 4 + b"a-printable-text"}))
+    assert ("p", "(text inside the blob)", b"a-printable-text", "a-printable-text") in other
+

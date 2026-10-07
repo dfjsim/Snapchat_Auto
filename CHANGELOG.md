@@ -196,6 +196,13 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   tk-inter plugin does not look, so both builds stopped with "Could not find Tcl": a Nuitka user plugin,
   `build_tools/nuitka_tcl_zipfs.py` (named by a `# nuitka-project:` line in `Snapchat_Auto.py`),
   extracts them from those DLLs into `build/tcl_zipfs/` for the plugin to bundle.
+- **`--trace-ids` and `--survey-claim-links` say where in a keyed archive an id sits** —
+  `keyed_archive.text_paths`. A hit in a binary plist `NSKeyedArchiver` wrote (a Memory's overlay record
+  in `ZGALLERYSNAPDETAIL.ZOVERLAY`) is placed by the path of the text that holds it, in the archive's
+  own class and key names (`SOJUGallerySnapOverlay.filters.geoFilters[2].imageUrl`; the survey folds a
+  list's positions to `[]`), instead of
+  "(text inside the blob)" — what a link rule for an id kept there needs. A dictionary's entry is `{}`:
+  its keys are values, and a path never carries one.
 - **`--trace-ids` finds a base64 identifier where it is kept as bytes, and names the protobuf field a
   hit is in** — `scripts/trace_ids.py`. An identifier that is base64 (padded, using `+` or `/`, or
   mixing cases and digits) is also searched as the bytes it encodes, their hex, without its padding

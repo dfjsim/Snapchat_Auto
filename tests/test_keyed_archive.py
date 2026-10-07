@@ -94,3 +94,29 @@ def test_a_value_of_a_type_no_check_foresaw_is_none_not_an_exception(monkeypatch
         raise TypeError("a value of a type no layout check foresaw")
     monkeypatch.setattr(ka, "_resolve", unforeseen)
     assert ka.unarchive(archive(Obj("SynthRoot", name="a text"))) is None
+
+
+def test_every_text_is_given_with_where_the_archive_keeps_it():
+    blob = archive(Obj("SynthRoot", name="a text", count=3,
+                       items=["one", Obj("SynthItem", url="https://example.net/a")],
+                       table={"a-key-that-is-data": "in a dictionary"}))
+    paths = ka.text_paths(blob)
+    assert sorted(paths) == [("SynthRoot.items[0]", "one"),
+                             ("SynthRoot.items[1].url", "https://example.net/a"),
+                             ("SynthRoot.name", "a text"),
+                             ("SynthRoot.table{}", "in a dictionary")]
+    # a dictionary's key is a value the archive holds, never a step of a path
+    assert not any("a-key-that-is-data" in path for path, _text in paths)
+    assert ka.text_paths(b"not an archive") is None and ka.text_paths(b"bplist00junk") is None
+
+
+def test_a_part_the_archive_refers_to_twice_is_listed_once():
+    objects = ["$null",
+               {"first": plistlib.UID(2), "again": plistlib.UID(2), "$class": plistlib.UID(4)},
+               {"label": plistlib.UID(3), "$class": plistlib.UID(5)},
+               "shared text",
+               {"$classname": "SynthRoot", "$classes": ["SynthRoot", "NSObject"]},
+               {"$classname": "SynthShared", "$classes": ["SynthShared", "NSObject"]}]
+    paths = ka.text_paths(_raw(objects))
+    assert len(paths) == 1 and paths[0][1] == "shared text"
+    assert paths[0][0] in ("SynthRoot.first.label", "SynthRoot.again.label")

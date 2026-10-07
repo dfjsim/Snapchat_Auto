@@ -84,6 +84,40 @@ def class_name(node):
     return node.get(CLASS) if isinstance(node, dict) else None
 
 
+def text_paths(blob):
+    """``[(path, text)]`` for every text of a keyed archive, in the archive's order, or None when
+    ``blob`` is not one (:func:`unarchive`).
+
+    The path is where the text sits, by the archive's own names: the root's class, then an object's
+    key (``.filters``), a list's position (``[3]``) — and ``{}`` for an entry of a dictionary, whose
+    keys are values the archive holds, not names, and are never written into a path. A part of the
+    tree reached twice (the archive repeats a reference) is listed once, under its first path.
+    For ``--trace-ids`` and ``--survey-claim-links``, which say where an id sits, never what is
+    around it.
+    """
+    root = unarchive(blob)
+    if root is None:
+        return None
+    out, seen = [], set()
+    stack = [(root, class_name(root) or "")]
+    while stack:
+        node, path = stack.pop()
+        if isinstance(node, str):
+            out.append((path, node))
+            continue
+        if not isinstance(node, (dict, list)) or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, list):
+            steps = [(value, f"{path}[{i}]") for i, value in enumerate(node)]
+        else:
+            dictionary = class_name(node) in _DICTIONARIES
+            steps = [(value, path + ("{}" if dictionary else f".{key}"))
+                     for key, value in node.items() if key != CLASS]
+        stack.extend(reversed(steps))
+    return out
+
+
 def _class_of(entry, objects):
     """``(class name, the names of its class hierarchy)`` of one object's ``$class`` entry."""
     ref = entry.get("$class")
