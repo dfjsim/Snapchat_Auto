@@ -135,14 +135,21 @@ No duration/size/`mvhd`-time correlation. Each link records the method, in prior
    decrypt-and-match in the Memories report — which holds the keys — is the only link that exists.
    Without this manifest every pack was an unexplained padlock with no link at all.
 1. **A UUID in the filename that a `CACHE_FILE_CLAIM.EXTERNAL_KEY` names** → its `CACHE_KEY`. The
-   `<USERNAME>~<snapId>` form also yields the **owner username**, which the filename never gives.
+   `<USERNAME>~<snapId>` form also yields the **owner username**, which the filename never gives
+   (`claim_owner`). The same position holds a claim's *type* in other keys (`thumbnail~<UUID>`,
+   `profilethumbnail~<UUID>`), so only an upper-case part is taken for a name — the usernames these keys
+   carry are upper case, the type words are not.
 2. **The full `<conversation>:<message>:<part>` triple** → the Conversations report's message.
    Matching on the embedded UUID alone is far too coarse — it is conversation-level and matched
    many unrelated claims for one file on the iOS 26 device.
 3. **Byte-identical content** in SCContent. This is the only exact link a root render has, since its
    own UUID is ephemeral. SCContent is indexed by **size** first (`stat` only) and only
    size-matching files are hashed, so the tree is never hashed wholesale; files are hashed **as
-   stored** as well as after decryption, or every plaintext story snap would be missed.
+   stored** as well as after decryption, or every plaintext story snap would be missed. A match on a
+   *piece* of a cache entry links to the row the cache_controller report shows it in
+   (`sccontent_key`): a byte-range part `<CACHE_KEY>_<start>-<end>` to the entry `<CACHE_KEY>`, and a
+   bundle's child `<CACHE_KEY>_<child>` to its parent when a claim on the parent lists the child in its
+   CHILDREN (`load_bundles`) — otherwise the child is a row of its own, under its own name.
 4. **The CDN token in a URL-keyed filename** → `SHA-256(token)[:16]` against a Memory's download URL.
 5. **Byte-identical to a Memory's media** (only when nothing above named a Memory), by SHA-256 against
    `Memories/media_by_content.json`'s `by_sha256`: the media this run recovered from the device first

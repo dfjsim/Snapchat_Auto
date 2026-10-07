@@ -8,6 +8,17 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 
 ## [Unreleased]
 
+### Added
+- **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
+  Conversations reports.
+
+### Fixed
+- **A Library/Caches file byte-identical to a bundle's child or a byte-range part links to its cache
+  entry** — `cache_media_report.sccontent_key`. The link named the piece's file name
+  (`<CACHE_KEY>_<child>`), which is a cache_controller row only when no claimed bundle lists the child,
+  so it usually opened the report without landing anywhere. And `thumbnail~<UUID>` /
+  `profilethumbnail~<UUID>` no longer report "thumbnail" as the claim's owner username (`claim_owner`).
+
 ### Changed
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
   python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older

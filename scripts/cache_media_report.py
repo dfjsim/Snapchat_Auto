@@ -61,7 +61,7 @@ from scripts.data import tsaf
 from scripts.memories_media_report import (
     manifest_key, load_fs_records,
     find_app_container, index_sccontent, device_path, load_path_manifest, make_time_formatter,
-    guess_media, url_token, _UUID_RE,
+    guess_media, url_token, _UUID_RE, _SC_SPLIT_RE,
 )
 from scripts.cache_controller_report import (
     find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
@@ -826,6 +826,24 @@ _TRIPLE_RE = re.compile(r"(?P<type>[^:_]*)[:_](?P<conv>[0-9a-fA-F-]{36})[:_](?P<
                         r"(?P<part>\d+)")
 
 
+def claim_owner(external_key):
+    """The owner username a ``<USERNAME>~<snapId>`` claim key carries, or "".
+
+    The name is the part right before ``~<UUID>`` (``content~<USERNAME>~<UUID>`` too). The same
+    position holds the claim's *type* in other keys — ``thumbnail~<UUID>``, ``profilethumbnail~…``,
+    ``SnapVideoFilterState-…`` — so a part with a lowercase letter in it is not taken for a name: the
+    usernames these keys carry are upper case, the type words are not.
+    """
+    mo = _UUID_RE.search(external_key or "")
+    if not mo or not external_key[:mo.start()].endswith("~"):
+        return ""
+    name = external_key[:mo.start() - 1].rsplit("~", 1)[-1]
+    if not any(ch.isalpha() for ch in name) or any(ch.islower() for ch in name) \
+            or _UUID_RE.match(name):
+        return ""
+    return name
+
+
 def load_claims(app):
     """``(by_uuid, by_triple, cache_keys)`` from every ``cache_controller.db``.
 
@@ -844,10 +862,10 @@ def load_claims(app):
                    "user_id": row.get("USER_ID") or "", "wal": mark}
             # "<USERNAME>~<snapId>" (context 3) or a bare "<snapId>" (context 4): the owner
             # username is recoverable here and nowhere else in the filename
-            owner, _sep, tail = ek.partition("~")
+            _owner, _sep, tail = ek.partition("~")
             mo = _UUID_RE.search(tail or ek)
             if mo:
-                rec["owner"] = owner if _sep and not _UUID_RE.match(owner) else ""
+                rec["owner"] = claim_owner(ek)
                 by_uuid.setdefault(mo.group(0).upper(), []).append(rec)
             mt = _TRIPLE_RE.search(ek)
             if mt:
@@ -884,7 +902,7 @@ def _pack_keys(entry, packs):
 
 
 def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, memory_pages,
-              chat_by_key, chat_by_message, packs=None, content=None):
+              chat_by_key, chat_by_message, packs=None, content=None, bundles=None):
     """Attach every exact link this file supports. Each records the method that produced it.
 
     Priority: the claim a UUID in the filename names, then the conversation/message/part triple,
@@ -960,11 +978,14 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
         for path in sc_by_size.get(entry["bytes"], []):
             other = _read(path)
             if hashlib.sha256(other).hexdigest() == entry["sha256"]:
-                key = os.path.basename(path)
+                name = os.path.basename(path)
+                key, part = sccontent_key(name, bundles)
+                of = (f"cache file {name}" if not part else
+                      f"file {name} — {part} of the cache entry whose CACHE_KEY is {key}")
                 links.append({
                     "kind": "cache", "key": key,
                     "basis": (f"The recovered bytes are byte-identical (SHA-256) to the SCContent "
-                              f"cache file {key}. This is how a file at the Caches root attributes: "
+                              f"{of}. This is how a file at the Caches root attributes: "
                               f"its own filename UUID is ephemeral and is referenced nowhere on the "
                               f"device, so content equality is the only exact link. SCContent files "
                               f"are hashed as stored, not only after decryption — a linker that "
@@ -1151,6 +1172,45 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             entry["url"] = url
             entry["inner_url"] = inner_bolt_url(url)
     return list(by_content.values()), stats
+
+
+_BUNDLE_CHILD_RE = re.compile(r"^([0-9A-Fa-f]{32})_(.+)$")
+
+
+def sccontent_key(name, bundles=None):
+    """``(CACHE_KEY, what the file is of it)`` for an SCContent file name — the cache_controller row
+    the file is shown in.
+
+    A whole file is named after its CACHE_KEY (``(name, "")``). A byte-range part
+    ``<CACHE_KEY>_<start>-<end>`` is a piece of the entry ``<CACHE_KEY>``, which is where that report
+    lists it. A bundle's child ``<CACHE_KEY>_<child>`` is listed under its parent only when
+    cache_controller.db holds a claim on the parent whose CHILDREN name it (``bundles``: ``{parent:
+    {child names}}``, see :func:`load_bundles`); otherwise it is a row of its own, under its own name.
+    """
+    mo = _SC_SPLIT_RE.match(name)
+    if mo:
+        return mo.group(1), "a byte-range part"
+    mo = _BUNDLE_CHILD_RE.match(name)
+    if mo and mo.group(2) in (bundles or {}).get(mo.group(1).lower(), ()):
+        return mo.group(1), f"the bundle child {mo.group(2)}"
+    return name, ""
+
+
+def load_bundles(app):
+    """``{CACHE_KEY: {child names}}`` for every claimed bundle — the children the cache_controller
+    report lists under the bundle's row (``CACHE_FILE_METADATA.CHILDREN``, both readings)."""
+    from scripts.cache_controller_report import parse_children, _is_range_child
+    claimed, out = set(), {}
+    for db in find_cache_controllers(app):
+        claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
+        claimed |= {str(c.get("CACHE_KEY") or "").lower() for c in claims}
+        metas, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_METADATA")
+        for meta in metas:
+            names = {c["name"] for c in parse_children(meta.get("CHILDREN"))
+                     if isinstance(c.get("name"), str) and not _is_range_child(c["name"])}
+            if names:
+                out.setdefault(str(meta.get("CACHE_KEY") or "").lower(), set()).update(names)
+    return {key: names for key, names in out.items() if key in claimed}
 
 
 def index_sccontent_by_size(app):
@@ -1692,6 +1752,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
    <option value="y">linked</option><option value="n">not linked</option></select></label>
  <label title="App fonts, lens models and shader caches are hidden unless this is ticked">
    <input type="checkbox" id="assets" onchange="flt()"> show app assets</label>
+ <button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>
  {report_ui.clear_filters_button("file")}
  <span id="count" style="color:#555"></span>
 </div>
@@ -1720,6 +1781,13 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 {report_ui.SELECT_TOOLBAR_JS}
 var flt_t=0;
 function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
+function xall(btn){{
+ var op=btn.dataset.o==='1';
+ if(!SCV.expandAll(!op,500)){{
+  alert('Too many rows on this page to expand at once. Narrow the filters or use a smaller '
+        +'"rows per page" first.');
+  return;}}
+ btn.dataset.o=op?'0':'1';btn.textContent=op?'Expand all':'Collapse all';}}
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
  emptyAll:'This extract contains no file from Library/Caches.',
@@ -1869,6 +1937,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                 f"{stats['decoded']} decoded/decrypted")
 
     claims_by_uuid, claims_by_triple, _keys = load_claims(app)
+    bundles = load_bundles(app)
     sc_by_size = index_sccontent_by_size(app)
     mem_index = load_memory_index(app)
     # `links_dir` is where the manifests the earlier reports write are read from; see the same
@@ -1882,7 +1951,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         progress.step("linking files to the other reports", n_entry, len(entries))
         entry["links"] = attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size,
                                    mem_index, memory_pages, chat_by_key, chat_by_message,
-                                   packs=memory_packs, content=memory_content)
+                                   packs=memory_packs, content=memory_content, bundles=bundles)
 
     # The closure's view. Rows keep their build order, which `render` preserves: the sort below
     # happens after publishing today, and poster extraction runs under a budget, so re-ordering the
