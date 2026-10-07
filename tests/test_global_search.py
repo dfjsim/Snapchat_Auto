@@ -95,6 +95,10 @@ def test_the_index_page_has_a_search_box_that_opens_the_page(folder):
     doc = open(os.path.join(run, "index.html"), encoding="utf-8").read()
     assert 'action="Reports/search.html"' in doc and 'target="scauto_search"' in doc
     assert os.path.isfile(os.path.join(folder, "search.html"))
+    # the date/time window sits beside the box, not only on the search page
+    assert 'id="gmode"' in doc and 'id="gfrom"' in doc and 'id="gctime" checked' in doc
+    assert "function scWinParams" in doc and "function scTimeWin" in doc
+    assert 'href="Reports/emoji_font.css"' in doc
 
 
 def test_every_report_links_to_it_from_its_search_box():
@@ -138,7 +142,7 @@ _DOM = r"""
 const fs=require('fs'),path=require('path'),vm=require('vm');
 const ROOT=process.env.SC_ROOT;
 const EL={};
-function el(id){return EL[id]||(EL[id]={id:id,value:'',innerHTML:'',textContent:''});}
+function el(id){return EL[id]||(EL[id]={id:id,value:'',innerHTML:'',textContent:'',style:{}});}
 globalThis.document={getElementById:el,addEventListener:function(){},
  createElement:function(){return {};},
  head:{appendChild:function(sc){
@@ -265,6 +269,83 @@ def test_inode_change_times_are_matched_unless_left_out(folder):
     assert f"ck-{CK1}" not in run(False)
     assert f"ck-{CK1}" in run(True)
     assert 'id="gctime" checked' in doc and "incl. inode changed" in doc   # on by default
+
+
+def _index_href(folder, setup):
+    """The link the index page's form opens, with its controls set by ``setup`` (JS)."""
+    run = os.path.dirname(folder)
+    app.write_index(run, "Reports")
+    doc = open(os.path.join(run, "index.html"), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + "var OPENED=null;document.body={appendChild:function(a){"
+        "a.click=function(){OPENED=a.href;};a.remove=function(){};}};"
+        f"vm.runInThisContext({json.dumps(script)});{setup}"
+        "var form={q:{value:Q},getAttribute:function(){return 'Reports/search.html';}};"
+        "console.log(JSON.stringify({ret:scSearchForm(form),href:OPENED}));",
+        text=True, encoding="utf-8", capture_output=True, env=dict(os.environ, SC_ROOT=folder,
+                                                                    SC_HASH=""))
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _page(folder, fragment, setup=""):
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + setup + f"vm.runInThisContext({json.dumps(script)});"
+        "console.log(JSON.stringify({summary:el('summary').innerHTML,results:el('results').innerHTML,"
+        "mode:el('gmode').value,from:el('gfrom').value,ctime:el('gctime').checked,q:el('gq').value}));",
+        text=True, encoding="utf-8", capture_output=True,
+        env=dict(os.environ, SC_ROOT=folder, SC_HASH=fragment))
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _timed_message(folder):
+    report_ui.write_rows(os.path.join(folder, "Conversations", "pages", "data", "k1"), [
+        _row("msg-1.0", ["", "2024-03-10 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-10 08:30:00")]}],
+        _row("msg-2.0", ["", "2024-03-11 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-11 08:30:00")]}]])
+
+
+@needs_node
+def test_the_index_page_sends_its_date_window_to_the_search_page(folder):
+    _timed_message(folder)
+    sent = _index_href(folder, "var Q='';el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+                               "el('gto').value='2024-03-10T09:00';el('gctime').checked=false;")
+    assert sent["ret"] is False                                # the form itself does not navigate
+    base, fragment = sent["href"].split("#", 1)
+    assert base == "Reports/search.html"
+    # a window on its own is a search: the page runs it with no words
+    out = _page(folder, "#" + fragment)
+    assert out["mode"] == "range" and out["from"] == "2024-03-10T08:00" and out["ctime"] is False
+    assert "between 2024-03-10 08:00:00 and 2024-03-10 09:00:00" in out["summary"]
+    assert "msg-1.0" in out["results"] and "msg-2.0" not in out["results"]
+    # within ± N of a moment, with the words
+    sent = _index_href(folder, "var Q='hello';el('gmode').value='near';el('gn').value='2';"
+                               "el('gunit').value='h';el('gat').value='2024-03-11T09:00';"
+                               "el('gctime').checked=true;")
+    out = _page(folder, "#" + sent["href"].split("#", 1)[1])
+    assert out["q"] == "hello" and out["ctime"] is True
+    assert "msg-2.0" in out["results"] and "msg-1.0" not in out["results"]
+
+
+@needs_node
+def test_the_index_page_with_nothing_set_opens_the_page_and_any_time_clears_a_window(folder):
+    _timed_message(folder)
+    assert _index_href(folder, "var Q='';")["href"] == "Reports/search.html"
+    words = _index_href(folder, "var Q='hello';")["href"]
+    assert "#q=hello&mode=" in words
+    # the search tab still holds a window from earlier: the index's «any time» takes it off …
+    earlier = ("el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+               "el('gto').value='2024-03-10T09:00';")
+    out = _page(folder, "#" + words.split("#", 1)[1], setup=earlier)
+    assert out["mode"] == "" and "msg-1.0" in out["results"] and "msg-2.0" in out["results"]
+    # … while a report's All reports link, which carries the words only, leaves it as it is
+    out = _page(folder, "#q=hello", setup=earlier)
+    assert out["mode"] == "range" and "msg-1.0" in out["results"] and "msg-2.0" not in out["results"]
 
 
 def test_a_memorys_inode_change_time_is_kept_apart():

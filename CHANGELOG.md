@@ -21,6 +21,11 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   See [docs/claim_link_survey.md](docs/claim_link_survey.md).
 - **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
   Conversations reports.
+- **Search by date from the run's index page** — `global_search.index_form`. The index's search box
+  now carries the same date/time window as `search.html` (between two moments, or within ± N of one,
+  and *incl. inode changed*), alone or with the words; it was only on the search page itself. The
+  window travels in the fragment (`#q=…&mode=…`) and the search page sets its controls from it. The
+  index page also links the reports' emoji font, as every other page does.
 - **The survey says whether the message an untied key names is still in arroyo.db**
   (`untied_named_message`) — those it is not are what a recovery of deleted records could bring back.
 - **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):

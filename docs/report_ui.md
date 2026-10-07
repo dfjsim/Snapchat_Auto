@@ -130,9 +130,16 @@ while a window is set: the link carries the words only, and would open more than
 
 Every report's search box has an *🔎 All reports* link beside it (`report_ui.search_all_link`): a plain
 `<a target="scauto_search">` whose `#q=` fragment `scSearchAll` (in `NAV_JS`) fills from the box at the
-moment of the click, so Ctrl-click and the named tab behave as for every other link. The run's
-`index.html` has the same search as a form, which also works with script off (`?q=`). The page consumes
+moment of the click, so Ctrl-click and the named tab behave as for every other link. The page consumes
 its `#q=` fragment as `NAV_JS` does, so the same link clicked twice still searches.
+
+The run's `index.html` has the same search as a form (`global_search.index_form`) — the words **and**
+the date/time window, so searching by date does not depend on finding it on the search page. The form
+sends both in the fragment, `#q=<words>&mode=range&from=…&to=…&ctime=1` (or `mode=near&n=…&unit=…&at=…`),
+and the page sets its own controls from it before it searches. The index always sends its whole window,
+*any time* included (`mode=`), so a window left on a reused search tab is taken off when the index says
+none; a report's *All reports* link carries the words only and leaves the page's window as it is. With
+script off the form is a plain GET and the words still arrive (`?q=`).
 
 ## Cross-report navigation (`NAV_JS`)
 

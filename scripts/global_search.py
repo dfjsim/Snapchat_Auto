@@ -19,7 +19,8 @@ Messages are searched too: each conversation's page keeps its message rows in
 (``report_ui.ts_keys``, in the row's ``ts`` metadata — a conversation's ``ct``/``mt``), and the page
 offers the reports' own date/time window (``report_ui.time_filter``): between two moments, or within
 ± N of one. With words as well, a row must match both. A row with no readable time is not presented
-as falling inside a window, exactly as in the reports.
+as falling inside a window, exactly as in the reports. The run's ``index.html`` carries the same
+window beside its search box (:func:`index_form`) and sends it in the fragment with the words.
 
 Not searched: the legacy single-page reports, which keep no row data; and anything a row shows only
 when expanded, unless its report put it in the row's search text — exactly as in the reports.
@@ -97,6 +98,27 @@ def sources(report_dir, platform="ios"):
                             "cells": list(MESSAGE_CELLS), "pages": pages, "times": ["ts"]})
     return out
 
+
+#: The run's index page: its form sends the words and the date/time window to this page in the
+#: fragment, so an open search tab is reused rather than reloaded (``SCS_fromUrl`` reads it back).
+INDEX_JS = r"""
+function scFv(id){var e=document.getElementById(id);return e?e.value:'';}
+function flt(){}                          /* the window is read when the form is sent, not as it is set */
+/* The window as the controls `p` hold it: every control that decides it, so the search page arrives at
+   the window set here — "any time" included, which takes off a window left on a reused search tab. */
+function scWinParams(p){
+ var mode=scFv(p+'mode'),out='&mode='+encodeURIComponent(mode),
+     keys=mode==='range'?['from','to']:(mode==='near'?['n','unit','at']:[]);
+ for(var i=0;i<keys.length;i++)out+='&'+keys[i]+'='+encodeURIComponent(scFv(p+keys[i]));
+ var c=document.getElementById(p+'ctime');
+ if(c)out+='&ctime='+(c.checked?'1':'0');
+ return out;}
+function scSearchForm(f){
+ var q=f.q.value.trim(),a=document.createElement('a');
+ a.target='scauto_search';
+ a.href=f.getAttribute('action')+((q||scTimeWin('g'))?'#q='+encodeURIComponent(q)+scWinParams('g'):'');
+ document.body.appendChild(a);a.click();a.remove();return false;}
+"""
 
 #: The search itself, apart from the page so it can be run on its own (tests/test_global_search.py).
 #: ``terms`` and ``hits`` are the reports' own rule (report_ui.VTABLE_JS ``terms``/``hit``).
@@ -309,18 +331,44 @@ function SCS_typed(){
  var v=document.getElementById('gq').value.trim();
  if(v.length===1&&!scTimeWin('g'))return;             /* one character matches nearly every row */
  SCS_t=setTimeout(function(){SCS_run(v);},350);}
-/* "#q=<search>" from a report's All reports link, "?q=" from the index page without script. The
-   fragment is consumed, as report_ui.NAV_JS does, so the same link clicked again still arrives. */
+/* The search a link brings: "#q=<search>" from a report's All reports link; "#q=<search>&mode=…" from
+   the index page, with its date/time window (INDEX_JS scWinParams); "?q=" from the index page without
+   script. The fragment is consumed, as report_ui.NAV_JS does, so the same link clicked again still
+   arrives. */
+function SCS_params(s){
+ var o=Object.create(null);
+ String(s||'').split('&').forEach(function(kv){
+  var i=kv.indexOf('=');
+  if(i>0)try{o[kv.slice(0,i)]=decodeURIComponent(kv.slice(i+1));}catch(e){}});
+ return o;}
+/* The window a link names, which replaces this page's; a link that names none (a report's All reports
+   link carries the words only) leaves the window set here as it is. */
+function SCS_setWin(o){
+ if(!('mode' in o))return;
+ scTimeReset('g');
+ if(o.mode==='range'||o.mode==='near'){
+  document.getElementById('gmode').value=o.mode;
+  ['from','to','n','unit','at'].forEach(function(k){
+   var e=document.getElementById('g'+k);if(e&&(k in o))e.value=o[k];});}
+ var c=document.getElementById('gctime');if(c&&('ctime' in o))c.checked=o.ctime!=='0';
+ scTimeMode('g',true);}
 function SCS_fromUrl(){
- var h=location.hash,q=null;
- if(h&&h.slice(0,3)==='#q='){q=decodeURIComponent(h.slice(3));try{location.hash='_';}catch(e){}}
+ var h=location.hash,o=null;
+ if(h&&h.slice(0,3)==='#q='){o=SCS_params(h.slice(1));try{location.hash='_';}catch(e){}}
  else if(!SCS_res){var m=/[?&]q=([^&]*)/.exec(location.search);
-  if(m)q=decodeURIComponent(m[1].replace(/\+/g,' '));}
- if(q===null)return;
- document.getElementById('gq').value=q;
- SCS_run(q);}
+  if(m)o={q:decodeURIComponent(m[1].replace(/\+/g,' '))};}
+ if(o===null)return;
+ SCS_setWin(o);
+ document.getElementById('gq').value=o.q||'';
+ SCS_run(o.q||'');}
 window.addEventListener('hashchange',SCS_fromUrl);
 SCS_fromUrl();
+"""
+
+#: The date/time row under a search box, here and on the index page.
+_TIME_ROW_CSS = """
+ .gtime{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:13px;color:#555}
+ .gtime select,.gtime input{font-size:13px;padding:4px 6px;border:1px solid #bcbcd0;border-radius:5px}
 """
 
 _CSS = """
@@ -360,9 +408,7 @@ _CSS = """
  .miss{font-size:12px;color:#7a1f1f;margin:0 0 6px}
  .nomatch{font-size:12.5px;color:#777;margin:4px 2px 12px}
  .notsearched{font-size:12px;color:#777;margin-top:18px}
- .gtime{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;font-size:13px;color:#555}
- .gtime select,.gtime input{font-size:13px;padding:4px 6px;border:1px solid #bcbcd0;border-radius:5px}
-"""
+""" + _TIME_ROW_CSS
 
 
 DATE_HINT = (
@@ -372,6 +418,37 @@ DATE_HINT = (
     "file's claims, last read and the device's own record of when it was created, modified and read, and "
     "what a media file says about itself where it states its zone, and the device's inode-change "
     "times while «incl. inode changed» is ticked (the default).")
+
+
+#: The index page's search form.
+INDEX_CSS = report_ui.HINT_CSS + report_ui.TIME_CSS + _TIME_ROW_CSS + """
+ form.gsearch{padding:18px 26px 0;max-width:920px}
+ form.gsearch .gsrow{display:flex;gap:8px}
+ form.gsearch .gsrow input{flex:1;font-size:14px;padding:8px 11px;border:1px solid #bcbcd0;border-radius:6px}
+ form.gsearch button{font-size:14px;padding:8px 14px;border:1px solid #2d2d71;border-radius:6px;
+   background:#2d2d71;color:#fff;font-weight:600;cursor:pointer;white-space:nowrap}
+ form.gsearch .ghow{font-size:12px;color:#666;margin-top:6px;line-height:1.5}
+ form.gsearch .ghow code{font-family:ui-monospace,Consolas,monospace;background:#e9e9f2;padding:0 4px;
+   border-radius:3px}
+"""
+
+
+def index_form(href):
+    """The search form of the run's ``index.html``: the words and the same date/time window as the
+    page at ``href``, sent there in the fragment (``INDEX_JS``). Underneath it is a plain GET form, so
+    with script off the words still arrive (``?q=``); the window needs script on both pages anyway."""
+    return (
+        f'<form class="gsearch" action="{html.escape(href)}" method="get" target="scauto_search" '
+        'onsubmit="return scSearchForm(this)">'
+        '<div class="gsrow"><input type="search" name="q" placeholder="Search every report at once '
+        '&mdash; CACHE_KEY, snap id, hash, file name, URL, user id, message text&hellip;">'
+        '<button type="submit">&#128270; Search all reports</button></div>'
+        f'<div class="gtime">{report_ui.time_filter("g", label="Date / time", noun="row", hint=DATE_HINT, ctime=True)}'
+        '</div>'
+        '<div class="ghow">Words find the rows that hold them, in every report and every conversation '
+        '(<code>a|b</code> for either); a <i>date / time</i> window finds the rows by when &mdash; on '
+        'its own, or with the words (a row must then match both).</div></form>'
+        f'<script>{report_ui.HINT_JS}{report_ui.TIME_JS}{INDEX_JS}</script>')
 
 
 def page_html(srcs, *, closure=None, prov=None, not_searched=()):

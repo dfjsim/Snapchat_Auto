@@ -24,6 +24,7 @@ from scripts import selection_file
 from scripts import source_fingerprint
 from scripts import partial_report
 from scripts import global_search
+from scripts import report_ui
 from scripts import cloud_refresh
 from scripts import hidpi
 from scripts import progress
@@ -462,20 +463,8 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
     # so it always lists the reports the folder holds.
     search = global_search.write_page(os.path.join(root_dir, reports_subdir), closure=closure,
                                       prov=prov, platform=platform)
-    search_form = ""
-    if search:
-        href = f"{reports_subdir}/{global_search.PAGE}"
-        # A plain GET form, so the page works without script too (search.html reads ?q=); with script
-        # the search goes in the fragment, which reuses an open search tab instead of reloading it.
-        search_form = (
-            f'<form class="gsearch" action="{href}" method="get" target="scauto_search" '
-            f'onsubmit="return scSearchForm(this)">'
-            f'<input type="search" name="q" placeholder="Search every report at once &mdash; '
-            f'CACHE_KEY, snap id, hash, file name, URL, user id, message text&hellip;">'
-            f'<button type="submit">&#128270; Search all reports</button></form>'
-            f'<script>function scSearchForm(f){{var q=f.q.value.trim(),a=document.createElement("a");'
-            f'a.target="scauto_search";a.href=f.getAttribute("action")+(q?"#q="+encodeURIComponent(q):"");'
-            f'document.body.appendChild(a);a.click();a.remove();return false;}}</script>')
+    # The words and the date/time window, sent to the search page in its fragment.
+    search_form = global_search.index_form(f"{reports_subdir}/{global_search.PAGE}") if search else ""
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # What the run read, and its hashes, on the face of the report rather than only in sources.json —
     # a partial report built later re-checks them and says whether they still match.
@@ -569,18 +558,16 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
     provenance = (partial_report.provenance_html(closure, prov, open_by_default=True)
                   if closure is not None else "")
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto v{get_version()} report</title>
-<style>
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
+{report_ui.emoji_font_link(reports_subdir + "/")}<style>
+ body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif,{report_ui.EMOJI_FONT_STACK};background:#f4f4f8;
+   color:#1b1b1f;margin:0}}
  header{{background:#2d2d71;color:#fff;padding:18px 26px}} header h1{{margin:0;font-size:20px}}
  header .sub{{opacity:.85;font-size:13px;margin-top:4px}}
  ul{{list-style:none;padding:18px 26px 8px;max-width:920px;margin:0}}
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin-bottom:10px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
- form.gsearch{{display:flex;gap:8px;padding:18px 26px 0;max-width:920px}}
- form.gsearch input{{flex:1;font-size:14px;padding:8px 11px;border:1px solid #bcbcd0;border-radius:6px}}
- form.gsearch button{{font-size:14px;padding:8px 14px;border:1px solid #2d2d71;border-radius:6px;
-   background:#2d2d71;color:#fff;font-weight:600;cursor:pointer;white-space:nowrap}}
+{global_search.INDEX_CSS if search else ""}
  /* The sources block sits BELOW the report links and starts closed. It is provenance, not
     navigation: spelled out it ran to a screen and a half of hashes and pushed the links -- the
     reason anyone opens this page -- out of sight. */
