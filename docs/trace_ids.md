@@ -9,7 +9,8 @@ The reports link artifacts through identifiers they know to look for. When two a
 together and no report connects them, the open question is whether the device recorded the connection
 somewhere nobody reads yet. `--trace-ids` answers it directly: it searches every file of a run's
 `ExtractedData/` for each identifier and lists every place it occurs. Implemented by
-`scripts/trace_ids.py`.
+`scripts/trace_ids.py`. To ask the same of every cache claim at once — which cached files a
+chat message holds an id of — see [`--survey-claim-links`](claim_link_survey.md).
 
 It is meant to be run on the machine that holds the case. The output names **locations only** — file,
 offset, table, column, row number, the encoding and the kind of cell — and never a cell value or file

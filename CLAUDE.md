@@ -128,6 +128,11 @@ snap is held in; carved versions kept only when a claim corroborates them) —
   each id occurs in a run's `ExtractedData/` (text/UTF-16/hex/raw/LE-UUID/base64; databases row by row in
   both readings; superseded `-wal` frames). Reports locations only, never content — it is how a finding
   on case data is checked without the data leaving the case machine. See [trace_ids.md](docs/trace_ids.md).
+- Claim link survey: `Snapchat_Auto.py --survey-claim-links <run folder>` (`scripts/claim_link_survey.py`) —
+  every `cache_controller.db` claim's link status and where in `arroyo.db` the ids of its key occur
+  (table, column, protobuf field, content_type, rows per id), grouped by key shape. Shapes and counts
+  only; it is how a missing chat link rule is found on case data. See
+  [claim_link_survey.md](docs/claim_link_survey.md).
 - Retrieval from Snapchat's servers (1.9): `scripts/cloud_download.py` (the engine: authority gate,
   host policy, pacing, the hash-chained `CloudDownloads/cloud_manifest.jsonl`), `scripts/cloud_memories.py`
   (candidates, scopes, date rules, `cloud_files` kept apart from `media_files`, the byte-identity proof

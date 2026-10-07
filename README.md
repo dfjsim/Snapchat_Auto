@@ -84,6 +84,12 @@ key…) as text, UTF-16, hex, raw bytes and base64, databases row by row with an
 `-wal`. It lists **where** each occurs — never the content — so the result can be discussed without
 the data. See [docs/trace_ids.md](docs/trace_ids.md).
 
+`--survey-claim-links <run folder>` asks it of every cached file at once: for each
+`cache_controller.db` claim, whether the reports tie it to a chat message, and where in `arroyo.db`
+the ids its key carries occur — grouped by the key's shape, with field paths and counts and no id or
+value. It is how a missing link rule is found on a case. See
+[docs/claim_link_survey.md](docs/claim_link_survey.md).
+
 Retrieving Memories media from Snapchat's servers (off unless asked — see *Scope* above) is a run option,
 `--cloud missing,incomplete --attest yes --authority "<what authorises it>"`, or a later step on an
 existing run folder, `--cloud-download <run folder> …`, which refreshes the reports without unzipping

@@ -9,8 +9,23 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 ## [Unreleased]
 
 ### Added
+- **`--survey-claim-links <run folder>`** — `scripts/claim_link_survey.py`. For every
+  `cache_controller.db` claim: whether the reports tie it to a chat message (by the attached file, by
+  the message its key names), and where in `arroyo.db` the ids its key carries occur — table, column,
+  protobuf field, content_type, reading, how many rows hold each id — grouped by the key's shape
+  (`customSticker~<b64:13>`). Shapes, counts and field paths only, in the log and
+  `claim_link_survey_<stamp>.json`. It finds, in one run on a case, the claim kinds a link rule is
+  missing for. A second section does the same for every file under `Library/Caches` whose path carries
+  a UUID (`filtered-<UUID>.mp4` …), looked up in every database of the extraction.
+  `protobuf_wire.values_with_paths` lists every value of a message with its field path.
+  See [docs/claim_link_survey.md](docs/claim_link_survey.md).
 - **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
   Conversations reports.
+- **The survey says whether the message an untied key names is still in arroyo.db**
+  (`untied_named_message`) — those it is not are what a recovery of deleted records could bring back.
+- **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
+  a Story, a preference or a Memory can hold the id a claim carries. A hit in a message the server never
+  numbered says so, and an owner username in a key's `<USERNAME>~` position is masked out of the shapes.
 
 ### Fixed
 - **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`

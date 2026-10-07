@@ -857,6 +857,31 @@ def run_trace_ids(args):
     return trace_ids.EXIT_FOUND if payload["hits"] else trace_ids.EXIT_NONE
 
 
+def run_survey_claim_links(args):
+    """`--survey-claim-links <run folder>`: for every cache claim, whether the reports tie it to a
+    chat message, and where in arroyo.db the ids its key carries occur — grouped by key shape. Run
+    on the machine that holds the case: shapes, counts and field paths, never an id or a value.
+    See scripts/claim_link_survey.py."""
+    from scripts import claim_link_survey
+    if len(args) != 2 or not os.path.isdir(args[1]):
+        print("--survey-claim-links requires a run folder:\n"
+              "  Snapchat_Auto.exe --survey-claim-links <run folder>")
+        return claim_link_survey.EXIT_USAGE
+    run_folder = args[1]
+    add_log_file(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — --survey-claim-links over {run_folder}")
+    payload = claim_link_survey.survey(run_folder)
+    for line in claim_link_survey.describe(payload):
+        logger.info(line)
+    if not payload["claims"] or not payload["sources"]["arroyo"]:
+        logger.info("Nothing to survey: the run holds no cache_controller.db claims or no arroyo.db")
+        return claim_link_survey.EXIT_NOTHING
+    out = claim_link_survey.write_report(run_folder, payload)
+    logger.info(f"Written to {out} ({payload['elapsed_s']} s) — key shapes, counts and field paths; "
+                f"no id, key or value.")
+    return claim_link_survey.EXIT_OK
+
+
 def print_usage():
     print(f"Snapchat Auto v{get_version()}\n\n"
           "usage: Snapchat_Auto.exe [options]\n\n"
@@ -997,6 +1022,14 @@ def print_usage():
           "                          column, row, offset - never the content, in the log and in\n"
           "                          trace_ids_<stamp>.json in the run folder. Exit code 0 if\n"
           "                          anything was found, 1 if nothing, 2 for bad arguments.\n"
+          "  --survey-claim-links <run folder>\n"
+          "                          For every cache_controller.db claim: whether the reports tie\n"
+          "                          it to a chat message, and where in arroyo.db the ids its key\n"
+          "                          carries occur (table, column, protobuf field, content_type),\n"
+          "                          grouped by key shape. Shapes, counts and field paths only -\n"
+          "                          no id or value - in the log and claim_link_survey_<stamp>.json\n"
+          "                          in the run folder. Exit code 0 when surveyed, 1 if the run\n"
+          "                          has no claims or no arroyo.db, 2 for bad arguments.\n"
           "  --help, -h              Show this message.\n\n"
           "A headless run never pauses for a keypress, so it is safe to call from a script.")
 
@@ -2038,6 +2071,8 @@ def main(args):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
     if flag in ("trace-ids", "traceids"):
         sys.exit(run_trace_ids(args))
+    if flag in ("survey-claim-links", "surveyclaimlinks"):
+        sys.exit(run_survey_claim_links(args))
     if flag in ("cloud-download", "clouddownload"):
         sys.exit(run_cloud_download(args))
     if flag in ("install-selection", "installselection"):
