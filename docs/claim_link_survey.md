@@ -36,7 +36,8 @@ Run it on a run folder the full pipeline produced: the reports' own links are re
 * **Link status**, computed by the cache_controller report's own `_chat_links_for`, so the two
   cannot disagree: `message: attached file`, `message: named in the key`, `message: id in the key`
   (an id the message names its media by), `Memory-scoped key`, `Memory: its snap id in the key` (a
-  full-media claim whose key carries a Memory's `ZSNAPID`), or `none`.
+  full-media claim whose key carries a Memory's `ZSNAPID` — a Memory of the app folder the reports read
+  that `cache_controller.db` from, an iOS container or an Android app folder), or `none`.
 * **The databases.** Every row of every table of every SQLite database of `ExtractedData/` (at most
   256 MB each — larger ones are listed as skipped), both readings. `arroyo.db` is what a link to a
   message reads; the others say what else holds an id — a Story, a preference, a Memory. For a claim,
@@ -65,9 +66,8 @@ placeholder (`customSticker~<b64:13>`, `content~<n>:<uuid>:<n>:<n>:<n>`):
 * how many of them carry an id `arroyo.db` holds (`found_in_arroyo`) and an id any database holds
   (`found_in_any_database`), by status;
 * for the untied claims whose key names a conversation and a message
-  (`<type>:<conversation>:<message>:<part>`): how many name a message `arroyo.db` still holds, in either
-  reading, and how many one it does not (`untied_named_message`) — the second are the messages only a
-  recovery of deleted records could bring back;
+  (`<type>:<conversation>:<message>:<part>`): what `arroyo.db` holds of what the key names, in either
+  reading, and whose claim it is (`untied_named_message`) — see [below](#a-key-that-names-a-message);
 * for each id position in the shape: every place the same id was found — table, column, protobuf
   field, `content_type` (for `conversation_message`), reading, and how the row holds it (`a whole value,
   as bytes`, `a whole text, as <b64:13>`, `inside a text, as <uuid>`) — with the number of claims;
@@ -120,6 +120,30 @@ the run folder.
 
 Exit code: **0** when the run was surveyed, **1** when it holds no claim or no `arroyo.db`, **2** for
 bad arguments.
+
+### A key that names a message
+
+An untied claim whose key names a conversation and a message gets one label, decided in this order:
+
+| `untied_named_message` | what it means for a link rule |
+|---|---|
+| `names a message arroyo.db holds` | The message is there and nothing ties the file to it: **a rule is missing.** |
+| `names a message not found (arroyo.db not read)` | An `arroyo.db` could not be read in full — it has no `conversation_message` table, or a table its messages, conversations or account are read from will not read, in either reading — so nothing is said to be absent: a damaged table is not one that holds nothing. |
+| `names a message arroyo.db does not hold, in a conversation it holds` | The conversation is there — a message of it, or a `conversation`, `feed_entry` or `user_conversation` row — but not that message. There is no row to tie the file to; a recovery of deleted records is what could bring one back. |
+| `names a conversation arroyo.db does not hold — claimed by arroyo.db's own account` | None of `conversation_message`, `conversation`, `feed_entry` or `user_conversation` holds the conversation, in either reading, and the claim's `USER_ID` is the `required_values` `USERID` of an `arroyo.db`: the account's own chat database holds no message of it and none of those rows. As above, only a recovery of deleted records could give a rule something to tie to. |
+| `names a conversation arroyo.db does not hold — claimed by another account` | The claim's `USER_ID` is the account of no `arroyo.db` in the extraction, and every one of them named its account — a second account on the phone, whose chat database is not in the extraction. **No rule is possible from the extraction's `arroyo.db`.** |
+| `names a conversation arroyo.db does not hold` | The same absence, with no account to compare: the claim has no `USER_ID`, or it is none of the accounts read while an `arroyo.db` named none (no `required_values` `USERID`) — so the claim may be that database's own. |
+
+A message is held by its `server_message_id`, or — one the server never numbered (not sent, or still
+sending) — by its `client_message_id`, so a key naming an unsent message is never called absent. A
+conversation is held when one of those four tables has a row of it; other tables that carry a
+conversation id are not read for this. Letter case is ignored in every id. The survey reads **every**
+`arroyo.db` of `ExtractedData/`, and "does not hold" means none of them does; a run reads one, so on a
+phone with more than one account a message the survey finds held may be in an `arroyo.db` the run's
+reports were not built from.
+
+The status of such a claim stays `none` whatever its label: the label says why nothing ties it, it does
+not tie it.
 
 ## Then
 

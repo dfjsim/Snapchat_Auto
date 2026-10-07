@@ -20,7 +20,11 @@ claims the reports already tie to a message (by the file the chat join attached,
 the key names), the Memory-scoped keys, and those nothing ties; and for each id position in the
 shape, where in ``arroyo.db`` the same id was found — table, column, protobuf field, content_type,
 reading — and in how many rows each id occurs. An id found in one message, or a few, is what a link rule is
-written from; one found in every message of a conversation (the conversation's own id) is not.
+written from; one found in every message of a conversation (the conversation's own id) is not. An
+untied key that names a conversation and a message is checked against every ``arroyo.db``: does one
+hold the message, does one hold the conversation, and was the claim made by the account one of them
+belongs to — which says whether a rule is missing, or whether no rule written from these databases
+could tie it.
 
 It writes ``claim_link_survey_<stamp>.json`` into the run folder and a summary into the log: shapes,
 counts and field paths — never an id, a key or a cell value. A word of letters only is kept in a
@@ -34,6 +38,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import time
 import urllib.parse
 import uuid
@@ -236,11 +241,16 @@ ROUTE_STATUS = {"file": "message: attached file", "key": "message: named in the 
                 "content": "message: id in the key"}
 
 
-def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None):
+def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None, *, filter_urls=None,
+                 items=None):
     """How the reports tie a claim to a message — computed by the cache_controller report's own
     ``_chat_links_for``, so the survey and the report cannot disagree — or that its key is a
     Memory's (a Memory-scoped shape, or a full-media key carrying a Memory's ZSNAPID, the two links
-    a key alone makes), or ``none``."""
+    a key alone makes), or ``none``.
+
+    ``filter_urls`` and ``items`` are accepted and not read yet: they are where the asset URLs a
+    Memory's filter record lists and the creative-tools items will come in, each by the report's own
+    rule, without another change to every caller."""
     from scripts.cache_controller_report import _chat_links_for, _UUID_RE
     from scripts.memories_media_report import classify_snap_claim
     ek, ck = str(claim.get("EXTERNAL_KEY") or ""), str(claim.get("CACHE_KEY") or "")
@@ -255,14 +265,41 @@ def _link_status(claim, by_key, by_message, chat_ids=None, snap_ids=None):
     return "none"
 
 
-def _snap_ids(controllers):
-    """Every Memory's ZSNAPID, from the app container each cache_controller.db sits in."""
+def _apps(controllers):
+    """The app folder of each cache_controller.db, once each, in the order of ``controllers``.
+
+    The folder is the one the reports read the database from: the nearest folder above it whose
+    own cache_controller.db paths (``find_cache_controllers`` — the iOS container's
+    ``Documents/global_scoped/cachecontroller/``, anywhere in an Android app folder) include it, as
+    ``find_app_container`` names that folder. A database no app folder reads is left out, rather
+    than read against a folder guessed from its depth.
+    """
+    from scripts.cache_controller_report import find_app_container, find_cache_controllers
+    out = []
+    for path in controllers:
+        target = os.path.normcase(os.path.abspath(path))
+        folder, app = os.path.dirname(os.path.abspath(path)), None
+        while True:
+            if any(os.path.normcase(os.path.abspath(p)) == target
+                   for p in find_cache_controllers(folder)):
+                app = find_app_container(folder)
+                break
+            parent = os.path.dirname(folder)
+            if parent == folder:                                   # the top: no app folder reads it
+                break
+            folder = parent
+        if app is None:
+            logger.debug(f"--survey-claim-links: no app folder reads {path}")
+        elif app not in out:
+            out.append(app)
+    return out
+
+
+def _snap_ids(apps):
+    """Every Memory's ZSNAPID, from each app folder (:func:`_apps`)."""
     from scripts.cache_controller_report import load_memory_index
     out = {}
-    for path in controllers:
-        app = path
-        for _up in range(4):                    # …/Documents/global_scoped/cachecontroller/<db>
-            app = os.path.dirname(app)
+    for app in apps:
         try:
             out.update(load_memory_index(app).get("snap_ids") or {})
         except Exception as error:                                 # noqa: BLE001 - optional
@@ -270,26 +307,134 @@ def _snap_ids(controllers):
     return out
 
 
-def _messages_held(arroyos):
-    """``(held, unread)``: ``{(conversation id, message number)}`` of every message of the
-    ``arroyo.db`` files, in either reading, and the files whose messages could not be read."""
-    held, unread = set(), []
-    for path in arroyos:
-        try:
-            frame, _info = sqlite_open.read_sql(
-                path, "SELECT client_conversation_id, server_message_id FROM conversation_message")
-        except Exception as error:                                 # noqa: BLE001
-            logger.debug(f"--survey-claim-links: messages of {path} not read ({error})")
-            frame = None
-        # read_sql's own failure path returns a frame without columns; an empty table has them
-        if frame is None or not {"client_conversation_id", "server_message_id"} <= set(frame.columns):
-            unread.append(path)
+#: The tables whose ``client_conversation_id`` says that arroyo.db holds a conversation. Each is
+#: optional: the schema moves between app versions (``user_conversation`` is gone from the newest).
+CONVERSATION_TABLES = ("conversation_message", "conversation", "feed_entry", "user_conversation")
+
+
+def _columns(conn, table):
+    """The columns of ``table`` in one reading; none when that reading has no such table. A schema
+    that will not read raises: ``PRAGMA table_info`` answers a missing table with no rows, not an
+    error, so the two are never confused."""
+    return {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+
+
+def _rows(views, table, needed, optional=(), distinct=False):
+    """The rows of ``table``'s ``needed`` and ``optional`` columns (``NULL`` for an optional one a
+    reading lacks), in both readings, each row once — or ``None`` when no reading has the table and
+    its ``needed`` columns.
+
+    The merge is :func:`sqlite_open.query_both`'s, on the whole row; the difference is that nothing
+    is swallowed. A reading that has the columns and will not read them raises, so a table with a
+    damaged page is never taken for an empty one. A reading without them adds no rows: a table or
+    column created since the last checkpoint is not in the checkpointed reading, and one dropped
+    since is not in the other.
+    """
+    readings = [views.merged]
+    if views.main_only is not None and views.main_only is not views.merged:
+        readings.append(views.main_only)
+    rows, seen, found = [], set(), False
+    for conn in readings:
+        columns = _columns(conn, table)
+        if not set(needed) <= columns:
             continue
-        for conv, smid in zip(frame["client_conversation_id"], frame["server_message_id"]):
-            number = arroyo_content.message_number(smid)
-            if isinstance(conv, str) and number:
-                held.add((conv.lower(), number))
-    return held, unread
+        found = True
+        picked = ", ".join(f'"{c}"' if c in columns else "NULL" for c in (*needed, *optional))
+        query = f'SELECT {"DISTINCT " if distinct else ""}{picked} FROM "{table}"'
+        for row in conn.execute(query).fetchall():
+            ident = tuple(sqlite_open._hashable(v) for v in row)
+            if ident not in seen:
+                seen.add(ident)
+                rows.append(row)
+    return rows if found else None
+
+
+def _arroyo_facts(arroyos):
+    """``(held, convs, accounts, unread, nameless)`` from every ``arroyo.db``, each fact in either
+    reading.
+
+    * ``held``: ``{(conversation id, message number)}`` of every message — by its server message
+      id, or by its ``client_message_id`` when the server never numbered it (not sent, or still
+      sending), so a key naming such a message is never taken for one the database lacks;
+    * ``convs``: every conversation id with a row in any of :data:`CONVERSATION_TABLES`;
+    * ``accounts``: each database's own account, its ``required_values`` ``USERID``;
+    * ``unread``: the files that could not be read — one with no ``conversation_message``, or with a
+      table of these facts that will not read in either reading. A table that is missing or will
+      not read is not one that holds nothing, and each fact is what an absence is said from;
+    * ``nameless``: the files read in full that name no account (no ``required_values`` ``USERID``),
+      so a claim may be the account of one of them without being in ``accounts``.
+
+    Ids are lower-cased.
+    """
+    held, convs, accounts, unread, nameless = set(), set(), set(), [], []
+    for path in arroyos:
+        views = None
+        try:
+            views = sqlite_open.open_views(path)
+            if views.merged is None:
+                raise sqlite3.DatabaseError("not a database that opens")
+            rows = _rows(views, "conversation_message",
+                         ("client_conversation_id", "server_message_id"), ("client_message_id",))
+            if rows is None:
+                unread.append(path)
+                continue
+            for conv, smid, cmid in rows:
+                # numbered as the reports find a message (arroyo_content.message_key)
+                number = arroyo_content.message_number(smid) or arroyo_content.message_number(cmid)
+                if isinstance(conv, str) and number:
+                    held.add((conv.lower(), number))
+            for table in CONVERSATION_TABLES:
+                rows = _rows(views, table, ("client_conversation_id",), distinct=True) or []
+                convs.update(conv.lower() for (conv,) in rows if isinstance(conv, str) and conv)
+            own = {str(value).strip().lower()
+                   for key, value in _rows(views, "required_values", ("key", "value")) or []
+                   if str(key).upper() == "USERID" and str(value or "").strip()}
+            accounts.update(own)
+            if not own:
+                nameless.append(path)
+        except Exception as error:                                 # noqa: BLE001 - one database
+            logger.debug(f"--survey-claim-links: {path} not read ({error})")
+            if path not in unread:
+                unread.append(path)
+        finally:
+            if views is not None:
+                views.close()
+    return held, convs, accounts, unread, nameless
+
+
+#: What arroyo.db says about the message an untied key names (see :func:`_named_label`).
+NAMED_HELD = "names a message arroyo.db holds"
+NAMED_IN_CONVERSATION = "names a message arroyo.db does not hold, in a conversation it holds"
+NAMED_NO_CONVERSATION = "names a conversation arroyo.db does not hold"
+NAMED_OWN_ACCOUNT = NAMED_NO_CONVERSATION + " — claimed by arroyo.db's own account"
+NAMED_OTHER_ACCOUNT = NAMED_NO_CONVERSATION + " — claimed by another account"
+NAMED_NOT_READ = "names a message not found (arroyo.db not read)"
+
+
+def _named_label(conv, number, user, held, convs, accounts, read=True, *, every_account=True):
+    """What ``arroyo.db`` holds of the message an untied key names: conversation ``conv``, message
+    ``number``, claimed by account ``user`` — against the ``held``, ``convs`` and ``accounts`` of
+    :func:`_arroyo_facts`. ``read`` is false unless every arroyo.db was read in full;
+    ``every_account`` is false when one of them named no account (its ``nameless``).
+
+    The message first, then its conversation, then whose claim it is — the order of the table in
+    docs/claim_link_survey.md. A conversation no arroyo.db holds, claimed by an account none of them
+    belongs to, every one's account read, is one only that account's own chat database could tie:
+    no rule written from these can. A claim of one of their accounts is that account's whatever the
+    others name; one of no account read is another account's only when no arroyo.db's is unknown.
+    """
+    conv, user = conv.lower(), (user or "").strip().lower()
+    if (conv, number) in held:
+        return NAMED_HELD
+    if not read:
+        return NAMED_NOT_READ
+    if conv in convs:
+        return NAMED_IN_CONVERSATION
+    if user and user in accounts:
+        return NAMED_OWN_ACCOUNT
+    if user and accounts and every_account:
+        return NAMED_OTHER_ACCOUNT
+    return NAMED_NO_CONVERSATION
 
 
 def _named_files(root, name):
@@ -519,7 +664,7 @@ def survey(run_folder, progress=None):
     from scripts.cache_controller_report import load_chat_ids, load_chat_links
     by_key, by_message = load_chat_links(report_dir)
     chat_ids = load_chat_ids(report_dir, by_message)
-    snap_ids = _snap_ids(controllers)
+    snap_ids = _snap_ids(_apps(controllers))
     manifest = next((os.path.join(report_dir, r, "cache_links.json")
                      for r in ("Conversations", "Communications_legacy", "Communications")
                      if os.path.isfile(os.path.join(report_dir, r, "cache_links.json"))), None)
@@ -538,24 +683,31 @@ def survey(run_folder, progress=None):
             shape, idents = read_key(row.get("EXTERNAL_KEY"))
             claims.append({"context": row.get("MEDIA_CONTEXT_TYPE"), "shape": shape,
                            "idents": idents, "_key": str(row.get("EXTERNAL_KEY") or ""),
+                           "_user": str(row.get("USER_ID") or ""),
                            "status": _link_status(row, by_key, by_message, chat_ids, snap_ids)})
     progress(f"--survey-claim-links: {len(claims)} claim(s) in {len(controllers)} "
              f"cache_controller.db, chat links from {manifest or 'no Conversations report'}")
 
-    # A key naming a conversation and a message that no report ties: is the message still there?
+    # A key naming a conversation and a message that no report ties: does arroyo.db hold the
+    # message, or its conversation, and whose claim is it? Every arroyo.db of the extraction is read
+    # (a run reads one), so "does not hold" means none of them does.
     from scripts.cache_controller_report import _CHAT_EK_RE
-    held, unread = _messages_held(arroyos)
+    held, convs, accounts, unread, nameless = _arroyo_facts(arroyos)
     if unread:
-        progress(f"--survey-claim-links: the messages of {len(unread)} of {len(arroyos)} arroyo.db "
-                 f"could not be read - a message a key names is not checked against them")
+        progress(f"--survey-claim-links: {len(unread)} of {len(arroyos)} arroyo.db could not be read "
+                 f"in full (its messages, conversations or account) - nothing a key names is said "
+                 f"to be absent")
+    if nameless:
+        progress(f"--survey-claim-links: {len(nameless)} of {len(arroyos)} arroyo.db name no account "
+                 f"(no required_values USERID) - no claim is said to be another account's")
     # "does not hold" only when every arroyo.db was read; otherwise all that is known is "not found"
-    absent = ("names a message arroyo.db does not hold" if arroyos and not unread
-              else "names a message not found (arroyo.db not read)")
+    read = bool(arroyos) and not unread
     for claim in claims:
         mo = _CHAT_EK_RE.match(claim.pop("_key", ""))
+        user = claim.pop("_user", "")
         if mo and claim["status"] == "none":
-            claim["named"] = ("names a message arroyo.db holds"
-                              if (mo.group("conv").lower(), mo.group("msg")) in held else absent)
+            claim["named"] = _named_label(mo.group("conv"), mo.group("msg"), user, held, convs,
+                                          accounts, read, every_account=not nameless)
     # 2. Library/Caches files whose path carries a UUID
     files = [{"shape": file_shape(rel),
               "idents": [i for i in read_key(rel)[1] if i.label == "<uuid>"]}

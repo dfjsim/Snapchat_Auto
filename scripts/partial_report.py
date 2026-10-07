@@ -198,7 +198,7 @@ def parse_relations(spec):
 
     A bare list turns the named relations on and everything else off; a leading ``-`` on any token
     switches to "the recommended set, minus these", which is what an examiner reaches for far more
-    often than naming all eleven.
+    often than naming every relation.
 
     :data:`POLICY_TOKENS` may appear in the same list and are skipped here — they are switches, not
     relations, and :func:`parse_policy` reads them from the same spec.

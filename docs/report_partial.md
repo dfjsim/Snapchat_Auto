@@ -264,10 +264,11 @@ is and is not in the folder — are themselves **folded** (`_prov_section`), bec
 `index.html` they push the links to the reports off the first screen, and the links are what the page is
 for. Folding a statement out of sight is only acceptable if the statement's *answer* stays visible, so
 each summary carries it — *"12 of 12 identical to the run this selection was made in"*, *"41 of 848
-row(s), across 6 report(s)"*, *"9 of 11 relation(s) followed — one hop from each selected row"* — and the
-table behind it is the working. What stays unfolded is the identity table plus the one-line statements
-that have no table to hide: the tool-version verdict, the count of cross-references pointing outside the
-extract, any withheld fields, and how the selection resolved.
+row(s), across 6 report(s)"*, *"N of M relation(s) followed — one hop from each selected row"* (M being
+every relation the build has) — and the table behind it is the working. What stays unfolded is the
+identity table plus the one-line statements that have no table to hide: the tool-version verdict, the
+count of cross-references pointing outside the extract, any withheld fields, and how the selection
+resolved.
 
 **`partial_manifest.json`** at the extract root is the machine-readable form, and the file to read when
 the question is *"what was left out"*, which no amount of on-page marking answers in aggregate: the

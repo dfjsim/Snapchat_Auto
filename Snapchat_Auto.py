@@ -1600,6 +1600,22 @@ def _handle_help(event):
     return True
 
 
+def _saved_relations(cfg):
+    """The relation policy the settings window starts with: the saved one, over the recommended set.
+
+    A saved policy names every relation of the build that saved it, and nothing else. A relation a
+    later build adds is absent from it — and the dialog reads an absent box as off, and the run spec
+    (``_relations_spec``) turns off whatever it does not name — so a new relation that is on by
+    default would stay off for every examiner who had ever pressed Ok. Laid over the recommended set,
+    the saved choices win where they were made and the build's defaults stand where none was. A key
+    no relation of this build carries any more is dropped, so a renamed relation cannot make the run
+    refuse its own spec.
+    """
+    saved = cfg.get("partial", {}).get("relations")
+    merged = {**partial_report.PRESETS["recommended"], **(saved if isinstance(saved, dict) else {})}
+    return {key: bool(on) for key, on in merged.items() if key in partial_report.RELATION_KEYS}
+
+
 def _relations_spec(state):
     """The dialog's checkboxes as a ``--relations`` spec, so both front ends speak one vocabulary."""
     tokens = [key for key, on in state["relations"].items() if on]
@@ -1744,8 +1760,8 @@ def _relations_dialog(state):
     for src, relations in by_src.items():
         rows.append([sg.Text(label.get(src, src), font=("", 10, "bold"), pad=((0, 0), (10, 0)))])
         for relation in relations:
-            # The basis is on the "?" rather than under the checkbox: eleven relations with a
-            # paragraph each turned the choice everyone comes here to make into a wall of prose.
+            # The basis is on the "?" rather than under the checkbox: a paragraph under every
+            # relation turned the choice everyone comes here to make into a wall of prose.
             rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
                                      key=f"rel_{relation.key}"),
                          _help(relation.basis, title=relation.label)])
@@ -1850,8 +1866,7 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
     has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
     # The relation policy for a partial run, remembered between runs (the selection file and the case
     # reference are not — see the hints below the fields).
-    relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
-                                        or partial_report.PRESETS["recommended"]),
+    relation_state = {"relations": _saved_relations(cfg),
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
                       # one setting, on the main window (the dialog only states it)
                       "legacy_reports": bool(cfg.get("legacy_reports"))}

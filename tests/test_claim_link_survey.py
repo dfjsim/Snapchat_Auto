@@ -23,6 +23,14 @@ FILE_UUID_NOWHERE = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
 STORY_UUID = "cccccccc-dddd-4eee-8fff-000000000000"      # held by another database, not arroyo.db
 UNSENT_UUID = "dddddddd-eeee-4fff-8000-111111111111"     # in a message the server never numbered
 SECRET = "SENTINEL-CONTENT-MUST-NOT-LEAK"
+ACCT_A = "a0a0a0a0-1111-4222-8333-444444444444"          # arroyo.db's own account (its USERID)
+ACCT_B = "b0b0b0b0-1111-4222-8333-444444444444"          # another account's claims, same cache
+ACCT_C = "c1c1c1c1-1111-4222-8333-444444444444"          # an account no arroyo.db is shown to be
+ROW_CONV = "c0c0c0c0-1111-4222-8333-444444444444"        # held only by a conversation row
+FEED_CONV = "d0d0d0d0-1111-4222-8333-444444444444"       # only by a feed_entry row
+MEMBER_CONV = "e0e0e0e0-1111-4222-8333-444444444444"     # only by user_conversation
+OTHER_CONV = "eeeeeeee-ffff-4000-8111-222222222222"      # held by no table of arroyo.db
+OWN_CONV = "ffffffff-0000-4111-8222-333333333333"        # nor this one
 
 
 def _f(number, value):
@@ -67,12 +75,12 @@ def test_a_key_is_read_into_a_shape_and_its_ids():
 def _run_folder(tmp_path):
     run = tmp_path / "run"
     app_dir = run / "ExtractedData" / "Application" / "APP" / "Documents"
-    (app_dir / "cachecontroller").mkdir(parents=True)
+    (app_dir / "global_scoped" / "cachecontroller").mkdir(parents=True)
     (app_dir / "arroyo").mkdir()
-    conn = sqlite3.connect(str(app_dir / "cachecontroller" / "cache_controller.db"))
+    conn = sqlite3.connect(str(app_dir / "global_scoped" / "cachecontroller" / "cache_controller.db"))
     conn.execute("create table CACHE_FILE_CLAIM (USER_ID text, CACHE_KEY text, "
                  "MEDIA_CONTEXT_TYPE integer, EXTERNAL_KEY text)")
-    conn.executemany("insert into CACHE_FILE_CLAIM values ('u', ?, ?, ?)", [
+    conn.executemany(f"insert into CACHE_FILE_CLAIM values ('{ACCT_A}', ?, ?, ?)", [
         ("k-sticker", 2, "customSticker~" + STICKER_ID),          # nothing ties it; a message holds it
         ("k-lonely", 2, "customSticker~" + LONELY_ID),            # nothing ties it; nowhere else
         ("k-attached", 3, f"1:{CONV}:7:0:0"),                     # the chat join attached the file
@@ -94,6 +102,15 @@ def _run_folder(tmp_path):
         text = f"https://example.invalid/x/{SHARED_UUID}?n={n}".encode()
         rows.append((CONV, n, n, 1, _f(4, _f(4, _f(2, _f(1, text))))))
     conn.executemany("insert into conversation_message values (?, ?, ?, ?, ?)", rows)
+    # whose database it is, and conversations it holds with no message in them
+    conn.execute("create table required_values (key text primary key, value text)")
+    conn.execute("insert into required_values values ('USERID', ?)", (ACCT_A,))
+    conn.execute("create table conversation (client_conversation_id text, creation_timestamp integer)")
+    conn.execute("insert into conversation values (?, 0)", (ROW_CONV,))
+    conn.execute("create table feed_entry (client_conversation_id text, display_timestamp integer)")
+    conn.execute("insert into feed_entry values (?, 0)", (FEED_CONV,))
+    conn.execute("create table user_conversation (client_conversation_id text, user_id text)")
+    conn.execute("insert into user_conversation values (?, ?)", (MEMBER_CONV, ACCT_A))
     conn.commit()
     conn.close()
     conn = sqlite3.connect(str(app_dir / "stories.sqlite"))
@@ -154,7 +171,8 @@ def test_the_survey_says_which_claims_a_message_holds_and_where(tmp_path, caplog
             logging.getLogger("t").info(line)
     written = open(out, encoding="utf-8").read() + caplog.text
     for secret in (SECRET, STICKER_ID, STICKER_ID.rstrip("="), LONELY_ID, CONV, SHARED_UUID,
-                   FILE_UUID_NOWHERE, "example.invalid", "k-sticker"):
+                   FILE_UUID_NOWHERE, "example.invalid", "k-sticker", ACCT_A, ROW_CONV, FEED_CONV,
+                   MEMBER_CONV):
         assert secret not in written, secret
     assert "field 4.4.14.2.6" in caplog.text
 
@@ -203,43 +221,341 @@ def test_rows_per_id_are_counted_per_database():
     assert survey._bucket({"rows": {"arroyo.db": many["arroyo.db"]}}) == "2-5"
 
 
-def test_an_untied_key_says_whether_the_message_it_names_is_still_there(tmp_path):
-    run = _run_folder(tmp_path)
+def _add_claims(tmp_path, claims):
     db = next((tmp_path / "run" / "ExtractedData").rglob("cache_controller.db"))
     conn = sqlite3.connect(str(db))
-    conn.executemany("insert into CACHE_FILE_CLAIM values ('u', ?, 3, ?)", [
-        ("k-held", f"animationmedia~1:{CONV}:9:0:0"),             # arroyo.db holds message 9
-        ("k-gone", f"animationmedia~1:{CONV}:404:0:0"),           # and no message 404
-    ])
+    conn.executemany("insert into CACHE_FILE_CLAIM values (?, ?, 3, ?)", claims)
     conn.commit()
     conn.close()
+
+
+def _arroyo_sql(tmp_path, *statements):
+    conn = sqlite3.connect(str(next((tmp_path / "run" / "ExtractedData").rglob("arroyo.db"))))
+    for statement in statements:
+        sql, params = statement if isinstance(statement, tuple) else (statement, ())
+        conn.execute(sql, params)
+    conn.commit()
+    conn.close()
+
+
+def _named(payload):
+    """``{type word: untied_named_message}`` — each case below gets a type word of its own, so a shape
+    of its own."""
+    return {s["shape"].split("~")[0]: s["untied_named_message"] for s in payload["shapes"]
+            if s.get("untied_named_message")}
+
+
+#: The cases of the ladder: (type word, the claim's account, conversation, message number).
+_LADDER = [
+    ("held", ACCT_A, CONV, 9),             # arroyo.db holds message 9
+    ("unsent", ACCT_A, CONV, 99),          # 99 is the client_message_id of a message never numbered
+    ("gone", ACCT_A, CONV, 404),           # no message 404 in a conversation it holds
+    ("client", ACCT_A, CONV, 3000),        # a client id of a NUMBERED message is not its number
+    ("row", ACCT_A, ROW_CONV, 5),          # a conversation held by a row with no message ...
+    ("feed", ACCT_A, FEED_CONV, 5),
+    ("member", ACCT_A, MEMBER_CONV, 5),
+    ("other", ACCT_B, OTHER_CONV, 5),      # a conversation it does not hold, another account's claim
+    ("own", ACCT_A.upper(), OWN_CONV, 6),  # ... arroyo.db's own account's (in any letter case)
+    ("anon", "", OTHER_CONV, 7),           # ... a claim that names no account
+]
+
+
+def test_an_untied_key_says_what_arroyo_db_holds_of_what_it_names(tmp_path, caplog):
+    run = _run_folder(tmp_path)
+    _arroyo_sql(tmp_path, ("insert into conversation_message values (?, 30, 3000, 1, x'')", (CONV,)))
+    _add_claims(tmp_path, [(user, f"k-{word}", f"{word}~1:{conv}:{n}:0:0")
+                           for word, user, conv, n in _LADDER])
     payload = survey.survey(run, progress=lambda *_: None)
-    [shape] = [s for s in payload["shapes"] if s["shape"].startswith("animationmedia~")]
-    assert shape["untied_named_message"] == {"names a message arroyo.db holds": 1,
-                                             "names a message arroyo.db does not hold": 1}
-    assert any("does not hold" in line for line in survey.describe(payload))
+    in_conversation = "names a message arroyo.db does not hold, in a conversation it holds"
+    assert _named(payload) == {
+        "held": {"names a message arroyo.db holds": 1},
+        "unsent": {"names a message arroyo.db holds": 1},
+        "gone": {in_conversation: 1},
+        "client": {in_conversation: 1},
+        "row": {in_conversation: 1},
+        "feed": {in_conversation: 1},
+        "member": {in_conversation: 1},
+        "other": {"names a conversation arroyo.db does not hold — claimed by another account": 1},
+        "own": {"names a conversation arroyo.db does not hold — claimed by arroyo.db's own "
+                "account": 1},
+        "anon": {"names a conversation arroyo.db does not hold": 1},
+    }
+    # the statuses do not move: a label explains an untied claim, it does not tie it
+    assert {s["shape"].split("~")[0]: s["status"] for s in payload["shapes"]
+            if s["shape"].split("~")[0] in {w for w, *_ in _LADDER}} == {
+        w: {"none": 1} for w, *_ in _LADDER}
+    assert any("claimed by another account" in line for line in survey.describe(payload))
+
+    out = survey.write_report(run, payload)
+    with caplog.at_level(logging.INFO):
+        for line in survey.describe(payload):
+            logging.getLogger("t").info(line)
+    written = open(out, encoding="utf-8").read() + caplog.text
+    for secret in (CONV, ROW_CONV, FEED_CONV, MEMBER_CONV, OTHER_CONV, OWN_CONV, ACCT_A, ACCT_B,
+                   ACCT_A.upper(), "k-other", "k-own"):
+        assert secret not in written, secret
 
 
-def test_an_arroyo_db_that_could_not_be_read_is_not_a_message_that_is_gone(tmp_path, monkeypatch):
-    import pandas as pd
+def test_with_no_account_to_compare_whose_claim_it_is_is_not_said(tmp_path):
+    """No USERID read means no account to compare with: the conversation is still not held, but
+    whose claim it is is not said."""
+    run = _run_folder(tmp_path)
+    _arroyo_sql(tmp_path, "delete from required_values")
+    _add_claims(tmp_path, [(ACCT_B, "k-other", f"other~1:{OTHER_CONV}:5:0:0"),
+                           (ACCT_A, "k-own", f"own~1:{OWN_CONV}:6:0:0")])
+    payload = survey.survey(run, progress=lambda *_: None)
+    assert _named(payload) == {"other": {"names a conversation arroyo.db does not hold": 1},
+                               "own": {"names a conversation arroyo.db does not hold": 1}}
+
+
+def _sql(conn, statements):
+    for statement in statements:
+        sql, params = statement if isinstance(statement, tuple) else (statement, ())
+        conn.execute(sql, params)
+
+
+def _root_pages(conn, tables):
+    size = conn.execute("pragma page_size").fetchone()[0]
+    return size, [conn.execute("select rootpage from sqlite_master where name = ?", (t,)).fetchone()[0]
+                  for t in tables]
+
+
+def _damage(path, table):
+    """Overwrite ``table``'s root page with 0xFF bytes: the schema still reads — a probe of its
+    columns passes — and its rows do not. ``path`` has no -wal."""
+    conn = sqlite3.connect(path)
+    size, [root] = _root_pages(conn, [table])
+    conn.close()
+    with open(path, "r+b") as fh:
+        fh.seek((root - 1) * size)
+        fh.write(b"\xff" * size)
+
+
+def test_an_arroyo_db_that_will_not_read_is_not_one_that_holds_nothing(tmp_path):
+    """Each fact an absence is said from — the messages, the conversations, the account — makes
+    the database unread when its table is missing or its pages will not read, never one that holds
+    nothing."""
     from scripts.data import sqlite_open
-    run = _run_folder(tmp_path)
-    db = next((tmp_path / "run" / "ExtractedData").rglob("cache_controller.db"))
-    conn = sqlite3.connect(str(db))
-    conn.execute("insert into CACHE_FILE_CLAIM values ('u', 'k-x', 3, ?)",
-                 (f"animationmedia~1:{CONV}:404:0:0",))
+    claims = [(ACCT_A, "k-gone", f"gone~1:{CONV}:404:0:0"),
+              (ACCT_B, "k-other", f"other~1:{OTHER_CONV}:5:0:0")]
+    not_read = "names a message not found (arroyo.db not read)"
+    damaged = {"conversation_message": "client_conversation_id", "conversation":
+               "client_conversation_id", "required_values": "value"}
+    for case in (*damaged, "missing"):
+        run = _run_folder(tmp_path / case)
+        _add_claims(tmp_path / case, claims)
+        db = str(next((tmp_path / case / "run" / "ExtractedData").rglob("arroyo.db")))
+        if case == "missing":                  # no conversation_message table at all
+            _arroyo_sql(tmp_path / case, "alter table conversation_message rename to other_table")
+        else:                                  # a damaged page: the columns still read
+            _damage(db, case)
+            assert damaged[case] in sqlite_open.table_columns(db, case)
+        said = []
+        payload = survey.survey(run, progress=said.append)
+        assert _named(payload) == {"gone": {not_read: 1}, "other": {not_read: 1}}, case
+        assert any("could not be read in full" in line for line in said), case
+
+
+def _checkpoint_then_wal(path, before, after, damage=()):
+    """Build ``path`` from the ``before`` statements, checkpointed into the file, and leave the
+    ``after`` statements in its -wal only. The root page of each ``damage`` table is overwritten
+    in the file alone, so only the checkpointed reading meets it."""
+    conn = sqlite3.connect(path)
+    conn.execute("pragma journal_mode=wal")
+    _sql(conn, before)
+    conn.commit()
+    size, roots = _root_pages(conn, damage)
+    conn.close()                                       # checkpoints: the file holds all of it
+    checkpointed = bytearray(open(path, "rb").read())
+    for root in roots:
+        checkpointed[(root - 1) * size:root * size] = b"\xff" * size
+    conn = sqlite3.connect(path)
+    conn.execute("pragma wal_autocheckpoint=0")
+    _sql(conn, after)
+    conn.commit()
+    wal = open(path + "-wal", "rb").read()
+    conn.close()
+    with open(path, "wb") as fh:
+        fh.write(checkpointed)
+    with open(path + "-wal", "wb") as fh:
+        fh.write(wal)
+
+
+def _wal_arroyo(path):
+    """An arroyo.db whose -wal deletes a message and a conversation row and adds a message."""
+    _checkpoint_then_wal(path, [
+        "create table conversation_message (client_conversation_id text, server_message_id integer, "
+        "client_message_id integer, primary key (client_conversation_id, client_message_id))",
+        "create table conversation (client_conversation_id text primary key)",
+        "create table required_values (key text primary key, value text)",
+        ("insert into conversation_message values (?, 5, 5), (?, 6, 6), (?, NULL, 41)",
+         (CONV, CONV, CONV.upper())),
+        ("insert into conversation values (?), (?)", (ROW_CONV, FEED_CONV)),
+        ("insert into required_values values ('userid', ?)", (ACCT_A.upper(),)),
+    ], [
+        "delete from conversation_message where server_message_id = 5",
+        ("insert into conversation_message values (?, 7, 7)", (CONV,)),
+        ("delete from conversation where client_conversation_id = ?", (ROW_CONV,)),
+    ])
+
+
+def test_arroyo_facts_come_from_both_readings(tmp_path):
+    import os
+    path = str(tmp_path / "arroyo.db")
+    _wal_arroyo(path)
+    assert os.path.getsize(path + "-wal")              # the -wal really is there to be applied
+    held, convs, accounts, unread, nameless = survey._arroyo_facts([path])
+    conv = CONV.lower()
+    # 5 only in the checkpointed reading, 7 only once the -wal is applied; 41 never numbered
+    assert held == {(conv, "5"), (conv, "6"), (conv, "7"), (conv, "41")}
+    assert convs == {conv, ROW_CONV, FEED_CONV}        # ROW_CONV's row is gone from the -wal reading
+    assert accounts == {ACCT_A} and unread == [] and nameless == []
+
+
+def test_a_table_or_column_the_wal_created_is_read_not_taken_for_one_that_will_not(tmp_path):
+    """A table created since the last checkpoint is not in the checkpointed reading at all: that is
+    a reading with nothing to add, not one that failed."""
+    from scripts.data import sqlite_open
+    path = str(tmp_path / "arroyo.db")
+    _checkpoint_then_wal(path, [
+        "create table conversation_message (client_conversation_id text, server_message_id integer)",
+        ("insert into conversation_message values (?, 5)", (CONV,)),
+    ], [
+        "alter table conversation_message add column client_message_id integer",
+        ("insert into conversation_message values (?, NULL, 41)", (CONV,)),
+        "create table conversation (client_conversation_id text)",
+        ("insert into conversation values (?)", (ROW_CONV,)),
+        "create table required_values (key text, value text)",
+        ("insert into required_values values ('USERID', ?)", (ACCT_A,)),
+    ])
+    views = sqlite_open.open_views(path)
+    try:                                               # the checkpointed reading lacks all three
+        assert survey._columns(views.main_only, "conversation_message") == {
+            "client_conversation_id", "server_message_id"}
+        assert not survey._columns(views.main_only, "conversation")
+        assert not survey._columns(views.main_only, "required_values")
+    finally:
+        views.close()
+    held, convs, accounts, unread, nameless = survey._arroyo_facts([path])
+    conv = CONV.lower()
+    assert held == {(conv, "5"), (conv, "41")}
+    assert convs == {conv, ROW_CONV} and accounts == {ACCT_A}
+    assert unread == [] and nameless == []
+
+
+def test_a_checkpointed_copy_that_will_not_read_is_not_one_that_holds_nothing(tmp_path):
+    """A message the -wal deleted is only in the checkpointed reading, so when that copy will not
+    read, a message the key names is not said to be absent — though the current reading is whole."""
+    path = str(tmp_path / "arroyo.db")
+    _checkpoint_then_wal(path, [
+        "create table conversation_message (client_conversation_id text, server_message_id integer)",
+        ("insert into conversation_message values (?, 5), (?, 6)", (CONV, CONV)),
+        "create table required_values (key text, value text)",
+        ("insert into required_values values ('USERID', ?)", (ACCT_A,)),
+    ], ["delete from conversation_message where server_message_id = 5"],
+        damage=["conversation_message"])
+    import pytest
+    from scripts.data import sqlite_open
+    views = sqlite_open.open_views(path)
+    try:                                               # the -wal holds a whole image of that page
+        assert views.merged.execute("select * from conversation_message").fetchall() == [(CONV, 6)]
+        with pytest.raises(sqlite3.DatabaseError):
+            views.main_only.execute("select * from conversation_message").fetchall()
+    finally:
+        views.close()
+    held, convs, accounts, unread, _nameless = survey._arroyo_facts([path])
+    assert unread == [path]
+    for number in ("5", "404"):
+        assert survey._named_label(CONV, number, ACCT_A, held, convs, accounts,
+                                   read=not unread) == survey.NAMED_NOT_READ
+
+
+def _second_arroyo(tmp_path, userid=None):
+    """Another app folder's arroyo.db, holding a message of CONV and, given ``userid``, an account."""
+    folder = tmp_path / "run" / "ExtractedData" / "Application" / "APP2" / "Documents" / "arroyo"
+    folder.mkdir(parents=True)
+    conn = sqlite3.connect(str(folder / "arroyo.db"))
+    _sql(conn, ["create table conversation_message (client_conversation_id text, "
+                "server_message_id integer)",
+                ("insert into conversation_message values (?, 3)", (CONV,))])
+    if userid:
+        _sql(conn, ["create table required_values (key text, value text)",
+                    ("insert into required_values values ('USERID', ?)", (userid,))])
     conn.commit()
     conn.close()
-    real = sqlite_open.read_sql
 
-    def failing(path, query, *a, **k):
-        if "SELECT client_conversation_id, server_message_id FROM" in query:
-            return pd.DataFrame(), {}
-        return real(path, query, *a, **k)
-    monkeypatch.setattr(sqlite_open, "read_sql", failing)
-    payload = survey.survey(run, progress=lambda *_: None)
-    [shape] = [s for s in payload["shapes"] if s["shape"].startswith("animationmedia~")]
-    assert shape["untied_named_message"] == {"names a message not found (arroyo.db not read)": 1}
+
+def test_another_account_s_claim_is_said_only_when_every_arroyo_db_names_its_account(tmp_path):
+    """An arroyo.db that names no account may be the account of a claim no other one names: that
+    claim is not called another account's. A claim of an account that is read stays its own."""
+    claims = [(ACCT_C, "k-other", f"other~1:{OTHER_CONV}:5:0:0"),
+              (ACCT_A, "k-own", f"own~1:{OWN_CONV}:6:0:0")]
+    own = "names a conversation arroyo.db does not hold — claimed by arroyo.db's own account"
+    run = _run_folder(tmp_path / "nameless")
+    _add_claims(tmp_path / "nameless", claims)
+    _second_arroyo(tmp_path / "nameless")                  # no required_values at all
+    said = []
+    payload = survey.survey(run, progress=said.append)
+    assert _named(payload) == {"other": {"names a conversation arroyo.db does not hold": 1},
+                               "own": {own: 1}}
+    assert any("1 of 2 arroyo.db name no account" in line for line in said)
+
+    run = _run_folder(tmp_path / "named")                  # both accounts read: a third is another
+    _add_claims(tmp_path / "named", claims)
+    _second_arroyo(tmp_path / "named", ACCT_B)
+    said = []
+    payload = survey.survey(run, progress=said.append)
+    assert _named(payload) == {
+        "other": {"names a conversation arroyo.db does not hold — claimed by another account": 1},
+        "own": {own: 1}}
+    assert not any("name no account" in line for line in said)
+
+
+def test_the_labels_are_decided_in_the_order_the_docs_give():
+    """The message, then whether every arroyo.db was read, then the conversation, then whose claim
+    it is — so a conversation arroyo.db holds does not make an unread message absent."""
+    import os
+    conv, acct = CONV.lower(), {ACCT_A}
+    label = survey._named_label
+    assert label(CONV, "5", ACCT_A, {(conv, "5")}, set(), acct, read=False) == survey.NAMED_HELD
+    assert label(CONV, "5", ACCT_A, set(), {conv}, acct, read=False) == survey.NAMED_NOT_READ
+    assert label(CONV, "5", ACCT_A, set(), {conv}, acct) == survey.NAMED_IN_CONVERSATION
+    assert label(CONV, "5", ACCT_A, set(), set(), acct, every_account=False) == \
+        survey.NAMED_OWN_ACCOUNT
+    assert label(CONV, "5", ACCT_B, set(), set(), acct) == survey.NAMED_OTHER_ACCOUNT
+    assert label(CONV, "5", ACCT_B, set(), set(), acct, every_account=False) == \
+        survey.NAMED_NO_CONVERSATION
+    assert label(CONV, "5", "", set(), set(), acct) == survey.NAMED_NO_CONVERSATION
+    assert label(CONV, "5", ACCT_B, set(), set(), set()) == survey.NAMED_NO_CONVERSATION
+    # and the docs' table lists them in that order
+    doc = open(os.path.join(os.path.dirname(__file__), "..", "docs", "claim_link_survey.md"),
+               encoding="utf-8").read()
+    table = doc.split("### A key that names a message", 1)[1].split("\n\n")[2]
+    rows = [line.split("`")[1] for line in table.splitlines()[2:]]    # after the header rows
+    assert rows == [survey.NAMED_HELD, survey.NAMED_NOT_READ, survey.NAMED_IN_CONVERSATION,
+                    survey.NAMED_OWN_ACCOUNT, survey.NAMED_OTHER_ACCOUNT,
+                    survey.NAMED_NO_CONVERSATION]
+
+
+def test_the_app_folder_is_the_one_the_reports_read_the_database_from(tmp_path):
+    """iOS and Android keep cache_controller.db at different depths; a database somewhere else is
+    not read against a folder guessed from where it sits."""
+    import android_fixture as fx
+    android = fx.build_app(str(tmp_path / "android"))
+    controller = f"{android}/databases/native_content_manager/cache_controller.db"
+    assert survey._apps([controller]) == [android]
+    # on Android the Memories are memories.db's: the old climb of four folders read none of them
+    assert fx.SNAP_ID.upper() in survey._snap_ids(survey._apps([controller]))
+
+    ios = tmp_path / "ios" / "Application" / "APP"
+    (ios / "Documents" / "gallery_data_object").mkdir(parents=True)
+    db = ios / "Documents" / "global_scoped" / "cachecontroller" / "cache_controller.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"")
+    stray = tmp_path / "ios" / "copies" / "a" / "b" / "c" / "cache_controller.db"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"")
+    assert survey._apps([str(db), str(stray), str(db)]) == [str(ios)]
 
 
 def test_a_full_media_key_carrying_a_memory_s_snap_id_counts_as_tied():
@@ -248,3 +564,7 @@ def test_a_full_media_key_carrying_a_memory_s_snap_id_counts_as_tied():
     assert survey._link_status(claim, {}, {}, None, snaps) == "Memory: its snap id in the key"
     assert survey._link_status(dict(claim, MEDIA_CONTEXT_TYPE=34), {}, {}, None, snaps) == "none"
     assert survey._link_status(claim, {}, {}, None, {}) == "none"
+    # the filter-record and creative-tools inputs are taken, by keyword, and change nothing yet
+    for status, snap_ids in (("Memory: its snap id in the key", snaps), ("none", {})):
+        assert survey._link_status(claim, {}, {}, snap_ids=snap_ids, filter_urls={"x": 1},
+                                   items={"x": 1}) == status

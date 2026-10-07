@@ -26,8 +26,18 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   and *incl. inode changed*), alone or with the words; it was only on the search page itself. The
   window travels in the fragment (`#q=…&mode=…`) and the search page sets its controls from it. The
   index page also links the reports' emoji font, as every other page does.
-- **The survey says whether the message an untied key names is still in arroyo.db**
-  (`untied_named_message`) — those it is not are what a recovery of deleted records could bring back.
+- **The survey says what arroyo.db holds of the message an untied key names**
+  (`untied_named_message`): the message, only its conversation (a message of it, or a `conversation`,
+  `feed_entry` or `user_conversation` row), or neither — and then whether the claim's `USER_ID` is the
+  `required_values` `USERID` of an `arroyo.db` or another account's (`claim_link_survey._arroyo_facts`,
+  `_named_label`). A message it holds is a missing rule. A message it does not hold, in a conversation
+  it holds or of its own account, is one only a recovery of deleted records could give a rule. A
+  conversation it does not hold, claimed by another account, is one no rule written from that
+  `arroyo.db` can tie — said only when every `arroyo.db` names its account. Every `arroyo.db` of the
+  extraction is read, a table that will not read in either reading makes it unread rather than empty
+  (`_rows`), and a message the server never numbered counts as held by its `client_message_id`. A
+  claim's snap id is looked up in the Memories of the app folder the reports read its
+  `cache_controller.db` from (`_apps`), which on Android is not four folders above it.
 - **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
   a Story, a preference or a Memory can hold the id a claim carries. A hit in a message the server never
   numbered says so, and an owner username in a key's `<USERNAME>~` position is masked out of the shapes.
@@ -72,6 +82,11 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   (`<CACHE_KEY>_<child>`), which is a cache_controller row only when no claimed bundle lists the child,
   so it usually opened the report without landing anywhere. And `thumbnail~<UUID>` /
   `profilethumbnail~<UUID>` no longer report "thumbnail" as the claim's owner username (`claim_owner`).
+- **A relation a later build adds starts at its default in the GUI** — `Snapchat_Auto._saved_relations`.
+  The relation policy the GUI remembers names only the relations of the build that saved it, and the
+  dialog read an absent one as off, so a new relation that is on by default stayed off for every
+  examiner who had saved a policy. The saved choices are now laid over the recommended set, and a key
+  this build no longer has is dropped instead of making the run refuse its own `--relations` spec.
 
 ### Changed
 - **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
