@@ -292,3 +292,5 @@ Co-authored-by: Claude Code <noreply@anthropic.com>
   dtype enforcement (`Invalid value 'X' for dtype '…'`), removed `DataFrame.append()`, and the
   per-cell `df.loc[…] = value` pattern that breaks on the current runtime. Read before adding or
   editing DataFrame cell assignments in the parsing scripts.
+
+@.github/copilot-instructions.md
