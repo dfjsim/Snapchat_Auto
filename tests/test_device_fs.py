@@ -324,7 +324,8 @@ def test_the_memories_report_lists_every_recorded_time_with_its_source():
          "src_fs": [("/dev/path", {"source": "ufed-metadata", "precision": "ns",
                                    "btime": T_B * NS, "mtime": T_M * NS, "atime": T_M * NS,
                                    "ctime": (T_M + 1) * NS, "prot": 3})]}
-    f["device_summary"] = device_fs.summarize([f["src_fs"][0][1]], _utc)
+    f["device_groups"] = [("/dev/path", [f["src_fs"][0][1]],
+                           device_fs.summarize([f["src_fs"][0][1]], _utc))]
     rows = mr._device_time_rows(f)
 
     # a nanosecond record shows its fraction even when it is zero: the precision is the record's

@@ -380,7 +380,13 @@ def summarize(records, epochfmt):
     parts)» — since the parts are one media file and a table cell has to stay a cell. Attributes are
     the non-time facts (protection class, inode, mode, owner, hard links, size, xattrs), with a value
     that differs between parts stated as such rather than picked from one of them.
+
+    A part the archive recorded nothing for (``None``) still counts: a time is then said to be that
+    of «k of n parts», and the attributes say how many parts have no record. Dropping it silently
+    made the times of the remaining parts read as the whole file's — its creation, for one, later
+    than the part that came first.
     """
+    total = len(records)
     records = [r for r in records if r]
     if not records:
         return [], []
@@ -391,11 +397,12 @@ def summarize(records, epochfmt):
         if not values:
             continue
         low, high = min(values), max(values)
+        count = f"{len(values)} of {total} parts" if len(values) < total else f"{len(values)} parts"
         if low == high:
-            shown = format_ns(low, epochfmt, precision)
+            shown = format_ns(low, epochfmt, precision) + (f" ({count})" if len(values) < total else "")
         else:
             shown = (f"{format_ns(low, epochfmt, precision)} … {format_ns(high, epochfmt, precision)} "
-                     f"({len(values)} parts)")
+                     f"({count})")
         if kind == "btime":
             basis = next((r["btime_basis"] for r in records if r.get("btime_basis")), "")
             if basis:
@@ -411,6 +418,8 @@ def summarize(records, epochfmt):
                   for shown in lines]
 
     attrs = []
+    if len(records) < total:
+        attrs.append(("not recorded", f"{total - len(records)} of {total} parts"))
     for label, values in _attribute_columns(records):
         distinct = list(dict.fromkeys(values))
         if len(distinct) == 1:
@@ -493,12 +502,16 @@ DEVICE_FS_BASIS = (
     "is shown.\n\n"
     "• A GrayKey archive carries the times in each entry's UT extra field at whole seconds — "
     "modified, accessed, changed and, for an iOS device, a fourth, non-standard value: the birth "
-    "time, which it matched in UFED's stat record of the same device.\n\n"
+    "time, which it matched in UFED's stat record of the same device. At whole seconds a cache "
+    "file's created and modified usually fall in the same second — the app creates the file and "
+    "writes it at once — so they often share one line where UFED's record shows them milliseconds "
+    "apart.\n\n"
     "• Any other archive carries what its UT field records — at least the modification time — or "
     "nothing («not recorded»).\n\n"
     "Read the four with care: «modified» is when the content was last written; «created» when the "
     "file came into being; «accessed» and «inode changed» can be set by the acquisition itself, so "
     "they date the last read or metadata change, not necessarily the user's activity. Identical "
-    "instants are shown on one line. A claim "
+    "instants are shown on one line. A file stored in parts has a record per part, each time bounded "
+    "earliest … latest; «k of n parts» means the other parts carry no record. A claim "
     "time in cache_controller.db (CREATION_TIMESTAMP_MILLIS) is a different record again: when the "
     "app registered the claim, not when the bytes were written.")

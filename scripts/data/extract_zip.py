@@ -427,6 +427,86 @@ def _extract_android(zip1, names, dest, out, package=ANDROID_PACKAGE):
     return os.path.realpath(dest if dest not in ("", ".") else ".").replace("\\", "/")
 
 
+def undo_earlier_writes(dest, merged_dir="SnapFixedVideos"):
+    """Put back what an earlier build of this tool changed inside an iOS extraction folder, where the
+    extraction manifest proves it; returns ``(renamed back, removed)``.
+
+    Two steps used to write into the evidence copy, and an extraction folder is reused by every later
+    run, so what they wrote stayed in it:
+
+    * ``parseSnapvideos_PREFETCH`` renamed each byte-range head ``<key>_PREFETCH`` to ``<key>_0-1``.
+      The reports then quoted a name the device never had, found no device record for the part (the
+      manifest is keyed by the archive's name) and so dated the file by its other parts alone, and
+      judged it short of the one byte its new name declared. Renamed back where the manifest records
+      ``<key>_PREFETCH`` and not ``<key>_0-1``, and the folder does not already hold the former.
+    * The legacy Memories report copied each merged video in ``SnapFixedVideos`` into the SCContent
+      folder as a whole ``<key>`` file, which every report after it listed as a file on the device.
+      Removed where the manifest records every other file of the folder but not this one, and the
+      file is byte-identical to ``<merged_dir>/<key>.mp4`` — so nothing is lost: those bytes are ours.
+    """
+    try:
+        with open(os.path.join(dest, "extraction_manifest.json"), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return 0, 0
+    recorded = set(manifest.get("fs") or {}) | set(manifest.get("mtimes") or {})
+    if not recorded:
+        return 0, 0
+    folders = (glob.glob(os.path.join(dest, "Application", "*", "Documents",
+                                      "com.snap.file_manager_*_SCContent_*"))
+               + glob.glob(os.path.join(dest, "Application", "*", "Library", "Caches",
+                                        "com.snap.file_manager_*_SCContent_*")))
+    renamed_back = removed = 0
+    for folder in folders:
+        if not os.path.isdir(folder):
+            continue
+        rel = os.path.relpath(folder, dest).replace("\\", "/")
+        names = os.listdir(folder)
+        present = set(names)
+        for name in names:
+            if not name.endswith("_0-1"):
+                continue
+            head = name[:-len("0-1")] + "PREFETCH"
+            if (f"{rel}/{head}" in recorded and f"{rel}/{name}" not in recorded
+                    and head not in present):
+                os.rename(os.path.join(folder, name), os.path.join(folder, head))
+                present.discard(name)
+                present.add(head)
+                renamed_back += 1
+        unrecorded = [n for n in present if f"{rel}/{n}" not in recorded]
+        ours = [n for n in unrecorded if merged_dir and "_" not in n
+                and os.path.isfile(os.path.join(merged_dir, n + ".mp4"))
+                and os.path.isfile(os.path.join(folder, n))]
+        if not ours or len(ours) != len(unrecorded) or len(unrecorded) == len(present):
+            continue                       # the manifest does not account for the rest of the folder
+        for name in ours:
+            copy, target = os.path.join(merged_dir, name + ".mp4"), os.path.join(folder, name)
+            if os.path.getsize(copy) == os.path.getsize(target) and _same_bytes(copy, target):
+                os.remove(target)
+                removed += 1
+    if renamed_back or removed:
+        logger.warning(
+            "This extraction folder had been modified by an earlier version of Snapchat Auto: "
+            + ", ".join(part for part in (
+                f"{renamed_back} byte-range head(s) it had renamed <key>_PREFETCH -> <key>_0-1 were "
+                f"given their device name back" if renamed_back else "",
+                f"{removed} merged video(s) it had copied into the SCContent folder as whole files "
+                f"were removed (the bytes stay in {merged_dir})" if removed else "") if part)
+            + " — each proved by the extraction manifest. Reports that version made from this "
+              "folder showed those names and files as the device's own.")
+    return renamed_back, removed
+
+
+def _same_bytes(a, b, block=1 << 20):
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            x, y = fa.read(block), fb.read(block)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
 def extract(file_name, mode, dest="."):
 
     def _out(rel):

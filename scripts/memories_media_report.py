@@ -1244,7 +1244,8 @@ def _carved_memory(snap_id, profile, hit, timefmt):
 
 
 # split SCContent media: "<cache_key>_<start>-<end>" byte-range parts, plus the initial
-# "<cache_key>_PREFETCH" chunk (parseSnapvideos renames PREFETCH -> _0-1 when it runs first).
+# "<cache_key>_PREFETCH" chunk at offset 0 (an earlier parseSnapvideos renamed it _0-1 on disk;
+# extract_zip.undo_earlier_writes gives a reused folder its device name back).
 _SC_SPLIT_RE = re.compile(r"^(.+?)_(?:(\d+)-\d+|PREFETCH)$")
 
 
@@ -1342,7 +1343,10 @@ def _part_coverage(ordered):
         mo = _PART_RANGE_RE.search(os.path.basename(path))
         if mo:                                             # end may be exclusive or inclusive
             declared = int(mo.group(2)) - int(mo.group(1))
-            if size not in (declared, declared + 1):
+            # only a shard holding FEWER bytes than its range is short: one holding more is not
+            # missing anything (an earlier build's own `<key>_0-1` rename of a PREFETCH head was
+            # reported as "fewer bytes than the range in their name declares")
+            if size < declared:
                 short.append(os.path.basename(path))
         if start > pos:
             gaps.append((pos, start))
@@ -1831,8 +1835,10 @@ def _add_posters(memories, outdir, published):
         partial = (" The video it came from is only partially cached, so the frame is from the "
                    "part that is present." if vid.get("complete") is False else "")
         entry.update({"role": "poster (generated)", "source": "generated", "ext": "jpg",
-                      "src": ["(generated from the decrypted video — not original device data)"]
-                             + vid["src"],
+                      # the note is said above the paths, never as one of them: as a path it was
+                      # given a device record line of its own («not recorded»)
+                      "src_note": "(generated from the decrypted video — not original device data)",
+                      "src": list(vid["src"]),
                       "hashes": [("", *_hashes(data))], "generated": True, "snap_dim": "",
                       "complete": None, "why_incomplete": "",
                       "how": ("Derived artifact: this Memory is a video with no cached still, so a "
@@ -2526,8 +2532,10 @@ def _render_src_paths(f, src_root, manifest):
                 [fs_by_path.get(p) for p in group], epochfmt))
         return "<br>".join(out)
 
+    # what a generated file was made from is said once, above the paths of the file it came from
+    note = html.escape(f["src_note"]) + "<br>" if f.get("src_note") else ""
     if not scope_by:                                       # caching-media / generated: no scope info
-        return lines(f["src"])
+        return note + lines(f["src"])
     groups = {}
     for s in f["src"]:
         groups.setdefault(scope_by.get(s), []).append(s)
@@ -2535,7 +2543,7 @@ def _render_src_paths(f, src_root, manifest):
     for scope, plist in sorted(groups.items(), key=lambda kv: (kv[0] in cross, str(kv[0]))):
         badge = " <span class='xscope'>⚠ different account scope</span>" if scope in cross else ""
         blocks.append(lines(plist) + badge)
-    return "<br>".join(blocks)
+    return note + "<br>".join(blocks)
 
 
 def _grid(pairs):
@@ -2702,9 +2710,16 @@ def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None, fs=N
                                               manifest, fs)
             f["src_mtimes"] = stamps
             f["src_fs"] = records
-            # the whole file's record summarised once (its parts bounded), for the timestamp list;
+            # each file on the device summarised once — a whole file, or the byte-range parts of one,
+            # bounded — for the timestamp list, exactly as the Media files table groups the paths. Not
+            # the whole list at once: two copies of the media (another account's scope, a whole file
+            # beside its parts) are two files, and bounding them together dated neither of them.
+            by_path = dict(records)
+            f["device_groups"] = [
+                (line, [by_path.get(p) for p in group],
+                 device_fs.summarize([by_path.get(p) for p in group], epochfmt))
+                for line, group in _device_files(f, [p for p, _rec in records])]
             # and the run's formatter, for the per-path lines the Media files table draws
-            f["device_summary"] = device_fs.summarize([rec for _p, rec in records], epochfmt)
             f["_epochfmt"] = epochfmt
 
 
@@ -2802,22 +2817,45 @@ def _memory_times(m):
 
 def _memory_time_keys(m):
     """``{"ts": [...], "tc": [...]}`` — the time filter's keys for one Memory: every timestamp it
-    has (``_memory_times``), with the device's inode-change times apart in ``tc``. A device line
-    shows one instant under every kind that shares it, so only a line that is an inode change and
-    nothing else goes to ``tc``; ``tc`` is left out when empty."""
-    ctime_only = []
+    has (``_memory_times``), with the device's inode-change times apart in ``tc``; ``tc`` is left out
+    when empty.
+
+    The device's times are keyed from each cache file's own record (``report_ui.fs_times``, as the
+    cache reports key theirs), not from the rows shown: a row bounds the parts of a file, and keying
+    its text found the file by its earliest part alone. An inode change goes to ``tc`` unless the
+    same instant is also one of the Memory's other times."""
+    shown, ctimes = [], []
+    for _label, value, source in _memory_times(m):
+        if not source.startswith(_DEVICE_ROW_SOURCE):
+            shown.append(value)
     for f in m.get("media_files") or []:
         if f.get("generated"):
             continue
-        lines, _attrs = f.get("device_summary") or ([], [])
-        ctime_only += [shown for _labels, shown, _note, kinds in lines if list(kinds) == ["ctime"]]
-    rest = [value for _label, value, _src in _memory_times(m)]
-    for shown in ctime_only:
-        if shown in rest:
-            rest.remove(shown)
-    ts = report_ui.ts_keys(*rest)
-    tc = [key for key in report_ui.ts_keys(*ctime_only) if key not in set(ts)]
+        epochfmt = f.get("_epochfmt") or (lambda seconds: "")
+        records = [rec for _path, rec in f.get("src_fs") or [] if rec]
+        if not records:                                    # an older folder: the mtimes alone
+            shown += [value for _label, value, _source in _device_time_rows(f)]
+        shown += report_ui.fs_times(records, epochfmt)
+        ctimes += report_ui.fs_times(records, epochfmt, kinds=("ctime",))
+    ts = report_ui.ts_keys(*shown)
+    tc = [key for key in report_ui.ts_keys(*ctimes) if key not in set(ts)]
     return {"ts": ts, **({"tc": tc} if tc else {})}
+
+
+#: How every device filesystem row of `_device_time_rows` names its source.
+_DEVICE_ROW_SOURCE = "extraction archive ›"
+
+
+def _device_files(f, paths):
+    """``[(line, [paths])]`` — the files on the device a media record was read from: a whole file, or
+    the byte-range parts of one (`_collapse_paths`), or — for a caching-media pack, whose ``src`` is the
+    chunks of one item — every chunk, as ``…/<item>-*.pack``. Each is dated on its own rows."""
+    if f.get("source") == "caching-media" and len(paths) > 1:
+        d, _, name = paths[0].replace("\\", "/").rpartition("/")
+        mo = PACK_RE.match(name)
+        stem = f"{mo.group(1)}-*.pack" if mo else name
+        return [(f"{d}/{stem}" if d else stem, list(paths))]
+    return _collapse_paths(paths)
 
 
 def _device_time_rows(f):
@@ -2826,8 +2864,10 @@ def _device_time_rows(f):
     Every timestamp the record has — created, modified, accessed, inode changed — with identical
     instants on one row; a file rebuilt from byte-range parts has one record per part, so each
     timestamp is bounded (earliest … latest) rather than listed, since the parts are one media file
-    and the row has to stay a row. Values are the strings `annotate_file_times` already formatted, so
-    this needs no formatter and the time filter reads the same string the examiner sees.
+    and the row has to stay a row. Each file on the device gets rows of its own (``device_groups``):
+    a second copy of the media — in another account's scope, or whole beside its parts — is another
+    file with its own times. Values are the strings `annotate_file_times` already formatted, so this
+    needs no formatter.
     """
     records = [(path, rec) for path, rec in (f.get("src_fs") or []) if rec]
     if not records:
@@ -2846,25 +2886,22 @@ def _device_time_rows(f):
                              latest[1], f"extraction archive › {latest[0]}"))
             return rows
         return []
-    lines, _attrs = f.get("device_summary") or ([], [])
-    where = records[0][0] if len(records) == 1 else f"{len(records)} parts of {_part_stem(records[0][0])}"
-    source = device_fs.source_label(records[0][1])
     rows = []
-    for labels, shown, _note, _kinds in lines:
-        # the path and the store are one statement for the whole record: said on its first line,
-        # not repeated under each of its timestamps
-        rows.append((f"Cache file {labels} on the device", shown,
-                     f"extraction archive › {where} · {source}" if not rows
-                     else "extraction archive › the same file's record"))
+    for line, group, (lines, _attrs) in f.get("device_groups") or ():
+        recorded = [rec for rec in group if rec]
+        if not recorded:
+            continue
+        where = line if len(group) == 1 else f"{len(group)} parts of {line}"
+        source = device_fs.source_label(recorded[0])
+        first = True
+        for labels, shown, _note, _kinds in lines:
+            # the path and the store are one statement for the whole record: said on its first line,
+            # not repeated under each of its timestamps
+            rows.append((f"Cache file {labels} on the device", shown,
+                         f"{_DEVICE_ROW_SOURCE} {where} · {source}" if first
+                         else f"{_DEVICE_ROW_SOURCE} the same file's record"))
+            first = False
     return rows
-
-
-def _part_stem(path):
-    """``…/<cache key>_*`` for a part path, so a bounded row names the file rather than one part."""
-    d, _, name = path.replace("\\", "/").rpartition("/")
-    mo = _SC_SPLIT_RE.match(name)
-    stem = f"{mo.group(1)}_*" if mo else name
-    return f"{d}/{stem}" if d else stem
 
 
 def _embedded_fields(f):

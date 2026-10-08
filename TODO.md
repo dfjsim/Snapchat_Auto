@@ -118,9 +118,9 @@ corpus these are the correct answers. The fixes that came out of the same pass a
 - Why it is redundant:
   - `scripts/parseSnapvideos_PREFETCH.py` reconstructs split videos from their byte-range parts into
     `SnapFixedVideos/<cache_key>.mp4` (still ENCRYPTED). It is created once from `Snapchat_Auto.main`.
-  - It is consumed ONLY by the legacy `scripts/DecryptLocalMemories_iOS.py` report, which copies those
-    reconstructed files back INTO the extraction's SCContent folder (renamed to the cache key) just
-    to decrypt them.
+  - It is consumed ONLY by the legacy `scripts/DecryptLocalMemories_iOS.py` report, which reads a
+    reconstructed file where the SCContent folder has no whole file of that key (up to 1.9.0-beta.3 it
+    copied them INTO the folder instead — see below).
   - The new reports already reconstruct split files directly from the parts (`index_sccontent` /
     `_resolve_sccontent` / `materialize_ondisk`) and the Memories report decrypts them in place, so
     both `SnapFixedVideos` and the legacy report are dead weight. Verified on a split video in the
@@ -133,17 +133,19 @@ corpus these are the correct answers. The fixes that came out of the same pass a
   - `write_index`: drop the "Local Memories (legacy)" entry.
   - KEEP `scripts/DecryptLocalMemories_iOS.py` — the new Memories report reuses its `readKeychain`
     (imported as `_memkeys`). Optionally delete `scripts/parseSnapvideos_PREFETCH.py` (unused after).
-  - Benefit: faster runs and no longer writing into `ExtractedData`.
-  - **Measured evidence that writing into `ExtractedData` changes report content.** Deleting the
-    extraction folders and re-extracting them changed 30 rows of the cache_controller report on one
-    device and 20 on another, in each case a shard file named `<cache_key>_0-1` becoming
-    `<cache_key>_PREFETCH` — the name it actually has in the archive. The databases were byte-identical
-    across the re-extraction (all ten fingerprinted artifacts, all four devices), so the difference was
-    entirely files an earlier run had written into the tree: exactly the 30 cache keys that
-    `SnapFixedVideos` holds a reconstructed `.mp4` for. So the report had been quoting a filename the
-    device never had, and only a re-extraction revealed it. Two consequences: this is a correctness
-    argument for the removal above, not just a tidiness one; and a corpus baseline must be taken from a
-    freshly extracted tree or it bakes in the pollution.
+  - Benefit: faster runs.
+  - **Done after 1.9.0-beta.3: neither step writes into `ExtractedData` any more.** Re-extracting had shown
+    every shard named `<cache_key>_0-1` becoming `<cache_key>_PREFETCH` — the name it has in the
+    archive — with the databases byte-identical, so the difference was entirely what an earlier run
+    wrote into the tree. It was worse than a wrong name: the renamed head had no device record (the
+    manifest is keyed by the archive's name), so a split file was dated by its other parts alone, a
+    head-only file read *not recorded*, and the Memory was called *partially cached*; with the legacy
+    reports on, the merged copies showed as whole files the device never had.
+    `parseSnapvideos_PREFETCH` now sorts by the old name instead of renaming (`SnapFixedVideos`
+    byte-identical), the legacy report reads from `SnapFixedVideos` (its output byte-identical), and
+    `extract_zip.undo_earlier_writes` repairs a reused tree where the manifest proves it. A corpus
+    baseline must still come from a freshly extracted tree when it is compared with 1.9.0-beta.3
+    or older.
 
 # Evidence hygiene: something still opens a database in place
 
@@ -160,8 +162,8 @@ shared-memory index. Found while establishing the run-to-run noise floor for the
 - Likely candidates: the SQLCipher path (`memories_media_report.decrypt_gallery_db` stages a copy, but
   `scdb-27.sqlite3` is also read on that path), or the bundled `sqlcipher3.exe` invocation. Compare
   each database's `-shm` mtime before and after a run to narrow it down.
-- Related goal already recorded above: stop writing into `ExtractedData` at all (see the legacy
-  Memories / SnapFixedVideos cleanup).
+- Related: the two other writes into `ExtractedData` (the PREFETCH rename and the legacy report's
+  copies) stopped after 1.9.0-beta.3 — see the legacy Memories / SnapFixedVideos cleanup. This one is left.
 - Why it matters beyond tidiness: `scripts/source_fingerprint.py` deliberately does **not**
   fingerprint the `-shm` because of this. If the tool stopped touching it, the `-shm` could be
   fingerprinted like the `-wal` — but as long as our own run moves it, hashing it would make the tool

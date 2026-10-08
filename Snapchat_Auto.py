@@ -665,6 +665,8 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
             logger.info("You chose iOS")
             with progress.stage("Extraction"):
                 extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
+                # a reused folder may still hold what an earlier version wrote into it
+                extract_zip.undo_earlier_writes("ExtractedData", "SnapFixedVideos")
             if not os.path.exists("SnapFixedVideos"):
                 with progress.stage("SnapFixedVideos"):
                     parseSnapvideos_PREFETCH.main(extracted_files_dir[0])

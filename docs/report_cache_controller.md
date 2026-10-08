@@ -182,10 +182,16 @@ The trigger conditions above are read from the app's own naming and from the obs
 the names, offsets and coverage behaviour are verified, the prefetch trigger set is not
 instrumented. Say which of the two a report is relying on.
 
-> **Trap:** the legacy `scripts/parseSnapvideos_PREFETCH.py` **renames `PREFETCH` → `_0-1` inside the
-> extraction tree**, so a `_0-1` shard at offset 0 in a tree an earlier Snapchat Auto run touched may
-> be ours and not the device's. Re-extracting reverts those names; a baseline must come from a
-> freshly extracted tree. See the removal note in `TODO.md`.
+> **Trap (fixed after 1.9.0-beta.3):** up to 1.9.0-beta.3 the legacy `scripts/parseSnapvideos_PREFETCH.py` **renamed
+> `PREFETCH` → `_0-1` inside the extraction tree**, and the legacy Memories report copied the merged
+> videos into the SCContent folder as whole `<CACHE_KEY>` files. The reports then quoted names and
+> files the device never had: the head lost its device record (the manifest is keyed by the archive's
+> name), so a split file was dated by its other parts alone — a *created* later than the head and often
+> on one line with *modified* — a head-only file read *not recorded*, and the 1-byte range its new name
+> declared made the Memory *partially cached*. Neither step writes into the tree now, and
+> `extract_zip.undo_earlier_writes` puts a reused tree back where the manifest proves it (the head's
+> name back; a copy removed only when the manifest accounts for the rest of its folder and the copy
+> is byte-identical to its `SnapFixedVideos` file).
 
 ### `CACHE_FILE_METADATA.CONTENT_RETRIEVAL_METADATA` (protobuf)
 Decoded by `parse_retrieval`. Field `5.1`/`6.1` = the **CDN URL** the file was fetched from.

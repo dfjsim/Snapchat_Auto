@@ -286,7 +286,14 @@ record of the cache file — its four timestamps, protection class, inode, owner
 path it belongs to, in the *Media files* table's source-path cell (a file rebuilt from byte-range parts
 has a record per part, each timestamp bounded as earliest … latest). In the index row every recorded
 timestamp is a line — *created*, *modified / accessed* when they coincide, *inode changed* — bounded
-the same way, so the row stays a row.
+the same way, so the row stays a row, and **per file on the device** (`_device_files`): the parts of one
+SCContent file, or the `.pack` chunks of one caching-media item, are bounded together; a second copy of
+the media — in another account's scope, or whole beside its parts — is another file and gets rows of
+its own. A part the archive recorded nothing for is counted, never dropped: the value reads *(k of n
+parts)* and the attributes say *not recorded: m of n parts* — dropping it made the other parts' times
+read as the whole file's, a creation later than the part that came first. The time filter keys every
+part's own times (`report_ui.fs_times`), not the bounded text, so a Memory is found by its last part
+too.
 
 **Zones are never assumed silently.** A file time is converted to the run's timezone only when the
 file *states* its zone (EXIF `OffsetTime*`, an ISO 8601 offset). Where the file states none but the

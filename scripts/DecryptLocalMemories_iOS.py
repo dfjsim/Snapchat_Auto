@@ -235,16 +235,16 @@ def decryptMemoriesLocal(egocipherKey, persistedKey, df_merge, df_cache):
     
     df_merge["filename"] = ""
     df_merge["overlayFilename"] = ""
-    logger.info("Copying merged media files to cache folder")
-    for file in os.listdir("SnapFixedVideos"):
-        source = f"SnapFixedVideos/{file}"
-        destination = f"{SCContentFolder_path}/{file.split('.')[0]}"
-        if os.path.isfile(source) and not os.path.isfile(destination):
-            shutil.copy(source, destination)
-        else:
-            continue
-            #logger.info(f"Could not copy merged file {source}")
-    
+    # A split video is read from its merged copy in SnapFixedVideos where the cache folder has no
+    # whole file of that key. An earlier version copied the merged copies INTO the extraction's
+    # SCContent folder instead, and every report after it listed them as files on the device —
+    # whole files the device never had, with no record in the extraction manifest.
+    merged = {}
+    if os.path.isdir("SnapFixedVideos"):
+        for file in os.listdir("SnapFixedVideos"):
+            if os.path.isfile(f"SnapFixedVideos/{file}"):
+                merged.setdefault(file.split('.')[0].lower(), f"SnapFixedVideos/{file}")
+
     logger.info("Decrypting cached Memories")
     uuid_counter = 0
     temp_dict = {'ID':[], 'CACHE_KEY':[]}
@@ -278,6 +278,8 @@ def decryptMemoriesLocal(egocipherKey, persistedKey, df_merge, df_cache):
         decryptedfile = False
         try:
             file = f"{SCContentFolder_path}{merge_row['CACHE_KEY']}"
+            if not os.path.isfile(file):
+                file = merged.get(str(merge_row['CACHE_KEY']).lower(), file)
             filename = merge_row['CACHE_KEY']
             if filetype.guess(file) == None or filetype.guess(file).extension in ['ps']: #Encrypted file or some random filetype
                 # A My Eyes Only memory's key is stored WRAPPED in the account's MEO master key —

@@ -350,14 +350,22 @@ def test_the_index_page_with_nothing_set_opens_the_page_and_any_time_clears_a_wi
 
 def test_a_memorys_inode_change_time_is_kept_apart():
     from scripts import memories_media_report as mr
+    from scripts.data import device_fs
+    epochfmt = mr.make_epoch_formatter("utc")[0]
+
+    def at(text):
+        return _key(text) * device_fs.NS
+
+    # two cache files: one modified and then only its inode changed, one accessed when it changed
+    one = {"source": "zip-ut", "precision": "s", "mtime": at("2024-03-11 09:00:00"),
+           "ctime": at("2024-03-12 10:00:00")}
+    two = {"source": "zip-ut", "precision": "s", "atime": at("2024-03-13 11:00:00"),
+           "ctime": at("2024-03-13 11:00:00")}
+    files = [{"out": "x.mp4", "src_fs": [(path, rec)], "_epochfmt": epochfmt,
+              "device_groups": [(path, [rec], device_fs.summarize([rec], epochfmt))]}
+             for path, rec in (("p", one), ("q", two))]
     m = {"times": {"ZCREATETIMEUTC": "2024-03-10 08:30:00 UTC"}, "entry_times": {},
-         "media_files": [{"out": "x.mp4", "src_fs": [("p", {"mtime": 1})],
-                          "device_summary": ([("modified", "2024-03-11 09:00:00 UTC", "", ["mtime"]),
-                                              ("inode changed", "2024-03-12 10:00:00 UTC", "",
-                                               ["ctime"]),
-                                              ("accessed / inode changed",
-                                               "2024-03-13 11:00:00 UTC", "", ["atime", "ctime"])],
-                                             [])}]}
+         "media_files": files}
     keys = mr._memory_time_keys(m)
     assert keys["tc"] == [_key("2024-03-12 10:00:00")]           # an inode change and nothing else
     assert _key("2024-03-13 11:00:00") in keys["ts"]             # also an access: stays searchable

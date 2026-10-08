@@ -9,6 +9,25 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
 ## [Unreleased]
 
 ### Fixed
+- **A file split into byte-range parts was dated by its later parts only — a wrong *created*, often
+  shown on one line with *modified*.** `parseSnapvideos_PREFETCH` renamed every `<key>_PREFETCH` head
+  to `<key>_0-1` inside `ExtractedData`. The extraction manifest is keyed by the archive's name, so the
+  head lost its device record: the Memories, cache_controller and Library/Caches reports quoted a name
+  the device never had, bounded the file's times over the other parts alone, showed a head-only file as
+  *not recorded*, and called the Memory *partially cached* because the shard held more than the one
+  byte its new name declared. It no longer renames anything (`SnapFixedVideos` byte-identical). With
+  the legacy reports on, `DecryptLocalMemories_iOS` also copied each merged video into the SCContent
+  folder as a whole `<key>` file, which every report after it listed as a file on the device; it now
+  reads the merged copy where it is (its output byte-identical). `extract_zip.undo_earlier_writes`
+  puts a reused extraction folder back where the manifest proves it, and logs what it did.
+- **The device's record of a file's parts is no longer summarised as if every part had one.**
+  `device_fs.summarize` counts a part with no record: *(k of n parts)* beside the time, *not recorded:
+  m of n parts* among the attributes. A Memory's expanded row now dates each file on the device on its
+  own rows (`_device_files`): two copies of the media, in another account's scope or whole beside its
+  parts, were bounded together as "parts"; the `.pack` chunks of one item stay one file. The time
+  filter keys every part's own times, so a Memory is found by its last part too. A generated poster's
+  *(generated from the decrypted video)* note no longer gets a *not recorded* device line of its own,
+  and a shard is called short only when it holds fewer bytes than its range, not more.
 - **A Memory's expanded row could squeeze the source column to one character per line.** The
   timestamp and *CDN URLs, AES key / IV…* grids sized their value column to its longest value, so one
   CDN URL or the *No database time* note took the whole width. The value column now gives way and

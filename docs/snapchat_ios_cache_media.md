@@ -117,8 +117,14 @@ sub-second mtime too (`os.utime(ns=…)`).
 
 Every report shows the record under the source path it belongs to, through `report_ui.device_fs_html`:
 *created / modified / accessed / inode changed* with identical instants merged onto one line and the
-parts of a split file bounded (earliest … latest), then the protection class, inode, mode, owner and
-xattrs, and which store the record was read from. Two things the hints say and the reader has to keep
+parts of a split file bounded (earliest … latest) — a part with no record counted as *(k of n parts)*,
+never silently left out — then the protection class, inode, mode, owner and xattrs, and which store
+the record was read from. At GrayKey's whole seconds a cache file's *created* and *modified* usually
+fall in the same second and share a line: the app creates the file and writes it at once. UFED's
+nanosecond record of the same files, on an iPhone acquired with both tools, shows them milliseconds
+apart, with GrayKey's birth time equal to UFED's to the second on every file left unchanged between
+the two acquisitions. So *created / modified* on one line in a GrayKey extraction is the archive's
+statement at its precision, not two fields read as one. Two things the hints say and the reader has to keep
 in mind: **accessed** and **inode changed** can be set by the acquisition itself, so they date the last
 read or metadata change, not necessarily the user's activity (a recent GrayKey iOS acquisition was seen
 to leave nearly all of the app's files untouched, so this is a possibility, not a pattern); and a
