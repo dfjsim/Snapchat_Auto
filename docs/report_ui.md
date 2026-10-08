@@ -48,6 +48,11 @@ index and the detail pages load it with `<script src>` / `<link href>`.
 * **A query is OR-ed on `|`.** `a|b` matches a row containing either; a query with no `|` behaves
   exactly as a plain substring search always did. This exists for `#find=` links (below) but is
   usable by hand, and the search box's tooltip says so.
+* **Another report can add to the rows (`SCV.annotate`).** A page may change its rows' cells, search
+  text and filter metadata — never their ids — from a second data file, after its own have loaded. The
+  Memories index marks the Memories the cache_controller report lists as possible from that report's
+  `data/memory_leads.js`, which is written *after* the Memories report and so cannot be in its rows (see
+  [report_memories.md](report_memories.md#possible-cached-file--the-cache_controller-reports-leads-from-this-side)).
 
 ## Links whose target is a set of rows (`#find=`)
 
@@ -93,6 +98,48 @@ Measured on a synthetic 101 200-row cache_controller index (Chrome, `file://`):
 > **Keep the `data/` folder next to the report.** If it is missing, the report shows a red banner
 > saying so instead of an empty table. Data files are loaded with `<script src=…>` (not `fetch`),
 > because `file://` pages are not allowed to `fetch`/`XMLHttpRequest` their own siblings.
+
+## Searching every report at once (`search.html`)
+
+Each report's box searches only that report, so a value that only one report lists — a file name under
+`Library/Caches`, a CACHE_KEY, a hash — was found only by whoever tried the right page.
+`scripts/global_search.py` writes `search.html` into the report folder, beside `selection.js`, whenever
+the folder's `index.html` is written (a full run, a partial extract, a cloud refresh), and it searches
+every report the folder holds at once.
+
+It runs **the reports' own search on the reports' own data**: it loads each report's `data/index.js` —
+and every conversation page's `pages/data/<key>/index.js`, for the messages — with `<script src>`, on the
+first search only, and matches each row's search text as `VTABLE_JS` does (lower-case substring, `|` for
+either). So a hit is a row the report's own box finds and the count beside a report is the count its box
+gives. Hits are grouped by report (messages by conversation), labelled from a few cells per report
+(`global_search.SOURCES`), and show where in the row's search text the match was. Each opens its row in
+the report's named tab (`#<anchor>`); *Open all* opens the report filtered to the same search
+(`#find=`), every match expanded. A report whose data file did not load is said to be missing, never
+"no match". The legacy single-page reports keep no rows and are named as not searched.
+
+**By date too.** The page carries the reports' own date/time window (`time_filter`, `TIME_JS`) — between
+two moments, or within ± N of one — on its own or with the words, which a row must then match as well.
+For that every report's rows carry the times they show as `ts` keys (`ts_keys`; a conversation's
+`ct`/`mt`): the Memories and message rows always did, and the Contacts (first and last activity),
+cache_controller (each claim's creation, the last read, the device's created / modified / read times
+of the file — `report_ui.fs_times` — and a media file's own times where it states its zone) and
+Library/Caches rows (the same, per copy) now do; the inode-change times in `tc`, matched while the
+page's *incl. inode changed* box is ticked (the default). A row with no readable time does not match a window, as in the reports, and a report whose rows
+record none is named as not searched by date rather than as having no match. *Open all* is not offered
+while a window is set: the link carries the words only, and would open more than the page found.
+
+Every report's search box has an *🔎 All reports* link beside it (`report_ui.search_all_link`): a plain
+`<a target="scauto_search">` whose `#q=` fragment `scSearchAll` (in `NAV_JS`) fills from the box at the
+moment of the click, so Ctrl-click and the named tab behave as for every other link. The page consumes
+its `#q=` fragment as `NAV_JS` does, so the same link clicked twice still searches.
+
+The run's `index.html` has the same search as a form (`global_search.index_form`) — the words **and**
+the date/time window, so searching by date does not depend on finding it on the search page. The form
+sends both in the fragment, `#q=<words>&mode=range&from=…&to=…&ctime=1` (or `mode=near&n=…&unit=…&at=…`),
+and the page sets its own controls from it before it searches. The index always sends its whole window,
+*any time* included (`mode=`), so a window left on a reused search tab is taken off when the index says
+none; a report's *All reports* link carries the words only and leaves the page's window as it is. With
+script off the form is a plain GET and the words still arrive (`?q=`).
 
 ## Cross-report navigation (`NAV_JS`)
 
@@ -175,6 +222,14 @@ while one is set rather than included on the strength of nothing. Every control'
 says that clearing the filter brings it back. The keys cover **every** timestamp a row has, including
 the ones only its detail shows, which is the point: a capture time is findable without knowing which
 column holds it.
+
+**The device's inode-change time can be left out** (`time_filter(..., ctime=True)`, `scTimeList`).
+A row carries it in `tc`, apart from its other times in `ts` (`report_ui.FS_TIME_KINDS`, `fs_times`),
+and a control built with `ctime=True` adds an *incl. inode changed* box that brings `tc` into the
+window. It starts **ticked**, so the window matches what other tools match; unticking it leaves those
+times out — copying or acquiring a file can set that time, and some archives store a placeholder there,
+so a window around the extraction can match files for a reason that has nothing to do with what the
+device's user did. The Memories index and the search over every report offer the box.
 
 **A conversation's two kinds of time are kept apart** (`scConvTimes`). `ct` is the conversation's own
 first/last activity — which for a conversation holding no message comes from the app's chat feed and

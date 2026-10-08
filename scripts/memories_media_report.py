@@ -39,6 +39,7 @@ import sqlite3
 import logging
 import subprocess
 import contextlib
+import uuid as uuid_mod
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
@@ -53,9 +54,12 @@ from Crypto.Cipher import AES
 from PIL import Image
 
 from scripts.data import ccl_bplist
+from scripts.data import keyed_archive
+from scripts.data import snap_overlay
 from scripts.data import sqlite_open
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
+from scripts.data import poster_frame
 from scripts.data import sniff
 from scripts.data import media_meta
 from scripts.data import device_fs
@@ -66,6 +70,11 @@ from scripts import app_version
 from scripts import partial_report
 from scripts import offline_maps
 from scripts import gallery_search
+from scripts import cloud_memories
+from scripts import memory_leads
+from scripts import progress
+from scripts import parallel
+from scripts import memory_backlinks
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +169,16 @@ def make_time_formatter(tz_spec):
     tz_spec: 'local' (examiner machine, default), 'utc', an IANA name ('America/Toronto',
     DST-aware), or a fixed offset ('-04:00'). Named zones handle daylight saving per-date.
     """
+    target, label = resolve_tz(tz_spec)
+
+    def fmt(ts):
+        return _format_dt(cocoa_to_dt(ts), target)
+
+    return fmt, label
+
+
+def resolve_tz(tz_spec):
+    """``(tzinfo or None for the examiner machine's local time, label)`` for a timezone spec."""
     spec = (tz_spec or "local").strip()
     low = spec.lower()
     if low == "utc":
@@ -184,11 +203,7 @@ def make_time_formatter(tz_spec):
                 target, label = timezone.utc, "UTC"
         else:
             target, label = timezone.utc, "UTC"
-
-    def fmt(ts):
-        return _format_dt(cocoa_to_dt(ts), target)
-
-    return fmt, label
+    return target, label
 
 
 def _format_dt(dt, target):
@@ -558,6 +573,95 @@ def _fmt_other(v):
     return v
 
 
+def _other_value(col, v, timefmt):
+    """:func:`_fmt_other`, except that a MemData archive (ZMEMDATAIDS / ZMEMDATAID) is read."""
+    if col in MEMDATA_COLUMNS:
+        records = decode_memdata(v)
+        if records is not None:
+            return memdata_text(records, timefmt)
+    return _fmt_other(v)
+
+
+#: The record a ZMEMDATAIDS / ZMEMDATAID archive is made of, and the container ZMEMDATAIDS holds them in.
+MEMDATA_RECORD = "SOJUGalleryServletMemDataId"
+MEMDATA_CONTAINER = "SOJUGalleryServletMemDataIds"
+#: Where those archives are stored.
+MEMDATA_COLUMNS = {"ZMEMDATAIDS": "ZGALLERYSNAP.ZMEMDATAIDS", "ZMEMDATAID": "ZGALLERYENTRY.ZMEMDATAID"}
+#: What each slot of the container is called in the report.
+MEMDATA_SLOTS = (("snapMemDataId", "snap"), ("entryMemDataId", "entry"))
+
+
+def decode_memdata(blob):
+    """The MemData identifiers in a ``ZGALLERYSNAP.ZMEMDATAIDS`` or ``ZGALLERYENTRY.ZMEMDATAID`` blob.
+
+    Both are NSKeyedArchiver plists. ZMEMDATAIDS's root object (``SOJUGalleryServletMemDataIds``)
+    holds up to two records, under ``snapMemDataId`` and ``entryMemDataId``; ZMEMDATAID's root *is*
+    one record (``SOJUGalleryServletMemDataId``). A record is a ``uuid``, a ``creationTimeMs`` (Unix
+    milliseconds) and an ``entryType`` (an integer, shown as stored).
+
+    Returns ``[{"slot", "uuid", "created_ms", "entry_type"}]`` — ``slot`` being the key the record
+    sat under, empty for a bare record — or None when the blob is not such an archive or any uuid in
+    it does not parse: the caller then shows the blob's size, as for any other blob. The uuid is
+    upper-cased, the case every other identifier in these reports is matched in.
+    """
+    root = keyed_archive.unarchive(blob)                   # None: not an archive at all
+    if root is None:
+        return None
+
+    def record(obj, slot):
+        if keyed_archive.class_name(obj) != MEMDATA_RECORD:
+            raise ValueError("not a MemData record")
+        raw = obj.get("uuid")
+        if isinstance(raw, dict) and isinstance(raw.get("NS.uuidbytes"), bytes):
+            raw = raw["NS.uuidbytes"]                      # an NSUUID rather than a string
+        ident = (uuid_mod.UUID(bytes=raw) if isinstance(raw, bytes) and len(raw) == 16
+                 else uuid_mod.UUID(str(raw)))
+        created, kind = obj.get("creationTimeMs"), obj.get("entryType")
+        return {"slot": slot, "uuid": str(ident).upper(),
+                "created_ms": created if isinstance(created, int) and created > 0 else None,
+                "entry_type": kind if isinstance(kind, int) else None}
+
+    try:
+        name = keyed_archive.class_name(root)
+        if name == MEMDATA_RECORD:
+            return [record(root, "")]
+        if name == MEMDATA_CONTAINER:
+            out = []
+            for slot, _label in MEMDATA_SLOTS:
+                target = root.get(slot)                    # None: absent, or $null
+                if target is not None:
+                    out.append(record(target, slot))
+            return out
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return None
+
+
+def _memdata_records(blob, col, timefmt):
+    """:func:`decode_memdata`'s records, each with the column it came from and its time shown."""
+    out = []
+    for rec in decode_memdata(blob) or []:
+        rec = dict(rec, field=MEMDATA_COLUMNS[col])
+        rec["created"] = (timefmt(rec["created_ms"] / 1000 - 978307200)
+                          if rec["created_ms"] else "")
+        out.append(rec)
+    return out
+
+
+def memdata_text(records, timefmt):
+    """``snap <uuid> · created <time> · entry type <n>`` per record, for a value cell."""
+    labels = dict(MEMDATA_SLOTS)
+    parts = []
+    for rec in records:
+        bits = [f"{labels.get(rec['slot'], rec['slot'])} {rec['uuid']}".strip()]
+        if rec["created_ms"]:
+            bits.append(f"created {timefmt(rec['created_ms'] / 1000 - 978307200)}")
+        if rec["entry_type"] is not None:
+            bits.append(f"entry type {rec['entry_type']}")
+        parts.append(" · ".join(bits))
+    return "; ".join(parts) or "(no identifier recorded)"
+
+
 MEDIA_OBJECT_KEY_BASIS = (
     "Moving a Memory into My Eyes Only does not re-encrypt the media that is already cached on the "
     "device. The app writes a NEW ZGALLERYSNAP row for the moved Memory whose own key "
@@ -646,6 +750,9 @@ def _bare_memory(snap_id, profile):
         "media_files": [],
         "wal": sqlite_open.BOTH,
         "prior_rows": [],
+        "memdata": [],
+        "raw_times": {}, "cloud_files": [],
+        "filter_assets": [],                               # no overlay record without a row
     }
 
 
@@ -747,7 +854,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
     # entry values are kept in their own dicts and rendered in their own report sections. The
     # label lists (SNAP_OTHER_LABELS / ENTRY_OTHER_LABELS) also gate which columns appear, so
     # schemas from different app versions only surface the fields we've curated.
-    entry_times, entry_other = {}, {}
+    entry_times, entry_other, entry_memdata, entry_raw = {}, {}, {}, {}
     etcols, entry_other_cols = [], []
     try:
         ecols = [r[1] for r in cur.execute("PRAGMA table_info(ZGALLERYENTRY)")]
@@ -764,7 +871,11 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # keep every column (None when empty) so the rendered tables share one column set
             entry_times[pk] = {c: (timefmt(er[c]) if isinstance(er.get(c), (int, float)) and er.get(c)
                                    else None) for c in etcols}
-            entry_other[pk] = {c: _fmt_other(er.get(c)) for c in entry_other_cols}
+            entry_other[pk] = {c: _other_value(c, er.get(c), timefmt) for c in entry_other_cols}
+            entry_memdata[pk] = _memdata_records(er.get("ZMEMDATAID"), "ZMEMDATAID", timefmt)
+            # the same values as numbers, for the cloud download's date rules
+            entry_raw[pk] = {f"ZGALLERYENTRY.{c}": er[c] for c in etcols
+                             if isinstance(er.get(c), (int, float)) and er.get(c)}
     except sqlite3.DatabaseError as error:
         logger.debug(f"ZGALLERYENTRY read failed: {error}")
     empty_entry_times = {c: None for c in etcols}
@@ -806,7 +917,7 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             "has_location": bool(r.get("ZHASLOCATION")),
             "times": times,
             "entry_times": entry_times.get(entry_pk, empty_entry_times),
-            "snap_other": {c: _fmt_other(r.get(c)) for c in snap_other_cols},
+            "snap_other": {c: _other_value(c, r.get(c), timefmt) for c in snap_other_cols},
             "entry_other": entry_other.get(entry_pk, empty_entry_other),
             "urls": {c: r.get(c) for c in url_cols if r.get(c)},
             "ids": {c: _clean_text(r.get(c)) for c in id_cols if r.get(c)},
@@ -829,6 +940,18 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             # since deleted it, i.e. a Memory the app no longer lists
             "wal": mark,
             "prior_rows": [],
+            # the MemData identifiers this row and its entry record about themselves
+            "memdata": (_memdata_records(r.get("ZMEMDATAIDS"), "ZMEMDATAIDS", timefmt)
+                        + entry_memdata.get(entry_pk, [])),
+            # every timestamp as stored (Cocoa seconds), for the cloud download's date rules
+            "raw_times": dict({f"ZGALLERYSNAP.{c}": r[c] for c in time_cols
+                               if isinstance(r.get(c), (int, float)) and r.get(c)},
+                              **entry_raw.get(entry_pk, {})),
+            # media retrieved from Snapchat's servers — never mixed into media_files
+            "cloud_files": [],
+            # the asset URLs of the geofilters its overlay record lists (snap_overlay) — never media;
+            # read only by collect_media, which replaces it with the cached ones (filter_cached)
+            "filter_assets": [],
         }
         if has_zenc and r.get("ZENCRYPTION"):
             try:
@@ -854,6 +977,17 @@ def load_memories(profile, egocipher, persisted, workdir, timefmt=None):
             except Exception as error:
                 logger.debug(f"ZENCRYPTION decode failed for {snap}: {error}")
         memories[snap] = m
+
+    # The overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY): the asset URLs of the geofilters it lists. The
+    # cache_controller report matches claims against them with the same rule (scripts/data/
+    # snap_overlay.py); collect_media finds the cached ones and drops the rest. Not media of the
+    # Memory, and no keychain.
+    for rec in snap_overlay.read_overlays(views):
+        m = memories.get(rec["snap_id"])
+        if m is not None:
+            m["filter_assets"] = rec["assets"]
+            m["filter_record"] = {"geofilters": rec["geofilters"], "selected": rec["selected"],
+                                  "wal": rec["wal"]}
 
     scdb_wal = dict(views.info)
     views.close()
@@ -1139,8 +1273,12 @@ def index_sccontent(app):
         parts (``<cache_key>_<start>-<end>``). These must be concatenated in offset order before
         decrypting — the same reconstruction parseSnapvideos writes to ``SnapFixedVideos`` (but
         those stay encrypted; here we rebuild and decrypt from the parts directly).
+
+    Three reports ask for this in one run, and a large cache holds tens of thousands of files, so the
+    listing is kept (:data:`_SC_INDEX`) and handed out again while no folder of it has changed — a
+    folder's modification time moves whenever a file is added to it, removed or renamed. Each caller
+    gets its own copy of the lists.
     """
-    full, parts = {}, {}
     folders = []
     for pat in ("Documents/com.snap.file_manager_*_SCContent_*",
                 "Library/Caches/com.snap.file_manager_*_SCContent_*"):
@@ -1148,20 +1286,32 @@ def index_sccontent(app):
     if android_layout.is_app_dir(app):
         # the Android app keeps the same folders under files/native_content_manager/
         folders += android_layout.scan(app)[1]
-    for d in folders:
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            fp = os.path.join(d, name)
-            if not os.path.isfile(fp):
-                continue
-            mo = _SC_SPLIT_RE.match(name)
-            if mo:
-                start = int(mo.group(2)) if mo.group(2) is not None else 0
-                parts.setdefault(mo.group(1).lower(), []).append((start, fp))
-            else:
-                full.setdefault(name, []).append(fp)
-    return full, parts
+    folders = [d for d in folders if os.path.isdir(d)]
+    stamp = tuple((d, os.stat(d).st_mtime_ns) for d in folders)
+    kept = _SC_INDEX.get(os.path.abspath(app))
+    if kept is None or kept[0] != stamp:
+        full, parts = {}, {}
+        for d in folders:
+            # scandir rather than listdir + isfile: the same names in the same order, without a
+            # second system call per file to ask whether it is one
+            with os.scandir(d) as listing:
+                for item in listing:
+                    if not item.is_file():
+                        continue
+                    name, fp = item.name, os.path.join(d, item.name)
+                    mo = _SC_SPLIT_RE.match(name)
+                    if mo:
+                        start = int(mo.group(2)) if mo.group(2) is not None else 0
+                        parts.setdefault(mo.group(1).lower(), []).append((start, fp))
+                    else:
+                        full.setdefault(name, []).append(fp)
+        kept = _SC_INDEX[os.path.abspath(app)] = (stamp, (full, parts))
+    full, parts = kept[1]
+    return {k: list(v) for k, v in full.items()}, {k: list(v) for k, v in parts.items()}
+
+
+#: index_sccontent's listings: app folder -> (folders and their mtimes, (full, parts)).
+_SC_INDEX = {}
 
 
 # "<cache_key>_<start>-<end>": the byte range a shard covers. index_sccontent's _SC_SPLIT_RE only
@@ -1222,6 +1372,20 @@ def _resolve_sccontent(cache_key, full, parts):
     if ordered:
         return _read_concat(paths), [], paths, _part_coverage(ordered)
     return None, [], [], None
+
+
+def _sccontent_size(cache_key, full, parts):
+    """How many bytes ``_resolve_sccontent`` would return for a cache key, from ``stat`` alone."""
+    fulls = full.get(cache_key, [])
+    if fulls:
+        return os.path.getsize(fulls[0])
+    seen_off, total = set(), 0
+    for off, p in sorted(parts.get(cache_key.lower(), [])):
+        if off in seen_off:
+            continue
+        seen_off.add(off)
+        total += os.path.getsize(p)
+    return total
 
 
 def _sccontent_head(cache_key, full, parts, n=16):
@@ -1319,6 +1483,48 @@ def index_cache_controller(app):
     return out
 
 
+def index_claims(app):
+    """``(index_claim_uuids, index_claim_urls)`` from one read of every CACHE_FILE_CLAIM — both
+    readings of every ``cache_controller.db``, like every other read here."""
+    uuids, urls = {}, {}
+    for db in cache_controller_paths(app):
+        claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
+        for c in claims:
+            ek, ck = c.get("EXTERNAL_KEY"), c.get("CACHE_KEY")
+            if not ek or not ck:
+                continue
+            for mo in _UUID_RE.finditer(str(ek)):
+                pair = (ck, c.get("MEDIA_CONTEXT_TYPE"))
+                if pair not in uuids.setdefault(mo.group(0).upper(), []):
+                    uuids[mo.group(0).upper()].append(pair)
+            key = snap_overlay.normalise_url(str(ek))
+            if key:
+                claim = (ck, c.get("MEDIA_CONTEXT_TYPE"), c.get("USER_ID") or "", str(ek))
+                if claim not in urls.setdefault(key, []):
+                    urls[key].append(claim)
+    return uuids, urls
+
+
+def index_claim_uuids(app):
+    """Every UUID in any CACHE_FILE_CLAIM EXTERNAL_KEY: ``{UPPER(uuid): [(cache_key, context)]}``.
+
+    Unlike :func:`index_cache_controller` this does not care about the claim's shape: it is how a
+    Memory's MemData identifiers (:func:`decode_memdata`) find the claims that carry them, whatever
+    those claims look like. Both readings of the database, like every other read here.
+    """
+    return index_claims(app)[0]
+
+
+def index_claim_urls(app):
+    """Every claim whose EXTERNAL_KEY is an http(s) URL, by that URL as
+    ``snap_overlay.normalise_url`` gives it: ``{url: [(cache_key, context, USER_ID, EXTERNAL_KEY)]}``.
+
+    It is how the asset URLs a Memory's overlay record lists find their cached files — the same match
+    the cache_controller report makes from the other end (``_overlay_links_for``).
+    """
+    return index_claims(app)[1]
+
+
 def all_cache_keys(app):
     """Return the set of every CACHE_KEY present in cache_controller.db (lowercased).
 
@@ -1405,21 +1611,10 @@ def _quiet_stderr():
         yield
 
 
-# How many frames to try before giving up on a poster. Partially cached video decodes at the start
-# and fails after that, so the frame we want is always within the first few reads; the bound is
-# what stops a badly damaged file from being decoded end to end for a thumbnail.
-_POSTER_MAX_READS = 60
-
-
-def _first_decodable(cap, limit):
-    """The first frame that decodes, reading forward from the current position. None if none does."""
-    for _ in range(limit):
-        ok, frame = cap.read()
-        if ok and frame is not None:
-            return frame
-        if not ok:                                         # stream ended / unrecoverable
-            return None
-    return None
+# The frame itself is cut by scripts/data/poster_frame.py, which a thumbnail worker imports on its
+# own; these names stay for the callers that have always used them here.
+_POSTER_MAX_READS = poster_frame.POSTER_MAX_READS
+_first_decodable = poster_frame.first_decodable
 
 
 def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=True):
@@ -1440,49 +1635,11 @@ def generate_poster(video_path, out_path, at_seconds=1.0, complete=True, quiet=T
     ``quiet`` redirects fd 2 for the duration to keep FFmpeg's chatter out of the console. That
     redirect is **process-global and not thread-safe**, so a caller that runs this concurrently — or
     that walks away from a call still inside it — corrupts stderr for the whole process. The worker
-    passes ``quiet=False`` because its stderr already belongs to the parent.
+    calls :mod:`scripts.data.poster_frame` without it, because its stderr already belongs to the
+    parent.
     """
-    for var in ("OPENCV_LOG_LEVEL", "OPENCV_FFMPEG_LOGLEVEL", "OPENCV_VIDEOIO_DEBUG"):
-        os.environ.setdefault(var, "OFF" if "LOG_LEVEL" in var else "0")
-    try:
-        import cv2
-    except Exception as error:
-        logger.debug(f"cv2 unavailable, cannot generate poster: {error}")
-        return False
-    try:
-        frame = None
-        with (_quiet_stderr() if quiet else contextlib.nullcontext()):
-            cap = cv2.VideoCapture(video_path)
-            try:
-                if complete:
-                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
-                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-                    if fps and frames:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES,
-                                min(int(fps * at_seconds), max(int(frames) - 1, 0)))
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        frame = _first_decodable(cap, _POSTER_MAX_READS)
-                else:
-                    frame = _first_decodable(cap, _POSTER_MAX_READS)
-            finally:
-                cap.release()
-        if frame is None:
-            return False
-        # imencode + a plain write, not cv2.imwrite: on Windows imwrite goes through the ANSI
-        # API, so a destination path holding any character outside the system codepage makes
-        # it return False and write nothing -- the poster is lost with no error, for a run
-        # whose only sin was a case folder with an accent in it.
-        ok, buffer = cv2.imencode(os.path.splitext(out_path)[1] or ".jpg", frame)
-        if not ok:
-            return False
-        with open(out_path, "wb") as fh:
-            fh.write(buffer.tobytes())
-        return True
-    except Exception as error:
-        logger.debug(f"poster generation failed for {video_path}: {error}")
-        return False
+    return poster_frame.generate_poster(video_path, out_path, at_seconds, complete,
+                                        quiet_ctx=_quiet_stderr if quiet else None)
 
 
 # Extensions sniff.guess_media returns for something that holds no video frames. An audio recording
@@ -1681,7 +1838,8 @@ def _add_posters(memories, outdir, published):
                 f"in {time.monotonic() - t0:.0f}s")
 
 
-def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None):
+def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=None, ccindex=None,
+                  claim_uuids=None, claim_urls=None):
     """Decrypt SCContent + caching-media for all memories; write files, fill m['media_files'].
 
     SCContent files are located two ways: by ``SHA256(url token)[:16]`` (CDN-downloaded media)
@@ -1712,6 +1870,25 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
     # They go through the same path below, where decrypt_sccontent identifies plaintext before it
     # ever looks at a key, so exactly the plaintext caches are recovered and nothing else.
     unkeyed = [(sid, m) for sid, m in memories.items() if not (m["key"] and m["iv"])]
+    # The MemData identifiers each Memory records about itself, and which Memories record each one:
+    # an entry's id is shared by every snap of the entry, and an id several Memories share names
+    # none of them. Only read when some Memory has one (newer app versions).
+    memdata_owners = {}
+    for sid, m in memories.items():
+        for rec in m.get("memdata") or []:
+            memdata_owners.setdefault(rec["uuid"], set()).add(sid)
+    if claim_uuids is None or claim_urls is None:
+        uuids, urls = index_claims(app)
+        claim_uuids = uuids if claim_uuids is None else claim_uuids
+        claim_urls = urls if claim_urls is None else claim_urls
+    # The cached assets of the geofilters each Memory's overlay record lists: a claim whose key is
+    # the asset's URL. Shown on the Memory's page apart from its media, never decrypted or published.
+    # The full list is taken off the Memory as it is read: nothing reads it after this, and on a
+    # geofilter-heavy gallery it is most of what a Memory weighs while the report runs.
+    for m in memories.values():
+        listed = m.pop("filter_assets", None) or ()
+        m["filter_cached"] = [dict(asset, claims=claim_urls[asset["key"]])
+                              for asset in listed if asset["key"] in claim_urls]
 
     # This function does all the per-file work of the report and can run for a long time on a large
     # gallery, so each phase reports its progress: a silent hour is indistinguishable from a hang.
@@ -1722,9 +1899,13 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
 
     # --- SCContent (URL-addressed + cache_controller-addressed, whole or split into parts) ---
     addressed = keyed + unkeyed
-    for done, (sid, m) in enumerate(addressed, 1):
-        if done % 2000 == 0:
-            logger.info(f"  SCContent: {done}/{len(addressed)} memories")
+
+    def decode(item):
+        """Locate, read, decrypt and hash one Memory's SCContent media — nothing that depends on
+        another Memory, so it runs on several threads (``parallel.ordered_map``). What is
+        published, and under which name, is decided by the loop below in ``addressed`` order: the
+        first Memory to recover some bytes names the file, exactly as before."""
+        sid, m = item
         has_key = bool(m["key"] and m["iv"])
         targets = []                                       # (role, cache_key, addressing basis)
         url_fields = {"full": "ZMEDIADOWNLOADURL", "overlay": "ZOVERLAYDOWNLOADURL",
@@ -1752,8 +1933,29 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                          f"this Memory references (ZMEDIAID / ZDUPLICATEDFROMSNAPID) — and points "
                          f"at CACHE_KEY {ck}.")
                 targets.append((role, ck, basis))
+        # A claim can carry a MemData identifier this Memory records about itself (ZMEMDATAIDS /
+        # its entry's ZMEMDATAID) — a recorded reference, like the media object's id above.
+        for rec in m.get("memdata") or []:
+            if memdata_owners.get(rec["uuid"]) != {sid}:
+                continue
+            for ck, context in claim_uuids.get(rec["uuid"], []):
+                basis = (f"Located via cache_controller.db: a CACHE_FILE_CLAIM EXTERNAL_KEY carries "
+                         f"{rec['uuid']}, which this Memory records about itself in {rec['field']}"
+                         + (f" ({rec['slot']})" if rec["slot"] else "")
+                         + f", and points at CACHE_KEY {ck}.")
+                targets.append(("rendered" if context == 26 else "full", ck, basis))
+        # A full-media claim (MEDIA_CONTEXT_TYPE 19) whose key is none of the Memory-scoped shapes
+        # but carries this Memory's ZSNAPID — "<snapId>~1" — names it exactly. The cache_controller
+        # report makes the same link (its fallback after ZMEDIAID). A claim of a Memory-scoped shape
+        # was already located above, and a cache key is decrypted once.
+        for ck, context in claim_uuids.get(sid.upper(), []):
+            if context == 19:
+                basis = (f"Located via cache_controller.db: a full-media CACHE_FILE_CLAIM "
+                         f"(MEDIA_CONTEXT_TYPE 19) whose EXTERNAL_KEY is none of the Memory-scoped "
+                         f"shapes carries this Memory's ZSNAPID and points at CACHE_KEY {ck}.")
+                targets.append(("full", ck, basis))
 
-        seen = set()
+        seen, found = set(), []
         for role, cache_key, addr_basis in targets:
             if cache_key in seen:
                 continue
@@ -1790,6 +1992,17 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                 write_bytes = stripped
                 hashes = ([("no padding", *_hashes(stripped)), ("with padding", *_hashes(padded))]
                           if has_pad else [("", *_hashes(stripped))])
+            found.append((role, cache_key, addr_basis, write_bytes, hashes, ext, fulls, pparts,
+                          complete, why_incomplete))
+        return found
+
+    for done, ((sid, m), found) in enumerate(
+            zip(addressed, parallel.ordered_map(decode, addressed)), 1):
+        progress.step("decrypting SCContent media", done, len(addressed))
+        if done % 2000 == 0:
+            logger.info(f"  SCContent: {done}/{len(addressed)} memories")
+        for (role, cache_key, addr_basis, write_bytes, hashes, ext, fulls, pparts, complete,
+             why_incomplete) in found:
             entry = _save_media(outdir, f"{sid}_{role}_{cache_key[:8]}.{ext}", write_bytes,
                                 published)
             source = (f"SCContent (rebuilt from {len(pparts)} parts)"
@@ -1827,6 +2040,7 @@ def collect_media(memories, app, outdir, padding="both", scfull=None, scparts=No
                 f"{len(keyed)} key(s)")
     n_packs = 0
     for done, (folder, by_item) in enumerate(cm_folders, 1):
+        progress.step("matching caching-media packs to keys", done, len(cm_folders))
         if done % 500 == 0:
             logger.info(f"  caching-media: {done}/{len(cm_folders)} folder(s), {n_packs} file(s)")
         # Probe with the first two plaintext blocks only. Every acceptance test in decrypt_pack
@@ -2057,6 +2271,7 @@ SNAP_TIME_LABELS = {
     "ZCAPTURETIMEUTC": "Captured",
     "ZPLACEHOLDERCREATETIME": "Placeholder created",
 }
+# (the timestamp names a cloud download's date rule can use are listed after both tables)
 ENTRY_TIME_LABELS = {
     # confirmed ZGALLERYENTRY timestamp columns (note ZCREATETIMEUTC also exists on ZGALLERYSNAP)
     "ZCREATETIMEUTC": "Entry created",
@@ -2081,6 +2296,10 @@ URL_LABELS = {
 # Extra (non-time, non-URL, non-id) columns worth surfacing. Kept in two dicts because a
 # column name (e.g. ZSOURCE) can exist in BOTH tables with a different meaning, so each table
 # owns its own label set and both values are rendered independently in their own section.
+#: Every timestamp a cloud download's date rule can name, as "<table>.<column>".
+TIMESTAMP_FIELDS = ([f"ZGALLERYSNAP.{c}" for c in SNAP_TIME_LABELS]
+                    + [f"ZGALLERYENTRY.{c}" for c in ENTRY_TIME_LABELS])
+
 SNAP_OTHER_LABELS = {
     # ZGALLERYSNAP
     "Z_OPT": "OPT", # integer value usually between 1 and over 20
@@ -2519,6 +2738,12 @@ def _memory_times(m):
     for col, value in (m.get("entry_times") or {}).items():
         if value:
             out.append((ENTRY_TIME_LABELS.get(col, col), value, f"scdb-27 › ZGALLERYENTRY.{col}"))
+    slots = dict(MEMDATA_SLOTS)
+    for rec in m.get("memdata") or []:
+        if rec.get("created"):
+            slot = f"{rec['slot']}." if rec["slot"] else ""
+            out.append((f"MemData id created ({slots.get(rec['slot'], 'record')})", rec["created"],
+                        f"scdb-27 › {rec['field']} › {slot}creationTimeMs"))
     if (m.get("search") or {}).get("date"):
         # a calendar date the app wrote into its search index — local, and with no zone stated,
         # so it is a string here, never an instant
@@ -2541,6 +2766,26 @@ def _memory_times(m):
             out.append((t["label"], t["shown"], source))
         out += _device_time_rows(f)
     return out
+
+
+def _memory_time_keys(m):
+    """``{"ts": [...], "tc": [...]}`` — the time filter's keys for one Memory: every timestamp it
+    has (``_memory_times``), with the device's inode-change times apart in ``tc``. A device line
+    shows one instant under every kind that shares it, so only a line that is an inode change and
+    nothing else goes to ``tc``; ``tc`` is left out when empty."""
+    ctime_only = []
+    for f in m.get("media_files") or []:
+        if f.get("generated"):
+            continue
+        lines, _attrs = f.get("device_summary") or ([], [])
+        ctime_only += [shown for _labels, shown, _note, kinds in lines if list(kinds) == ["ctime"]]
+    rest = [value for _label, value, _src in _memory_times(m)]
+    for shown in ctime_only:
+        if shown in rest:
+            rest.remove(shown)
+    ts = report_ui.ts_keys(*rest)
+    tc = [key for key in report_ui.ts_keys(*ctime_only) if key not in set(ts)]
+    return {"ts": ts, **({"tc": tc} if tc else {})}
 
 
 def _device_time_rows(f):
@@ -2897,6 +3142,30 @@ def _dedup_media(members):
     return files
 
 
+def _source_id(f):
+    """Which cache file a media record was recovered from: its source, cache key and pack."""
+    return (f.get("source"), str(f.get("cache_key") or "").lower(), f.get("folder") or "",
+            f.get("item") or "")
+
+
+def _media_sources(members):
+    """``{content key: [record, ...]}`` — every cache file each distinct content was recovered from.
+
+    The file table shows one row per distinct content, and the row used to describe only the first
+    record that produced it. The same bytes are routinely recovered twice — a thumbnail from its
+    SCContent file and again from a caching-media pack, a pack from two folders — and every record
+    after the first vanished from the page: the Library/Caches report linked those packs to this
+    Memory while the Memory's page named none of them. One record per distinct source, in walk order.
+    """
+    out = {}
+    for m in members:
+        for f in m["media_files"]:
+            lst = out.setdefault(_media_key(f), [])
+            if not any(_source_id(o) == _source_id(f) for o in lst):
+                lst.append(f)
+    return out
+
+
 def _media_refs(members):
     """``{content key: [(snap id, role), ...]}`` — which of these Memories recovered each file.
 
@@ -3093,7 +3362,14 @@ _BASE_CSS = """
  .partialbar{background:#fdeeee;border:1px solid #edb8b8;border-left:4px solid #b03535;color:#6d1b1b;
    border-radius:5px;padding:8px 12px;margin:8px 0;font-size:12px;line-height:1.5}
  .partialcap{color:#b03535;font-weight:700}
+ .cloudwarn{background:#e3f1fb;border:1px dashed #5b9bc8;border-left:4px solid #0d4a75;color:#0d4a75;
+   border-radius:5px;padding:8px 12px;margin:6px 0;font-size:12px;line-height:1.5}
+ .cloudoffer{font-size:12px;color:#333;margin:4px 0}
+ .cloudoffer button{font-size:12px;padding:3px 9px;border:1px solid #5b9bc8;border-radius:5px;background:#e3f1fb;
+   color:#0d4a75;font-weight:700;cursor:pointer;margin-left:4px}
  tr.partialrow td{background:#fff8f8}
+ /* another cache file the same bytes were recovered from (see _media_sources) */
+ .alsosrc{margin-top:5px;padding-top:4px;border-top:1px dashed #e0e0e8}
  .hint{position:relative;display:inline-block}
  .qm{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;
    background:#c9cdf0;color:#25348a;font-size:10px;font-weight:700;cursor:pointer;margin:0 4px;user-select:none;vertical-align:middle}
@@ -3224,6 +3500,15 @@ SHARED_MEDIA_BASIS = (
     "media and another's thumbnail. Each Memory's own source paths and cache keys stay in its "
     "media_by_cache_key.json records; nothing about provenance is merged, only the copy on disk.")
 
+
+IDENTICAL_ON_DEVICE_BASIS = (
+    "Proven by content: these cache files are byte-identical (SHA-256) to this media as this run "
+    "recovered it, and no identifier on the device connects them to this Memory — the cache reports "
+    "link them to it on the bytes alone. Typically the snap editor's working copy of a snap that was "
+    "then saved to Memories. The comparison is made against every SCContent file, whole or rebuilt "
+    "from its byte-range parts; the Library/Caches report makes the same comparison with its own "
+    "files. A file some Memory's media was recovered from is not compared: its identifiers link it "
+    "already.")
 
 PACK_IN_CACHEMEDIA_BASIS = (
     "caching-media packs are NOT indexed by cache_controller.db, so the cache_controller report "
@@ -3474,9 +3759,41 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                                             f"mem-{member['snap_id']}", "cm")
 
     refs = _media_refs(members)
+    sources = _media_sources(members)
+
+    def source_html(f):
+        cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
+        if f.get("in_cc") and f.get("cache_key"):
+            cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cache' "
+                f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
+                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
+                [("cc", f"ck-{f['cache_key']}")], closure=closure)
+        elif f.get("source") == "caching-media" and f.get("item"):
+            # cache_controller.db does not index these, so the only report that inventories the
+            # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
+            # several rows there — so the link filters that report to this pack's item hash and
+            # opens every chunk, rather than pointing at one of them.
+            # The chunks are several rows over there and this link addresses them by the pack's item
+            # hash, not by a row id — so the rows it reaches come from the edge the Library/Caches
+            # report derived, which is known before any page is written (Closure.reaches).
+            cell += " " + report_ui.xref(
+                f"<a class='cclink' target='scauto_cachemedia' "
+                f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
+                f"{report_ui.find_fragment([f['item']])}\" "
+                f"title=\"open the Library/Caches report filtered to this pack's "
+                f"chunk file(s), all expanded\">🗂 Library/Caches</a>",
+                pack_targets, closure=closure) + _info(PACK_IN_CACHEMEDIA_BASIS)
+        if f.get("cross_scope"):
+            cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
+                     + _info(_cross_scope_note(f)))
+        return cell
+
     frows = []
     for f in sorted(files, key=lambda f: (f["source"], -f["bytes"])):
         srcs = _render_src_paths(f, src_root, manifest)
+        # the same bytes recovered from other cache files too: each is named, with its own paths
+        others = [o for o in sources.get(_media_key(f)) or [] if _source_id(o) != _source_id(f)]
         role_cell = html.escape(f["role"])
         # Which of the memories shown recovered this file. Silent on a single-memory page — there is
         # only one answer — but on a group page it is the only thing that says whether a file came
@@ -3499,31 +3816,29 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                           f"<span class='hl'>SHA-256</span>{tag} {sha256}")
         hashes = "<div class='hgap'></div>".join(blocks)
         dim = f.get("dim") or f.get("snap_dim") or ""
-        source_cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
-        if f.get("in_cc") and f.get("cache_key"):
-            source_cell += " " + report_ui.xref(
-                f"<a class='cclink' target='scauto_cache' "
-                f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
-                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
-                [("cc", f"ck-{f['cache_key']}")], closure=closure)
-        elif f.get("source") == "caching-media" and f.get("item"):
-            # cache_controller.db does not index these, so the only report that inventories the
-            # bytes on disk is the Library/Caches one. A pack is stored as several .pack chunks —
-            # several rows there — so the link filters that report to this pack's item hash and
-            # opens every chunk, rather than pointing at one of them.
-            # The chunks are several rows over there and this link addresses them by the pack's item
-            # hash, not by a row id — so the rows it reaches come from the edge the Library/Caches
-            # report derived, which is known before any page is written (Closure.reaches).
-            source_cell += " " + report_ui.xref(
-                f"<a class='cclink' target='scauto_cachemedia' "
-                f"href=\"{cc_prefix}CacheMedia/CacheMedia_report.html"
-                f"{report_ui.find_fragment([f['item']])}\" "
-                f"title=\"open the Library/Caches report filtered to this pack's "
-                f"chunk file(s), all expanded\">🗂 Library/Caches</a>",
-                pack_targets, closure=closure) + _info(PACK_IN_CACHEMEDIA_BASIS)
-        if f.get("cross_scope"):
-            source_cell += (" <span class='xscope'>⚠ cross-scope copy</span>"
-                            + _info(_cross_scope_note(f)))
+        source_cell = source_html(f)
+        if others:
+            source_cell += "".join(f"<div class='alsosrc'>and {source_html(o)}</div>" for o in others)
+            srcs += "".join(f"<div class='alsosrc'>{_render_src_paths(o, src_root, manifest)}</div>"
+                            for o in others)
+        # cache files with these same bytes that nothing but the bytes connects to this Memory
+        same = []
+        for mm in members:
+            for o in mm["media_files"]:
+                if _media_key(o) != _media_key(f):
+                    continue
+                for hit in o.get("identical_cached") or ():
+                    if hit.get("what") == "device" and hit["cache_key"] not in same:
+                        same.append(hit["cache_key"])
+        if same:
+            source_cell += (
+                "<div class='alsosrc'>≡ the same bytes, linked by content"
+                + _info(IDENTICAL_ON_DEVICE_BASIS) + ": " + ", ".join(
+                    report_ui.xref(
+                        f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                        f"CacheController_report.html#ck-{html.escape(key)}\">🗄 "
+                        f"{html.escape(key)}</a>", [("cc", f"ck-{key}")], closure=closure)
+                    for key in same) + "</div>")
         frows.append(
             f"<tr{' class=partialrow' if f.get('complete') is False else ''}>"
             f"<td>{role_cell}</td><td>{source_cell}</td>"
@@ -3555,9 +3870,189 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
           {''.join(mem_blocks)}
           <div class="sect">Timestamps — Snap (ZGALLERYSNAP){_info(SNAP_DB_TIME_BASIS)}</div>{_ts_table(members, snap_tcols, "times", SNAP_TIME_LABELS, single)}
           <div class="sect">Timestamps — Entry / album (ZGALLERYENTRY){_info(ENTRY_DB_TIME_BASIS)}</div>{_ts_table(members, entry_tcols, "entry_times", ENTRY_TIME_LABELS, single)}
-          <div class="sect">Media files</div>{files_table}
+          <div class="sect">Media files</div>{files_table}{_filter_assets_html(members, cc_prefix, closure)}
+          {_backlinks_placeholder(members)}
+          {_leads_placeholder(members, closure)}
+          {_cloud_html(members, media_prefix, cc_prefix, closure)}
         </div>
       </div>"""
+
+
+FILTER_ASSETS_PAGE_BASIS = (
+    "cache_controller entries whose claim EXTERNAL_KEY is exactly a URL this Memory's overlay record "
+    "(scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, an NSKeyedArchiver archive of "
+    "SOJUGallerySnapOverlay) gives an asset of one of its listed geofilters: the filter image, the "
+    "sky image or the font of its text — or the sky item's blimpUrl, when it holds one. The whole URL "
+    "is compared, query included, never an id "
+    "inside it. The record lists the snap's geofilters and names the selected one separately "
+    "(filters.geoFilterSelectedId / geoFilterSelectedIds), so a listed filter is not shown to be on "
+    "the Memory, and these files are not its media: they are not among the Media files above, and "
+    "none of them was decrypted. The cache_controller report makes the same match with the same rule "
+    "and links each file back here.")
+
+
+def account_matches(user_id, user_hash):
+    """Whether a claim's USER_ID is the account a userHash names (SHA-256 of the user id, as
+    ``map_userids`` derives it): True or False, or None when either is not known."""
+    if not user_id or not user_hash:
+        return None
+    hashes = {hashlib.sha256(u.encode()).hexdigest() for u in (user_id, user_id.lower())}
+    return str(user_hash).lower() in hashes
+
+
+def _filter_record_line(m, several):
+    """What a Memory's overlay record says about its geofilters: how many, and which it selects."""
+    rec = m.get("filter_record") or {}
+    named = []
+    for s in rec.get("selected") or ():
+        kind = ", ".join(bit for bit in (s.get("filter_type"), s.get("group")) if bit)
+        named.append(f"idValue {html.escape(s['filter_id'])}"
+                     + (f" ({html.escape(kind)})" if kind else ""))
+    sid = html.escape(m["snap_id"])
+    return ("<div class='mrefs'>"
+            + (f"<a href='#mem-{sid}' title='{sid}'>{sid[:8]}…</a>: " if several else "")
+            + f"The overlay record lists {rec.get('geofilters', 0)} geofilter(s); it names "
+            + (", ".join(named) if named else "none") + " as selected.</div>")
+
+
+def _filter_assets_html(members, cc_prefix="../../", closure=None):
+    """The cached assets of the geofilters these Memories' overlay records list; ``""`` when none.
+
+    Apart from Media files, and said to be. On a page several Memories share, each asset is given
+    under the Memory whose record lists it — a Snap column — rather than once for the group.
+    """
+    listing = [m for m in members if m.get("filter_cached")]
+    if not listing:
+        return ""
+    several = len(members) > 1
+    lines, rows = [], []
+    for m in listing:
+        lines.append(_filter_record_line(m, several))
+        sid = html.escape(m["snap_id"])
+        own = m.get("user_hash") or ""
+        for asset in m["filter_cached"]:
+            by_key = {}
+            for ck, context, user, ek in asset["claims"]:
+                by_key.setdefault(ck, []).append((context, user, ek))
+            kind = " · ".join(bit for bit in (asset.get("filter_type"), asset.get("group"),
+                                               f"idValue {asset['filter_id']}"
+                                               if asset.get("filter_id") else "") if bit)
+            for ck, claims in by_key.items():
+                link = report_ui.xref(
+                    f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                    f"CacheController_report.html#ck-{html.escape(ck)}\">🗄 {html.escape(ck)}</a>",
+                    [("cc", f"ck-{ck}")], closure=closure)
+                said = []
+                for context, user, ek in claims:
+                    said.append(f"context {html.escape(str(context))} · "
+                                f"<span class='mono'>{html.escape(ek)}</span>"
+                                + (" <span class='xscope'>another account&#39;s claim</span>"
+                                   if account_matches(user, own) is False else ""))
+                rows.append(
+                    "<tr>"
+                    + (f"<td class='mono'><a href='#mem-{sid}' title='{sid}'>{sid[:8]}…</a></td>"
+                       if several else "")
+                    + f"<td>{link}</td><td>{html.escape(asset['role'])}</td>"
+                    f"<td class='mono'>{html.escape(asset['field'])}"
+                    + (" <span class='unverified'>only in scdb-27 without its -wal</span>"
+                       if asset.get("wal") == sqlite_open.MAIN_ONLY else "")
+                    + f"</td><td>{html.escape(kind)}</td>"
+                    f"<td>{html.escape(snap_overlay.SELECTED_TEXT[asset.get('selected')])}</td>"
+                    f"<td>{'<br>'.join(said)}</td></tr>")
+    head = ("<tr>" + ("<th>Snap</th>" if several else "")
+            + "<th>Cached file</th><th>Asset</th><th>Where in the overlay record</th><th>Filter</th>"
+            "<th>Selected, per the record</th><th>Claim (context, EXTERNAL_KEY)</th></tr>")
+    return ("<div class='sect'>Cached assets of filters listed with this Memory — not its media"
+            + _info(FILTER_ASSETS_PAGE_BASIS) + "</div>" + "".join(lines)
+            + "<table class='files'>" + head + "".join(rows) + "</table>")
+
+
+def _backlinks_placeholder(members):
+    """Where the Library/Caches files linked to these Memories are listed — filled by
+    memory_backlinks.PAGE_JS from what that report, rendered after this page, wrote."""
+    sids = " ".join(html.escape(m["snap_id"]) for m in members)
+    return f'<div id="memcm" data-snaps="{sids}"></div>'
+
+
+def _leads_placeholder(members, closure):
+    """Where the Memory's *Possible cached file* panel goes — filled by memory_leads.MEMORY_JS.
+
+    The cache_controller report decides the leads and renders after this page is written, so the
+    page carries only the snap ids to look them up by. A partial extract offers no snap-id copy for
+    a retrieval, as it offers none in the servers block either.
+    """
+    sids = " ".join(html.escape(m["snap_id"]) for m in members)
+    offer = "" if closure is not None else ' data-offer="1"'
+    return f'<div id="memleads" data-snaps="{sids}"{offer}></div>'
+
+
+def _cloud_html(members, media_prefix, cc_prefix, closure):
+    """The detail page's Snapchat's-servers block: what was retrieved, or what a retrieval could add.
+
+    Retrieved media sits in its own section, under a warning, with the request it came from and the
+    authority it was asked under, and the cache files on the device proven byte-identical to it. A
+    Memory nothing was retrieved for, but which a server copy could complete, gets the reason and a
+    button that copies its snap id for the Cloud download window — never in a partial extract, which
+    is a finished deliverable rather than a working report.
+    """
+    files = [(m, f) for m in members for f in m.get("cloud_files") or []]
+    if files:
+        rows = []
+        for m, f in files:
+            hashes = f.get("hashes") or [("", "", "")]
+            enc = f.get("encrypted") or {}
+            same = []
+            for hit in f.get("identical_cached") or []:
+                same.append(report_ui.xref(
+                    f"<a class='cclink' target='scauto_cache' href=\"{cc_prefix}CacheController/"
+                    f"CacheController_report.html#ck-{html.escape(hit['cache_key'])}\">🗄 "
+                    f"{html.escape(hit['cache_key'])}</a>",
+                    [("cc", f"ck-{hit['cache_key']}")], closure=closure)
+                    + (" <span class='muted'>(as received)</span>"
+                       if hit.get("what") == "encrypted" else ""))
+            auth = f.get("authority") or {}
+            rows.append(
+                "<tr>"
+                + (f"<td class='mono'>{html.escape(m['snap_id'])}</td>" if len(members) > 1 else "")
+                + f"<td>{html.escape(f.get('role') or '')}</td>"
+                f"<td>{html.escape((f.get('ext') or '').upper())}</td>"
+                f"<td>{(f.get('bytes') or 0) // 1024} KB</td>"
+                f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
+                f"<td class='hash'><span class='hl'>MD5</span> {html.escape(hashes[0][1] or '')}<br>"
+                f"<span class='hl'>SHA-256</span> {html.escape(hashes[0][2] or '')}"
+                f"<div class='hgap'></div><span class='pl'>as received</span> "
+                f"{html.escape(str(enc.get('bytes') or ''))} bytes, SHA-256 "
+                f"{html.escape(enc.get('sha256') or '')}</td>"
+                f"<td>{html.escape(f.get('retrieved_utc') or '')}<br><span class='muted'>"
+                f"{html.escape(f.get('url_column') or '')} · HTTP "
+                f"{html.escape(str(f.get('http_status') or ''))}</span></td>"
+                f"<td>{'<br>'.join(same) or '<span class=muted>none</span>'}</td>"
+                f"<td>{html.escape(auth.get('note') or '')}</td></tr>")
+        head = ("<tr>" + ("<th>Snap</th>" if len(members) > 1 else "")
+                + "<th>Role</th><th>Type</th><th>Size</th><th>File</th>"
+                "<th>Hashes (decrypted / as received)</th><th>Retrieved (UTC)</th>"
+                "<th>Identical files on the device</th><th>Legal authority</th></tr>")
+        return ("<div class='sect'>☁ Retrieved from Snapchat&#39;s servers — NOT device evidence"
+                + _info(cloud_memories.CLOUD_BASIS) + "</div>"
+                "<div class='cloudwarn'>These files were requested from Snapchat&#39;s servers at "
+                "the examiner&#39;s request, from the addresses this Memory&#39;s row records, and "
+                "decrypted with its own key. They show what the server returned when asked, not what "
+                "the device held — the device&#39;s own copies, if any, are in Media files above."
+                "</div><table class='files'>" + head + "".join(rows) + "</table>")
+    if closure is not None:
+        return ""
+    wanted = [m for m in members if (m.get("cloud") or {}).get("state") in ("missing", "incomplete")]
+    if not wanted:
+        return ""
+    reasons = sorted({r for m in wanted for r in (m.get("cloud") or {}).get("reasons") or []})
+    ids = json.dumps([m["snap_id"] for m in wanted])
+    return ("<div class='sect'>Snapchat&#39;s servers" + _info(cloud_memories.CANDIDATE_BASIS)
+            + "</div><div class='cloudoffer'>A copy from Snapchat&#39;s servers could add to what "
+            "the device holds: " + html.escape("; ".join(reasons)) + ". "
+            f"<button onclick='scCopySnapIds({html.escape(ids)},\"this Memory\")'>☁ Get from "
+            "Snapchat&#39;s servers…</button> <span class='muted'>copies the snap id"
+            + ("s" if len(wanted) > 1 else "") + " for Snapchat Auto&#39;s Cloud download window; "
+            "nothing is requested from here.</span></div>")
 
 
 def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entry_tcols,
@@ -3590,14 +4085,21 @@ def render_subpage(key, members, pages_dir, keychain_available, snap_tcols, entr
     doc = (f'<!doctype html><html><head><meta charset="utf-8">'
            f'<title>Memory {html.escape(lead["snap_id"][:8])}…</title>{report_ui.emoji_font_link("../../")}'
            f'<style>{_BASE_CSS}{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}{report_ui.NAV_CSS}{report_ui.SELECT_CSS}{_MAP_CSS}{_SUBSEL_CSS}'
+           f'{memory_leads.MEMORY_CSS}'
            f'{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../../selection.js"></script></head><body>'
            f'<header><h1>Snapchat Memory detail</h1>'
            f'<div class="sum">Group of {len(members)} memory(ies) &middot; times in {html.escape(tz_label)}</div></header>'
-           f'{banner}{back}{selbar}{body}<script>{_HINT_JS}{report_ui.NAV_JS}'
-           f'{report_ui.SELECT_TOOLBAR_JS}'
+           f'{banner}{back}{selbar}{body}'
+           f'<script>{memory_leads.LOADER_JS}{memory_backlinks.LOADER_JS}</script>'
+           f'<script src="../../CacheController/data/{memory_leads.SCRIPT_NAME}"></script>'
+           f'<script src="../../CacheMedia/data/{memory_backlinks.SCRIPT_NAME}"></script>'
+           f'<script>{_HINT_JS}{report_ui.NAV_JS}'
+           f'{report_ui.SELECT_TOOLBAR_JS}{report_ui.CLIPBOARD_JS}{memory_leads.MEMORY_JS}'
+           f'{memory_backlinks.PAGE_JS}'
+           f'scCacheMediaPage("../../");scLeadsPage("../../");'
            f'scSyncBoxes();scSelNote();SCSel.onChange(function(){{scSyncBoxes();scSelNote();}});'
            f'scConsumeHash();</script></body></html>')
     os.makedirs(pages_dir, exist_ok=True)
@@ -3930,6 +4432,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                 kind += "<div class='walgone' title='deleted since the last checkpoint'>DELETED</div>"
             elif changed:
                 kind += "<div class='walchg' title='row rewritten since the last checkpoint'>EDITED</div>"
+            cloud = m.get("cloud") or {}
+            if m.get("cloud_files"):
+                kind += ("<div class='cloudb' title='media retrieved from Snapchat&#39;s servers at the "
+                         "examiner&#39;s request — not device evidence; open Details'>☁ CLOUD</div>")
             # cells stay as markup-free as possible — per-column styling lives in the CSS (.vc.cN),
             # since every byte here is multiplied by the number of memories in data/index.js
             cells = [
@@ -3960,6 +4466,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
             # may survive only as a recovered key row — is findable from either end
             searchable = ([zsnap, str(zentry), str(zmedia), str(uid), md5, sha, m["create_utc"]]
                           + [str(r) for r in m.get("media_refs") or []]
+                          + [rec["uuid"] for rec in m.get("memdata") or []]
                           + list(tokens) + list(dict.fromkeys(m["urls"].values())))
             # The AES key and IV in hex, as another tool prints them, so a key seen elsewhere finds
             # its Memory here; and what the media files say about themselves (camera, software, GPS,
@@ -3991,6 +4498,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                     searchable.append("search index place")
             if changed:
                 searchable.append("edited changed rewritten since checkpoint wal")
+            if m.get("cloud_files"):
+                searchable.append("cloud retrieved snapchat servers download")
+                searchable += [f["hashes"][0][2] for f in m["cloud_files"] if f.get("hashes")]
             if m["latitude"] is not None:
                 searchable.append(f"{m['latitude']:.5f}, {m['longitude']:.5f}")
             anchor = f"mem-{zsnap}"
@@ -4007,6 +4517,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  "geo": _geo_state(m),
                  "meta": "y" if has_meta else "n",
                  **({"stag": "y"} if snap_tags else {}),   # only when true: paid per row
+                 **({"cl": cloud["state"]} if cloud.get("state") else {}),
                  "wal": ("carved" if carved else
                          "keyrow" if recovery.get("method") == METHOD_KEY_ROW else
                          "index" if recovery else
@@ -4014,7 +4525,9 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                  # Every timestamp this Memory has, as the wall clock the report displays (see
                  # report_ui.ts_key) — including the columns only the detail shows, which is the
                  # point: a capture time is findable without knowing which column holds it.
-                 "ts": report_ui.ts_keys(*(value for _label, value, _src in _memory_times(m))),
+                 # The inode-change times are kept apart (`tc`) and matched only when the
+                 # control's box asks for them — see report_ui.FS_TIME_KINDS.
+                 **_memory_time_keys(m),
                  # The row this one is folded behind — on the lead too, pointing at itself, so one
                  # field answers "which group is this row in". Omitted for a Memory that is a group
                  # of one: there is nothing to fold, and every byte here is paid per row.
@@ -4029,7 +4542,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     # list and the fold's lead id, which are not states and have nothing to count.
     counts = {}
     for row in rows:
-        for key in ("img", "meo", "part", "geo", "meta"):
+        for key in ("img", "meo", "part", "geo", "meta", "cl"):
             value = row[5].get(key)
             counts.setdefault(key, {})[value] = counts.setdefault(key, {}).get(value, 0) + 1
         if row[5].get("stag"):                             # a narrower option of the same filter
@@ -4048,6 +4561,14 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
                                            ("tag", "with the Snapchat app's tag"),
                                            ("n", "none worth a look")),
                                           counts.get("meta", {}))
+    cloud_opts = report_ui.counted_options(cloud_memories.STATES, counts.get("cl", {}))
+    # what a report holding server-retrieved media has to say about it, at the top of the index
+    cloud_prov = cloud_memories.provenance(memories)
+    cloud_note = "" if not cloud_prov else (
+        "<div class='cloudbar'>☁ <b>" + str(cloud_prov["memories"]) + "</b> Memory/Memories carry "
+        "media retrieved from Snapchat's servers — <b>not device evidence</b> — at the examiner's "
+        "request, under: " + "; ".join(html.escape(x["note"]) for x in cloud_prov["sessions"])
+        + _info(cloud_memories.CLOUD_BASIS) + "</div>")
 
     user_opts = "".join(f"<option value='{html.escape(u)}'>{html.escape(u)}</option>"
                         for u in sorted({(userids.get(m['user_hash']) or ('userHash ' + m['user_hash'][:10] + '…'))
@@ -4095,6 +4616,11 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
  .vcells>.vc.c2 .walrec{background:#5e2d1d;color:#fff;border:1px solid #44120a;border-radius:3px;
    font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .vcells>.vc.c2 .cloudb{background:#e3f1fb;color:#0d4a75;border:1px dashed #5b9bc8;border-radius:3px;
+   font-size:9px;font-weight:700;letter-spacing:.04em;padding:0 4px;margin-top:3px;display:inline-block}
+ .cloudbar{background:#e3f1fb;border:1px dashed #5b9bc8;color:#0d4a75;padding:8px 24px;font-size:13px}
+ button.copyids{font-size:12.5px;padding:5px 9px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71;margin-left:8px}
  .idxplace{color:#1f5e2e}
  .vcells>.vc.c3,.vcells>.vc.c4,.vcells>.vc.c5,.vcells>.vc.c6{
    font-family:ui-monospace,Consolas,monospace;font-size:11px;overflow-wrap:anywhere}
@@ -4143,7 +4669,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
     doc = (f'<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Memories</title>'
            f'{report_ui.emoji_font_link("../")}'
            f'<style>{_BASE_CSS}{index_css}{report_ui.VTABLE_CSS}{report_ui.NAV_CSS}'
-           f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{partial_css}</style>'
+           f'{report_ui.SELECT_CSS}{report_ui.TIME_CSS}{memory_leads.MEMORY_CSS}{partial_css}</style>'
            f'<script>window.SCAUTO_RUN={json.dumps(run_id)};window.SCAUTO_VERSION={json.dumps(app_version.get_version())};{sources_js}window.SCAUTO_SELKIND="mem";</script>'
            f'<script>{report_ui.SELECT_JS}</script>'
            f'<script src="../selection.js"></script>'
@@ -4158,10 +4684,11 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            + f'times in <b>{html.escape(tz_label)}</b></div>'
            + figures
            + _wal_summary_html(memories) + '</header>'
-           f'{partial_banner_html}{banner}'
+           f'{partial_banner_html}{banner}{cloud_note}'
            f'{report_ui.missing_data_banner("Memories_report.html")}'
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search IDs, hashes, tokens, URLs, AES key / IV, camera, user…" oninput="flt()">'
+           f'{report_ui.search_all_link("../")}'
            f'<label>User <select id="user" onchange="flt()"><option value="">all</option>{user_opts}</select></label>'
            f'<label title="Whether the index row can show a still for this Memory. A video with no '
            f'cached still gets one only if a poster frame could be extracted from it, so «no '
@@ -4188,13 +4715,26 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<option value="carved">deleted outright (key carved)</option>'
            f'<option value="keyrow">no Memory row (key row survives)</option>'
            f'<option value="index">no Memory row (search index only)</option></select></label>'
-           + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT)
+           f'<label>Snapchat&#39;s servers{report_ui.info_icon(cloud_memories.CANDIDATE_BASIS)} '
+           f'<select id="cloud" onchange="flt()"><option value="">any</option>'
+           f'{cloud_opts}</select></label>'
+           # Shown only once the cache_controller report's memory_leads.js names a Memory: until
+           # then it is a control that can match nothing (see memory_leads.MEMORY_JS).
+           f'<label id="pcfl" style="display:none">Possible cached file'
+           f'{report_ui.info_icon(memory_leads.memory_basis())} '
+           f'<select id="pcf" onchange="flt()"><option value="">any</option>'
+           f'<option id="pcfy" value="y">with a possible cached file</option></select></label>'
+           + report_ui.time_filter("t", label="Time", noun="memory", hint=TIME_FILTER_HINT,
+                                   ctime=True)
            + f'<label class="tfl" title="{html.escape(FOLD_CONTROL_HINT)}">'
            f'<input type="checkbox" id="fold" checked onchange="flt()">Fold groups'
            f'{report_ui.info_icon(FOLD_CONTROL_HINT)}</label>'
            f'{report_ui.clear_filters_button("memory")}'
            f'<span id="count" style="color:#555"></span></div>'
-           f'<div class="toolbar">{report_ui.selection_toolbar("memory")}</div>'
+           f'<div class="toolbar">{report_ui.selection_toolbar("memory")}'
+           f'<button class="copyids" onclick="scCopySelectedMemories()" title="Copy the snap ids of '
+           f'the ticked Memories, one per line, to paste into Snapchat Auto&#39;s Cloud download '
+           f'window">📋 Copy snap IDs</button></div>'
            f'<div class="pager" id="pager"></div>'
            f'<div class="vhdr" id="vhdr" style="grid-template-columns:{MEM_SEL_W} {MEM_COLS}">'
            f'<div class="vc sel">'
@@ -4216,8 +4756,10 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            f'<div class="vwin" id="vwin"></div></div>'
            f'<div class="vempty" id="vempty" style="display:none">No memory matches the current filters.</div>'
            f'<script src="data/index.js"></script>'
+           f'<script>{memory_leads.LOADER_JS}</script>'
+           f'<script src="../CacheController/data/{memory_leads.SCRIPT_NAME}"></script>'
            f'<script>{_HINT_JS}{report_ui.NAV_JS}{report_ui.SELECT_TOOLBAR_JS}'
-           f'{report_ui.TIME_JS}'
+           f'{report_ui.TIME_JS}{report_ui.CLIPBOARD_JS}{memory_leads.MEMORY_JS}'
            'var flt_t=0;'
            # A lead reached only through a folded member is opened on the member that matched, so
            # the row does not look like one the filters should not have returned. See openFoldHits.
@@ -4239,11 +4781,12 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'match:function(m,r){var u=document.getElementById("user").value,'
            'im=document.getElementById("img").value,mo=document.getElementById("meo").value,'
            'pa=document.getElementById("part").value,wa=document.getElementById("wal").value,'
-           'ge=document.getElementById("geo").value,me=document.getElementById("meta").value;'
+           'ge=document.getElementById("geo").value,me=document.getElementById("meta").value,'
+           'cl=document.getElementById("cloud").value,pc=scFv("pcf");'
            'return (!u||m.user===u)&&(!im||m.img===im)&&(!mo||m.meo===mo)&&(!pa||m.part===pa)'
-           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)'
+           '&&(!wa||m.wal===wa)&&(!ge||m.geo===ge)&&(!cl||m.cl===cl)&&(!pc||m.pcf===pc)'
            '&&(!me||(me==="tag"?m.stag==="y":m.meta===me))'
-           '&&scTimeHit(scTimeWin("t"),m.ts)'
+           '&&scTimeHit(scTimeWin("t"),scTimeList("t",m))'
            '&&scSelPass("mem",SCV.selId(r[0]));},'
            'selectedOnly:scSelOnly,'
            'selCount:scSelCount,'
@@ -4257,13 +4800,16 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
            'document.getElementById("user").value="";document.getElementById("img").value="";'
            'document.getElementById("meo").value="";document.getElementById("part").value="";'
            'document.getElementById("wal").value="";document.getElementById("geo").value="";'
-           'document.getElementById("meta").value="";'
+           'document.getElementById("meta").value="";document.getElementById("cloud").value="";'
+           'scFvReset("pcf");'
            'scTimeReset("t");'
            # The fold hides rows, so "show me everything again" has to include unfolding — and it is
            # what lets a cross-report link sent to a folded Memory land on the row itself (goTo calls
            # reset() when its target is not in the view).
            'document.getElementById("fold").checked=false;'
            'document.getElementById("selonly").value="";}});'
+           # the Kind cell (c2) carries the badge, as it carries every other state badge
+           'scLeadsIndex("../",2);'
            'scSelNote();scConsumeHash();'
            '</script></body></html>')
 
@@ -4276,7 +4822,7 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
 # --------------------------------------------------------------------------- entry
 
 def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
-          tile_server=""):
+          tile_server="", cloud=None, run_folder=None):
     """
     Recover the Memories and their media, and hand back the closure's view of them.
 
@@ -4294,6 +4840,9 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
     tile_server : URL of an **offline** XYZ map tile server the examiner runs (server root or a
                   ``{z}/{x}/{y}`` template). Only when given, each geolocated Memory's detail page
                   gets a small map rendered from it. Nothing is fetched otherwise.
+    cloud       : a :class:`cloud_memories.CloudRequest` — retrieve media from Snapchat's servers
+                  first, under the legal authority it records. Never given in a partial run.
+    run_folder  : the run folder whose ``CloudDownloads/`` holds earlier retrievals to show.
     """
     app = find_app_container(app_or_root)
     # When no src_root is given (e.g. the standalone CLI), device_path() falls back to anchoring
@@ -4433,6 +4982,32 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
                         src_root=src_root, manifest=manifest,
                         fs=load_fs_records(src_root, app_or_root, app))
 
+    # Snapchat's servers (scripts/cloud_memories.py): whether a copy there could add anything, a
+    # retrieval when the examiner asked for one, and what earlier retrievals into this run folder hold.
+    # What comes back goes into cloud_files, never media_files, so the groups, hashes and states
+    # derived from device evidence cannot change because of it.
+    for m in all_memories.values():
+        m.setdefault("cloud_files", [])
+        m["cloud"] = cloud_memories.candidate(m)
+    if cloud is not None and run_folder:
+        cloud_memories.cloud_phase(all_memories, run_folder, cloud, decrypt_sccontent)
+    if run_folder and cloud_memories.attach(all_memories, run_folder, media_dir):
+        for m in all_memories.values():
+            m["cloud"] = cloud_memories.candidate(m)
+    # Proven by content: a cache file no identifier connects to a Memory, byte-identical to media
+    # this run recovered for it from the device — or to a copy retrieved from Snapchat's servers.
+    identical = cloud_memories.find_identical(
+        all_memories, scfull, scparts, lambda key: _resolve_sccontent(key, scfull, scparts),
+        size_of=lambda key: _sccontent_size(key, scfull, scparts))
+    if identical:
+        by_what = {}
+        for recs in identical.values():
+            by_what[recs[0]["what"]] = by_what.get(recs[0]["what"], 0) + 1
+        logger.info(f"Proven by content: {len(identical)} cache file(s) byte-identical to a Memory's "
+                    f"media — {by_what.get('device', 0)} to what this run recovered from the device, "
+                    f"{len(identical) - by_what.get('device', 0)} to a copy retrieved from Snapchat's "
+                    f"servers")
+
     # The closure's view. No mem -> cc edges are recorded here: cache_controller's own index records
     # that same edge from its end, and the edge store is read from either end, so `mem_cache` finds
     # it without this report deriving it twice.
@@ -4464,7 +5039,7 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
                                 tile_server=tile_server, tz_label=tz_label, userids=userids,
                                 src_root=src_root, manifest=manifest,
                                 keychain_available=keychain_available, keychain_note=kc["detail"],
-                                meo_owners=meo_owners)
+                                meo_owners=meo_owners, identical=identical)
 
 
 def _prune_media(outdir, memories):
@@ -4479,17 +5054,21 @@ def _prune_media(outdir, memories):
     media_dir = os.path.join(outdir, "media")
     if not os.path.isdir(media_dir):
         return 0
-    keep = {f["out"] for m in memories.values() for f in m.get("media_files") or () if f.get("out")}
+    keep = {f["out"] for m in memories.values()
+            for f in list(m.get("media_files") or ()) + list(m.get("cloud_files") or ())
+            if f.get("out")}
     removed = 0
-    for name in os.listdir(media_dir):
-        if name in keep:
-            continue
-        try:
-            os.remove(os.path.join(media_dir, name))
-            removed += 1
-        except OSError as error:
-            logger.warning(f"Could not remove decrypted media {name}, which no Memory in this "
-                           f"extract references: {error}")
+    for dirpath, _dirs, names in os.walk(media_dir):
+        for name in names:
+            rel = os.path.relpath(os.path.join(dirpath, name), media_dir).replace("\\", "/")
+            if rel in keep:
+                continue
+            try:
+                os.remove(os.path.join(dirpath, name))
+                removed += 1
+            except OSError as error:
+                logger.warning(f"Could not remove decrypted media {rel}, which no Memory in this "
+                               f"extract references: {error}")
     return removed
 
 
@@ -4527,6 +5106,9 @@ def render(stage, closure=None, prov=None):
         if pruned:
             logger.info(f"  {pruned} decrypted media file(s) and map image(s) removed: no Memory in "
                         f"this extract references them")
+    identical = {key: kept for key, recs in (stage.get("identical") or {}).items()
+                 if (kept := [r for r in recs if r["snap_id"] in memories])}
+    cloud_memories.write_manifests(memories, outdir, identical)
     if os.path.isdir(workdir):
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -4540,7 +5122,7 @@ def render(stage, closure=None, prov=None):
 
 
 def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_root=None,
-         tile_server=""):
+         tile_server="", cloud=None, run_folder=None):
     """Build a Memories media report: :func:`index` then :func:`render`.
 
     See :func:`index` for the arguments. A partial run calls the two halves separately, so the closure
@@ -4548,7 +5130,7 @@ def main(app_or_root, keychain="", outdir=None, padding="both", tz="local", src_
     media recovery itself is on the index side; :func:`index` says why.
     """
     stage = index(app_or_root, keychain=keychain, outdir=outdir, padding=padding, tz=tz,
-                  src_root=src_root, tile_server=tile_server)
+                  src_root=src_root, tile_server=tile_server, cloud=cloud, run_folder=run_folder)
     return render(stage)
 
 

@@ -935,7 +935,9 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
              # resolves one more identifier.
              **({"uid": contact["user_id"]} if contact["user_id"] else {}),
              **({"user": contact["username"]} if contact["username"] else {}),
-             **({"conv_id": conv_id} if conv_id else {})},
+             **({"conv_id": conv_id} if conv_id else {}),
+             # first and last activity as displayed, for the search over every report
+             "ts": report_ui.ts_keys(first_txt, last_txt)},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1008,7 +1010,7 @@ def generate_report(contacts, outdir, conv_index=None, friends_source="", tz_lab
            + (report_ui.missing_data_banner("Contacts_report.html") if contacts else "") +
            f'<div class="stickytop"><div class="toolbar">'
            f'<input type="search" id="q" placeholder="Search name, username, user id, '
-           f'conversation…" oninput="flt()">'
+           f'conversation…" oninput="flt()">{report_ui.search_all_link("../")}'
            f'<label>Conversation <select id="conv" onchange="flt()"><option value="">any</option>'
            f'<option value="y">has a conversation id</option>'
            f'<option value="n">no conversation id</option></select></label>'

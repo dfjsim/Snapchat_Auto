@@ -23,7 +23,12 @@ Memories / My Eyes Only.
   `com.snap.file_manager_*_SCContent_*` folders — i.e. exactly what that database indexes.
 - iOS `Library/Caches` report: `scripts/cache_media_report.py` (everything under `Library/Caches`
   that `cache_controller.db` does **not** index: story renders, URL-keyed PINCache stores, saved
-  chat media, and the cached documents). Disjoint from the cache_controller report by design.
+  chat media, and the cached documents). Disjoint from the cache_controller report by design. It renders
+  after the Memories report, so what it links to a Memory reaches the Memory's page as a data file
+  (`scripts/memory_backlinks.py`), as the cache_controller report's leads do (`scripts/memory_leads.py`).
+- Chat media kept in pieces: `scripts/chat_media.py` — rebuilds a chat claim's media the cache keeps as
+  a bundle (descriptor + child files) or as byte-range shards, before the shared join, on both
+  platforms; only bytes that are media are written, and `chat_cache_key` explains each attachment.
 - Android: `scripts/ParseSnapchat_Android.py` — the Android run. The chat database (`arroyo.db`) and
   the cached-file index (`cache_controller.db` + `com.snap.file_manager_*_SCContent_*`) are the **same
   databases as on iOS**, so the chat parsing is `ParseSnapchat_iOS`'s functions called unchanged and
@@ -49,6 +54,19 @@ Memories / My Eyes Only.
   (`emoji_font.css`, Noto Color Emoji, linked by every page) that makes an emoji look the same on every
   workstation: every report font stack **ends** with `EMOJI_FONT_STACK`, and a symbol the reports draw
   as text belongs in `UI_SYMBOLS` — see [report_ui.md](docs/report_ui.md).
+- Search all reports: `scripts/global_search.py` writes `search.html` beside `selection.js` whenever a
+  folder's `index.html` is written — each report's own search (its `data/index.js` search text, `|` for
+  either) over every report and every conversation's messages at once; every report's search box links
+  to it (`report_ui.search_all_link`). See [report_ui.md](docs/report_ui.md#searching-every-report-at-once-searchhtml).
+- Progress: `scripts/progress.py` — GUI-free stages (`progress.stage`), steps inside them
+  (`progress.step`, `Counter`), a *still working* heartbeat into every 30 s silence of the log, and a
+  per-stage timing summary at the end of a run. Bracket a new long stage and step through any loop
+  that can run for minutes. `scripts/parallel.py` (`ordered_map`) runs independent per-file work on
+  threads and returns it **in order** — whatever names, de-duplicates or publishes stays in the
+  caller's loop, so the reports stay byte-identical. `scripts/run_window.py` is the GUI's view of all
+  of it: the run on a worker thread behind a window of stages, counts, the log, the retrieval's controls
+  and *Skip thumbnails*. **Nothing reachable from `run()` may touch a window** — report through
+  `progress`, the log or a queue. See [progress_and_performance.md](docs/progress_and_performance.md).
 - Offline maps: `scripts/offline_maps.py` — static map imagery for geolocated Memories, fetched
   **only** from a tile server the examiner configures in the GUI (never the internet by default).
 - Display scaling: `scripts/hidpi.py` — claims Windows DPI awareness before the first window exists,
@@ -62,9 +80,14 @@ Memories / My Eyes Only.
   sharper?" cannot be answered without something to compare against. See
   [hidpi_scaling.md](docs/hidpi_scaling.md).
 - Shared helpers: `scripts/data/` (`ccl_bplist.py`, `keychain.py` UFED keychain decrypter,
-  `parse3.py`/`Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
-  thumbnails, in a killable subprocess because one cached video in six hangs the decoder for good —
-  `sniff.py`, the shared magic-byte identifier — identify content with `sniff.classify`, never by
+  `Snapchat_pb2.py` protobuf, bundled `sqlcipher3.exe`, `poster_worker.py` — video
+  thumbnails, in killable subprocesses (a few at once, frames cached by the video's SHA-256 in the run
+  folder, no time limit — the run window skips) because one cached video in six hangs the decoder for
+  good —
+  `protobuf_wire.py`, the schema-less protobuf reader every decode shares, and `snap_session.py`, the
+snap editor's session record in `userPreferences/pref.docobjects` (which CACHE_KEY a context-34 claim's
+snap is held in; carved versions kept only when a claim corroborates them) —
+`sniff.py`, the shared magic-byte identifier — identify content with `sniff.classify`, never by
   name or extension, and only call something "encrypted" when it says so: it requires high entropy
   **and** AES block alignment, because "we cannot display it" is not the same statement as "it is
   encrypted" — and `media_meta.py`, which reads what a media file says about **itself**: EXIF/XMP,
@@ -82,17 +105,37 @@ Memories / My Eyes Only.
   Snap's TSAF containers — `user.plist` and `ClientEncryptionService.plist` are not plists — whose
   one rule is that a value must *immediately* follow its key; and `flatbuffers_doc.py`, a root-table
   reader for the `*.docobjects` FlatBuffers documents that hands back a name only when the document's
-  slot 0 is the user id the caller already knows; and `arroyo_content.py`, what an arroyo.db
+  slot 0 is the user id the caller already knows (and, one level deeper, a sub-table's slots and a
+  `[ubyte]` vector — `table_field`, `bytes_field`, `string_field(…, table=)` — for the creative-tools
+  items, behind the same slot-0 self-check); and `arroyo_content.py`, what an arroyo.db
   `conversation_message` row *is* — every `content_type` named, and its `message_content` body (4.4)
   described: app events from their own fields, shares, replies — read straight off the wire, and a
-  kind it does not know named by its field number, never guessed).
+  kind it does not know named by its field number, never guessed; and `keyed_archive.py`, a strict
+  NSKeyedArchiver resolver shared by the MemData ids, overlay-record and creative-tools feed-tree
+  (`ctp__feedtree`) readers, which converts by the archive's own class names and gives None, never a
+  partial tree, for anything that does not hold together (the older `ccl_bplist`-based readers and
+  `ufed_keychain` still resolve their own); and
+  `snap_overlay.py`, a Memory's overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`) and the asset URLs of
+  the geofilters it lists, with `normalise_url`, the one whole-URL rule a claim key is matched to a URL
+  by — a listed filter is never said to be on the Memory, and a file matched this way is never its
+  media; and `ctp_items.py`, the creative-tools item store (`primary.docobjects` › `ctp__item_5`, every
+  account's, both readings, staged in a temp folder: a FlatBuffers document with a protobuf inside, the
+  feed named only from `ctp__feedtree`) and the cached files its items name — exact whole texts only
+  (the whole key, the key after `<word>:` / `<word>~`, or the same id bytes), never a query parameter
+  or a part of a text, a text several items of a store hold attributed only to the one whose own id
+  it is (one item listed in several feeds is one item), the `item_id` column matched even when the
+  document has another layout; information on the entry, never a link; and
+  `base64_text.py`, the one rule for when a text is base64, shared by `--trace-ids`, the survey and
+  the item matcher).
 - Selection format: `packages/snapchat_auto_selection/` — a **stdlib-only, dependency-free** uv workspace
   member owning the selection file and the `SelectionBuilder` / `anchor_for` / `validate` / `describe`
   API, so another tool can produce a selection without taking on this project's dependencies. The app
   imports the same module (`scripts/selection_file.py` re-exports it) — one implementation. Its
   dependency list must stay empty; a test walks its ASTs to enforce that.
 - Run/build: `uv` project (`pyproject.toml`), Nuitka build via `build_nuitka.cmd` (portable onefile
-  EXE), MSI via `uv run build` (`dfjsim_shared_tools`). `[project].version` carries a
+  EXE), MSI via `uv run build` (`dfjsim_shared_tools`). Both load `build_tools/nuitka_tcl_zipfs.py`, a
+  Nuitka user plugin named in `Snapchat_Auto.py`, which extracts the Tcl/Tk 9 libraries the python.org
+  runtime keeps inside its Tcl DLLs — without it tk-inter stops with "Could not find Tcl". `[project].version` carries a
   `+build.<N>` tag because the optional update check compares it against installer filenames —
   `dfjsim_shared_tools.auto_update` does the checking, `Snapchat_Auto.py` the wiring, see
   [auto_update.md](docs/auto_update.md). The folder it checks is
@@ -101,6 +144,22 @@ Memories / My Eyes Only.
 - Headless runs: `Snapchat_Auto.py --zip <file> [--keychain …] [--workdir …] [--run-name …]`
   runs the whole pipeline with no GUI and no pause, which is how the tool is scripted over
   several extractions. `run()` is the shared entry point for both the GUI and the CLI.
+- Identifier search: `Snapchat_Auto.py --trace-ids <run folder> <id>…` (`scripts/trace_ids.py`) — where
+  each id occurs in a run's `ExtractedData/` (text/UTF-16/hex/raw/LE-UUID/base64; databases row by row in
+  both readings; superseded `-wal` frames). Reports locations only, never content — it is how a finding
+  on case data is checked without the data leaving the case machine. See [trace_ids.md](docs/trace_ids.md).
+- Claim link survey: `Snapchat_Auto.py --survey-claim-links <run folder>` (`scripts/claim_link_survey.py`) —
+  every `cache_controller.db` claim's link status and where in `arroyo.db` the ids of its key occur
+  (table, column, protobuf field, content_type, rows per id), grouped by key shape. Shapes and counts
+  only; it is how a missing chat link rule is found on case data. See
+  [claim_link_survey.md](docs/claim_link_survey.md).
+- Retrieval from Snapchat's servers (1.9): `scripts/cloud_download.py` (the engine: authority gate,
+  host policy, pacing, the hash-chained `CloudDownloads/cloud_manifest.jsonl`), `scripts/cloud_memories.py`
+  (candidates, scopes, date rules, `cloud_files` kept apart from `media_files`, the byte-identity proof
+  against cached files) and `scripts/cloud_refresh.py` (a run folder's settings, the targeted refresh).
+  Off unless asked, never in a partial run, nothing contacted without `Authority.problems()` empty. What
+  comes back is not device evidence and every page that shows it says so. Method credited to DFIR-HBG's
+  Snapchat_DownloadMemories_iOS (unlicensed: nothing copied). See [cloud_download.md](docs/cloud_download.md).
 - Partial reports: adding `--selection <file>` to a normal run renders **only** the rows an examiner
   ticked plus the related items they asked for, into `Reports_partial_<stamp>/` — the full `Reports/`
   is never touched. Same pipeline, in two halves: every report's `index()`, then one closure, then
@@ -147,6 +206,14 @@ quoting the count. Placeholders such as `<snapId>`, `<userHash>`, `<CACHE_KEY>` 
 format examples.
 
 The corpus itself, and the script that runs it, live outside the repo for the same reason.
+
+### Licences — what may go into `scripts/`
+
+`scripts/` is compiled into the MIT-licensed EXE and MSI. **No copyleft (GPL/AGPL) source goes in
+it** — two GPL files had to be rewritten from their formats in 1.9 (`ufed_keychain.py`,
+`protobuf_wire.py`). Every third-party file added to the repository needs its notice in
+`THIRD_PARTY_NOTICES.md`; a new Python dependency is picked up by `build_tools/collect_licenses.py`
+(re-run it, commit `THIRD_PARTY_LICENSES.txt`). `tests/test_third_party_notices.py` enforces all three.
 
 ### Commit messages — the co-author trailer
 

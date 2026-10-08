@@ -152,6 +152,37 @@ def test_the_device_record_of_a_cached_file_is_shown(run):
     assert "<b>created" not in detail and "<b>modified" in detail
 
 
+def test_the_cache_report_has_none_of_the_ios_filter_record_link(run):
+    """The overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY) is read on iOS only: the Android run's cache
+    report carries none of what a filter-record link adds, so it is what it was."""
+    _base, reports = run
+    page = open(reports / "CacheController" / "CacheController_report.html", encoding="utf-8").read()
+    for absent in ('value="Filter"', ".chip.mem.filt", "listed with a Memory"):
+        assert absent not in page, absent
+    assert all("Filter" not in row[5]["link"]
+               for row in _rows(reports / "CacheController" / "data" / "index.js"))
+
+
+def test_the_chat_manifest_lists_every_conversation_and_what_arroyo_db_holds(run):
+    """The Conversations manifest as on iOS: every conversation listed, the one with no message too,
+    and what arroyo.db holds — its own account and each conversation's message numbers — for a
+    claim naming a message no row is there for. No claim of this cache does, so the cache report is
+    what it was."""
+    _base, reports = run
+    manifest = json.loads((reports / "Conversations" / "cache_links.json").read_text("utf-8"))
+    assert manifest["version"] == 3
+    assert set(manifest["conversations"]) == {fx.CONV_A, fx.CONV_G, fx.CONV_EMPTY}
+    assert manifest["conversations"][fx.CONV_EMPTY]["messages"] == 0
+    assert all(c["in_arroyo"] for c in manifest["conversations"].values())
+    assert manifest["arroyo"] == {"read": True, "conversations_read": True,
+                                  "account": fx.OWNER.lower(),
+                                  "held": {fx.CONV_A.lower(): [1, 2, 3, 4, 5, 6],
+                                           fx.CONV_G.lower(): [1]}}
+    page = open(reports / "CacheController" / "CacheController_report.html", encoding="utf-8").read()
+    for absent in ('value="Conversation"', ".chip.chat.gone", "tied only to a conversation"):
+        assert absent not in page, absent
+
+
 def test_the_survey_carries_structure_and_no_values(run):
     base, _reports = run
     survey = json.loads((base / "android_survey.json").read_text(encoding="utf-8"))

@@ -10,10 +10,9 @@ from binascii import hexlify
 from datetime import datetime
 import calendar
 import pandas as pd
-import requests
 import sqlite3
 from scripts.data import ccl_bplist
-from scripts.data import keychain as convert_keychain
+from scripts.data import ufed_keychain as convert_keychain
 from scripts.data import ffmpeg_log
 from scripts import report_ui
 import filetype

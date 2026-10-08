@@ -22,16 +22,22 @@
 
 > ### Scope
 >
-> This is an offline artifact-analysis tool for digital forensic examiners. It reads a device
-> extraction that the examiner is **lawfully authorised to examine**, and nothing else:
+> This is an artifact-analysis tool for digital forensic examiners. It reads a device extraction that
+> the examiner is **lawfully authorised to examine**:
 >
-> - it never contacts Snapchat's servers or any other network service — the only optional network
->   access is to a map tile server and to a folder of newer builds for update checks, both
->   configured by the examiner themselves and both off by default;
-> - it does not circumvent account authentication and cannot access data that is not already on
->   the device;
-> - it decrypts locally stored data using keys recovered **from that same device** (its app
->   container and, where the extraction includes one, its keychain).
+> - it works offline and contacts no network service on its own. Three optional features do, each
+>   off by default and configured or started by the examiner: a map tile server, a folder of newer
+>   builds for update checks, and **retrieval of Memories media from Snapchat's servers**;
+> - that retrieval requests only the download addresses the device itself recorded for a Memory
+>   (`scdb-27`), sends no credentials, cookies or account tokens, does not sign in and does not get
+>   around any authentication. It will not start until the examiner confirms holding the legal
+>   authority to retrieve the data and records what that authority is; requests are paced, and each
+>   one is recorded. What comes back is **not device evidence**: it is kept apart from the
+>   extraction, marked ☁ wherever it is shown, and the authority is stated beside it. See
+>   [docs/cloud_download.md](docs/cloud_download.md);
+> - it decrypts data using keys recovered **from that same device** (its app container and, where
+>   the extraction includes one, its keychain) — a retrieved copy with the key the device holds for
+>   that Memory.
 >
 > The `docs/` notes describe where Snapchat stores data on the device and the formats it uses, so
 > that an examiner can verify or reproduce by hand anything the tool reports. Recovered output is
@@ -71,6 +77,24 @@ Everything for the run still lands in one folder under `--workdir`. `--run-name`
 folder's name instead of using a timestamp, so a repeated run overwrites the same place and two
 runs stay directly comparable. Exit code is 0 on success, 1 if the run failed, 2 for a bad
 argument. `--help` lists everything; `--diag-keychain <file>` still checks a keychain on its own.
+
+`--trace-ids <run folder> <id> [<id> …]` answers "is this identifier recorded anywhere?" for a run
+that already exists: every extracted file is searched for each id (a snap id, a CACHE_KEY, a claim
+key…) as text, UTF-16, hex, raw bytes and base64, databases row by row with and without their
+`-wal`. It lists **where** each occurs — never the content — so the result can be discussed without
+the data. See [docs/trace_ids.md](docs/trace_ids.md).
+
+`--survey-claim-links <run folder>` asks it of every cached file at once: for each
+`cache_controller.db` claim, whether the reports tie it to a chat message, and where in `arroyo.db`
+the ids its key carries occur — grouped by the key's shape, with field paths and counts and no id or
+value. It is how a missing link rule is found on a case. See
+[docs/claim_link_survey.md](docs/claim_link_survey.md).
+
+Retrieving Memories media from Snapchat's servers (off unless asked — see *Scope* above) is a run option,
+`--cloud missing,incomplete --attest yes --authority "<what authorises it>"`, or a later step on an
+existing run folder, `--cloud-download <run folder> …`, which refreshes the reports without unzipping
+anything again. Snap ids, a selection file and include/exclude date rules narrow it. See
+[docs/cloud_download.md](docs/cloud_download.md).
 
 ### Update checks (optional, off by default)
 
@@ -181,6 +205,12 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   metadata, children and deletion tables, resolving each entry to its on-disk cache file(s), and
   cross-linking two-way to the Memories and Conversations reports. Run standalone with
   `python -m scripts.cache_controller_report <extraction_root_or_app_container> [output_dir]`.
+- **Search all reports** (`Reports/search.html`, from the run's `index.html` or the *🔎 All reports*
+  link beside every report's search box) — one search over every report and every conversation's
+  messages at once: a CACHE_KEY, a snap id, a hash, a file name, a URL or a few words of a message,
+  with each hit opening its row in its report — and by **date / time**, alone or with the words, from
+  the index page's own search box as well. It is
+  each report's own search on each report's own data, so the counts agree (see [docs/report_ui.md](docs/report_ui.md#searching-every-report-at-once-searchhtml)).
 - **Compatibility fixes** for pandas 3.x / Python 3.14 and for newer Snapchat iOS schemas — see
   [docs/pandas3_python314_compat.md](docs/pandas3_python314_compat.md).
 - `uv` project setup (`pyproject.toml`) and a Nuitka build script.
@@ -198,18 +228,26 @@ Relative to [upstream](https://github.com/DFIR-HBG/Snapchat_Auto):
   implemented and in the report popover that explains it; the comparison and the design differences
   are in [docs/related_ileapp.md](docs/related_ileapp.md). That module in turn cites this fork's
   Memories decryption notes.
+- **Retrieving Memories media from Snapchat's servers** — the method of DFIR-HBG's
+  [Snapchat_DownloadMemories_iOS](https://github.com/DFIR-HBG/Snapchat_DownloadMemories_iOS), with
+  overlay retrieval contributed there by John Hyla ([snoop168](https://github.com/snoop168)). That
+  repository carries no licence, so nothing of it is included; the implementation here is this fork's
+  own. Credited in `scripts/cloud_download.py` and in the report popover that explains it.
 - **Noto Color Emoji** — the emoji font the reports embed, so an emoji is drawn the same on every
   workstation: © 2022 Google Inc., [SIL Open Font License 1.1](scripts/data/fonts/OFL.txt),
   <https://github.com/googlefonts/noto-emoji>, bundled unmodified; see
   [scripts/data/fonts/README.md](scripts/data/fonts/README.md). Noto is a trademark of Google Inc.
-- **Licence:** MIT, © 2022 DFIR-HBG. The original [LICENSE](LICENSE) is retained unmodified and
-  covers this fork, including all modifications made here.
-- **Bundled dependencies keep their own licences.** The packaged EXE and MSI carry third-party
-  libraries, and one of them is copyleft: the GUI toolkit **FreeSimpleGUI is LGPLv3+**. That is
-  compatible with an MIT application, and the obligation it brings is on *distribution* — ship the
-  licence text and notice, say that the library is used and under which licence, and make its source
-  available (upstream is enough). It is dynamically imported and replaceable, never statically linked
-  into the application's own code.
+- **Licence:** MIT. The upstream [LICENSE](LICENSE) (© 2022 DFIR-HBG) is kept, with one copyright
+  line added for this fork's modifications; it covers this fork, including everything changed here.
+- **Third-party code keeps its own licence**, and every one is listed:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the files in this repository that are not this
+  project's (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell, Bootstrap, the emoji font) and for
+  what the build carries; [THIRD_PARTY_LICENSES.txt](THIRD_PARTY_LICENSES.txt) for every Python
+  package, generated from `uv.lock`. Both ship with the EXE and the MSI, next to LICENSE. The GUI
+  toolkit **FreeSimpleGUI is LGPL-3.0-or-later**: the portable EXE compiles it in, and this
+  repository's public source and lock file are what let anyone rebuild it against a modified copy.
+  The application's own source contains no GPL-licensed code; the build's one GPL package is named
+  in the notices.
 - Fork maintained by [dfjs1m](https://github.com/dfjs1m). Bugs in the original tool
   should be reported upstream; only fork-specific issues belong here.
 - **Development note:** the fork-specific features and fixes listed under

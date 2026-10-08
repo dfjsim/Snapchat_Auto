@@ -17,7 +17,9 @@ rem before anything else. Nothing extra to bundle - but do not remove that flag,
 rem video would start a copy of the GUI.
 
 rem The anti-bloat plugin warns that FreeSimpleGUI imports pydoc (its __init__.py, line 15).
-rem Leave it be. That import is at module scope and unguarded, so excluding it
+rem Snapchat_Auto.py answers it with "# nuitka-project: --noinclude-pydoc-mode=allow", which keeps
+rem pydoc in the build and stops the warning, for this EXE and the MSI alike. Never "nofollow":
+rem that import is at module scope and unguarded, so excluding it
 rem (--noinclude-custom-mode=pydoc:nofollow) produces a build whose GUI dies on
 rem "import FreeSimpleGUI" - verified by making pydoc unimportable and loading the toolkit.
 rem There is also nothing to win: of the 33 modules pydoc pulls in, 29 are already bundled for
@@ -25,8 +27,16 @@ rem pandas/numpy/cv2/pillow, leaving pydoc, pkgutil and _pyrepl. Its only two us
 rem are in main_sdk_help(), the SDK browser this app never opens. The warning is about compile
 rem time, not about the binary being wrong.
 
+rem The licences travel with the binary: LICENSE, THIRD_PARTY_NOTICES.md (everything that is not a
+rem Python package) and THIRD_PARTY_LICENSES.txt, regenerated here from uv.lock so it lists exactly
+rem the packages this build carries.
+python build_tools\collect_licenses.py || exit /b 1
+
 python -m nuitka --onefile --output-dir=dist --enable-plugin=tk-inter ^
 	--include-data-dir=scripts=scripts ^
 	--include-data-files=scripts\data\sqlcipher3.exe=scripts\data\sqlcipher3.exe ^
 	--include-data-files=pyproject.toml=pyproject.toml ^
+	--include-data-files=LICENSE=LICENSE ^
+	--include-data-files=THIRD_PARTY_NOTICES.md=THIRD_PARTY_NOTICES.md ^
+	--include-data-files=THIRD_PARTY_LICENSES.txt=THIRD_PARTY_LICENSES.txt ^
 	Snapchat_Auto.py

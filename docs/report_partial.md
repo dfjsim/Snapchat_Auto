@@ -264,10 +264,11 @@ is and is not in the folder — are themselves **folded** (`_prov_section`), bec
 `index.html` they push the links to the reports off the first screen, and the links are what the page is
 for. Folding a statement out of sight is only acceptable if the statement's *answer* stays visible, so
 each summary carries it — *"12 of 12 identical to the run this selection was made in"*, *"41 of 848
-row(s), across 6 report(s)"*, *"9 of 11 relation(s) followed — one hop from each selected row"* — and the
-table behind it is the working. What stays unfolded is the identity table plus the one-line statements
-that have no table to hide: the tool-version verdict, the count of cross-references pointing outside the
-extract, any withheld fields, and how the selection resolved.
+row(s), across 6 report(s)"*, *"N of M relation(s) followed — one hop from each selected row"* (M being
+every relation the build has) — and the table behind it is the working. What stays unfolded is the
+identity table plus the one-line statements that have no table to hide: the tool-version verdict, the
+count of cross-references pointing outside the extract, any withheld fields, and how the selection
+resolved.
 
 **`partial_manifest.json`** at the extract root is the machine-readable form, and the file to read when
 the question is *"what was left out"*, which no amount of on-page marking answers in aggregate: the
@@ -284,6 +285,12 @@ Every function above takes an optional `prov` mapping whose keys are listed in
 `partial_report.PROVENANCE_KEYS`. All of them are optional by design: a partial run built from an
 externally produced selection knows some and not others, and the report states which rather than
 implying it checked something it could not.
+
+`cloud` is set when a Memory the extract carries has media retrieved from Snapchat's servers
+([cloud_download.md](cloud_download.md)): how many files, for how many Memories, when, and under which
+authority. It goes into the banner on every page — that media is not device evidence — into the
+provenance block and into `partial_manifest.json`. A partial run never contacts the servers itself; it
+carries what the full run's folder already retrieved, and prunes the rest with the other media.
 
 ---
 
@@ -358,6 +365,14 @@ So both prune, and only ever inside the run's own output folder:
 `memories_media_report._prune_media` to the media files of the included Memories. These are links, so
 removing them cannot touch the extracted copy behind them. Maps need no pruning: they are rendered after
 the filter, from the included Memories only.
+
+Two files written for the whole folder are written from what it holds, not copied from the full report.
+`search.html` (the search over every report, `scripts/global_search.py`) lists the reports and the
+conversation pages the extract has, and its rows are the extract's own `data/index.js` files, so it
+cannot find an unselected row. The cache_controller report's `data/memory_leads.js` (the leads the
+Memory pages show, `memory_leads.write_script`) is written from the included cache rows and names only
+the Memories the extract holds. So does the Library/Caches report's `data/memory_links.js` (the rows
+each Memory page lists as linked to it, `memory_backlinks.write_script`).
 
 ---
 
@@ -443,10 +458,10 @@ The GUI converts its dialog into the CLI's own `--relations` spec and parses it 
 code (`partial_report.parse_relations` / `parse_policy`). That round trip is a test: two front ends that
 can drift are two different tools.
 
-### What `recommended` follows, and two defaults worth explaining
+### What `recommended` follows, and the defaults worth explaining
 
 `Relation.default` in `partial_report.RELATIONS` is the single source of the `recommended` preset, so the
-CLI, the GUI dialog and `describe()` cannot disagree about it. Two are set the way they are on purpose:
+CLI, the GUI dialog and `describe()` cannot disagree about it. These are set the way they are on purpose:
 
 * **`conv_messages` is off.** A conversation can hold thousands of messages, and ticking the conversation
   asks for the conversation — its detail page, its participants, its activity — not for every message in
@@ -457,6 +472,34 @@ CLI, the GUI dialog and `describe()` cannot disagree about it. Two are set the w
   sender's permanent user id and takes the anchor from `contact_link_index`, the same row every other
   report links that person by — a message whose sender id was not recovered links to no contact rather
   than to one matched on a name.
+* **`mem_filter_assets` and `cache_filter_memories` are off.** They follow the cache_controller report's
+  *filter listed* link (`EDGE_MEMORY_FILTER_ASSET`): a cached file whose claim key is the URL of an asset
+  — filter image, sky image, font, or a sky item's blimpUrl when it holds one — of a geofilter a
+  Memory's overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`) lists. That file is not the Memory's media,
+  the record lists filters it does not name as selected, and one asset is commonly listed with many
+  Memories — so ticking a Memory does not bring the assets of every filter its record lists, nor
+  ticking a font every Memory whose record lists it. `mem_cache` / `cache_memory` never follow this
+  edge. Either way, a link whose other end the extract does not hold is marked by `xref`, as every
+  cross-report link is. See
+  [cross_report_linking.md](cross_report_linking.md#cache_controller--memory-an-asset-of-a-filter-its-overlay-record-lists).
+* **`cache_conversation` is on, `conv_cache` is off.** Both follow the cache_controller report's
+  *conversation tie* (`EDGE_CONV_CACHE`): a cached file whose claim key names a message of a conversation
+  that the arroyo.db the run read does not hold, in either reading — or, for a conversation the
+  Conversations report lists, whose messages were not read — tied to the conversation itself
+  because there is no message row to tie it to — recorded only when the Conversations report lists the
+  conversation (one it does not list has no row to reach). Ticking the entry brings the conversation's
+  row and, by containment, its page — narrowed to the extract's messages, so it may say it holds none
+  here, which is true — and not its messages: `conv_messages` is off by default, and from a
+  conversation a relation pulled in it would be a second hop (`transitive`). The reverse is off for
+  the reason `conv_messages` is: ticking a conversation for its page is not a request to disclose the
+  cached files its claims name. Neither follows `msg_cache` / `cache_message`, which are a message's.
+  A policy the GUI saved before these relations existed names every relation of the build that saved
+  it, so these are the ones it lacks. A hand-mixed policy starts them at their defaults —
+  `cache_conversation` on, `conv_cache` off — while one saved as *Minimal* (all off) or *Everything*
+  (all on) gives them that same answer, so a containment-only extract stays containment-only. Until
+  the policy is saved again the Related items dialog marks them *[new]*, so the answer each was given
+  is seen before a run (`Snapchat_Auto._saved_relations`, `_relations_added_since_saved`). See
+  [cross_report_linking.md](cross_report_linking.md#cache_controller--the-chat-report).
 
 `transitive` follows **only the relations that are switched on** — the enabled list is computed once and
 each pass reuses it. That does not make it a safe default, because the recommended set already contains a
@@ -552,6 +595,12 @@ partial run points it at the full report folder the selection was made in — sa
 already proved by the gate above. Interleaving index and render per report is not an option: that is
 exactly what makes a backward relation (a ticked cache entry pulling in its Memory) impossible, which is
 the whole reason the index pass exists.
+
+The manifests an extract writes for itself are never read back, and one of them is therefore written
+smaller: the extract's `Conversations/cache_links.json` lists its own conversations and leaves out the
+`arroyo` section — what the arroyo.db the run read holds, its account and the message numbers of
+**every** conversation — which the cache_controller report's conversation ties are read from. That
+report reads it from the full folder through `links_dir` like every other manifest.
 
 Reading a full run's manifests only works if the page names they contain are still right in the extract,
 and one of them is not free: a Memory group's detail page is named after a hash of its members' snap

@@ -13,6 +13,12 @@ column), slot 2 the display name, slots 1, 14 and 15 the username, mutable usern
 username (equal to the store's own index tables). That layout is not assumed here: a name is only
 handed back when slot 0 equals the user id the caller already knows, the same self-check iLEAPP
 applies, so a document of another shape yields nothing instead of a wrong name.
+
+The creative-tools item documents (``ctp__item_5.p``, :mod:`scripts.data.ctp_items`) are read with
+the same discipline, one level deeper: :func:`table_field` follows a slot to a sub-table, whose own
+slots :func:`string_field` and :func:`bytes_field` read when handed its position (``table=``), and
+:func:`bytes_field` reads a ``[ubyte]`` vector — the bytes of a message embedded in the document. A
+document is only read that way behind the same self-check: its slot 0 must be the row's ``item_id``.
 """
 
 import struct
@@ -23,27 +29,94 @@ SLOT_DISPLAY_NAME = 2
 SLOT_MUTABLE_USERNAME = 14
 SLOT_LEGACY_USERNAME = 15
 
+_READ_ERRORS = (struct.error, IndexError, TypeError, UnicodeDecodeError, ValueError)
 
-def string_field(buf, slot):
-    """The string in root-table ``slot``, or ``""`` when absent or not readable as one."""
+
+def _root(buf):
+    """The position of the root table: the buffer's first word."""
+    return struct.unpack_from("<I", buf, 0)[0]
+
+
+def _field_pos(buf, table_pos, slot):
+    """The position of ``slot``'s field in the table at ``table_pos``, or None when the slot lies past
+    the table's vtable or the field is absent. Raises on a buffer too short to hold what it points at
+    (the callers catch it): a position outside the buffer is never read as a wrapped-around one."""
+    if not 0 <= table_pos < len(buf):
+        raise ValueError("a table outside the buffer")
+    vtable_pos = table_pos - struct.unpack_from("<i", buf, table_pos)[0]
+    if not 0 <= vtable_pos < len(buf):
+        raise ValueError("a vtable outside the buffer")
+    vtable_size = struct.unpack_from("<H", buf, vtable_pos)[0]
+    if slot >= (vtable_size - 4) // 2:
+        return None
+    field_offset = struct.unpack_from("<H", buf, vtable_pos + 4 + slot * 2)[0]
+    if field_offset == 0:
+        return None
+    return table_pos + field_offset
+
+
+def _target(buf, field_pos):
+    """Where the offset stored at ``field_pos`` points (FlatBuffers offsets are relative to it)."""
+    return field_pos + struct.unpack_from("<I", buf, field_pos)[0]
+
+
+def string_field(buf, slot, table=None):
+    """The string in ``slot`` of the root table — or of the sub-table at position ``table`` (from
+    :func:`table_field`) — or ``""`` when absent or not readable as one."""
     try:
         buf = bytes(buf)
-        table_pos = struct.unpack_from("<I", buf, 0)[0]
-        vtable_pos = table_pos - struct.unpack_from("<i", buf, table_pos)[0]
-        vtable_size = struct.unpack_from("<H", buf, vtable_pos)[0]
-        if slot >= (vtable_size - 4) // 2:
+        field_pos = _field_pos(buf, _root(buf) if table is None else table, slot)
+        if field_pos is None:
             return ""
-        field_offset = struct.unpack_from("<H", buf, vtable_pos + 4 + slot * 2)[0]
-        if field_offset == 0:
-            return ""
-        field_pos = table_pos + field_offset
-        string_pos = field_pos + struct.unpack_from("<I", buf, field_pos)[0]
+        string_pos = _target(buf, field_pos)
         length = struct.unpack_from("<I", buf, string_pos)[0]
         if string_pos + 4 + length > len(buf):
             return ""
         return buf[string_pos + 4:string_pos + 4 + length].decode("utf-8")
-    except (struct.error, IndexError, TypeError, UnicodeDecodeError, ValueError):
+    except _READ_ERRORS:
         return ""
+
+
+def table_field(buf, slot, table=None):
+    """The position of the sub-table ``slot`` points at (in the root table, or in the table at
+    ``table``), or None when the field is absent or what it points at is not a table: its vtable must
+    lie inside the buffer, be at least the 4 bytes of its own header, and describe a table that does
+    too."""
+    try:
+        buf = bytes(buf)
+        field_pos = _field_pos(buf, _root(buf) if table is None else table, slot)
+        if field_pos is None:
+            return None
+        sub = _target(buf, field_pos)
+        if not 0 <= sub < len(buf):
+            return None
+        vtable_pos = sub - struct.unpack_from("<i", buf, sub)[0]
+        if not 0 <= vtable_pos <= len(buf) - 4:
+            return None
+        vtable_size, table_size = struct.unpack_from("<HH", buf, vtable_pos)
+        if (vtable_size < 4 or vtable_size % 2 or vtable_pos + vtable_size > len(buf)
+                or table_size < 4 or sub + table_size > len(buf)):
+            return None
+        return sub
+    except _READ_ERRORS:
+        return None
+
+
+def bytes_field(buf, slot, table=None):
+    """The bytes of the ``[ubyte]`` vector in ``slot`` (of the root table, or of the table at
+    ``table``), or None when the field is absent or its length runs past the buffer."""
+    try:
+        buf = bytes(buf)
+        field_pos = _field_pos(buf, _root(buf) if table is None else table, slot)
+        if field_pos is None:
+            return None
+        vector_pos = _target(buf, field_pos)
+        length = struct.unpack_from("<I", buf, vector_pos)[0]
+        if vector_pos + 4 + length > len(buf):
+            return None
+        return buf[vector_pos + 4:vector_pos + 4 + length]
+    except _READ_ERRORS:
+        return None
 
 
 def snapchatter_names(blob, user_id):

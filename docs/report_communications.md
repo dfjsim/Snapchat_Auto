@@ -36,10 +36,58 @@ The join key between a message and the cache is the **`EXTERNAL_KEY`**, which re
    inside an `EXTERNAL_KEY`. Only a share of that kind can match this way — see
    [the body kinds](#what-a-row-is-its-content-type-and-its-body).
 
+### When a value has several candidates
+
+These joins used to be loops of every message against every friend and every claim, each overwriting
+the last: the value a message ended up with came from whichever candidate matched **last**, which the
+database's row order decided, and on a phone with hundreds of thousands of messages the loops took
+hours. They are lookups now (`_id_key`, `_names_by_id`, dictionaries keyed by user id, by
+`(conversation, message)` and by `EXTERNAL_KEY`), and where there is more than one candidate the
+choice is stated — and logged with a count when it happens:
+
+* **A sender's name** (`fixSenders`): a user id the friends data gives under several names is shown
+  under **all** of them, separated by « / », in the order the data holds them. The friends list wins
+  over the Snapchatters the app merely cached, and a sender is matched on the user id only.
+* **A share's or a sticker's file** (`getCacheArroyo`, `_share_claim_order`): of the claims whose key
+  contains the item's id, the media comes **before its thumbnail**, then the order cache_controller.db
+  lists them in. A local message reference already took the *first* claim of its exact key, and still
+  does.
+* **A message whose content is a claim's `EXTERNAL_KEY`** (`mergeCacheChats`): when several claims share
+  the key — two accounts on one phone — **this account's** claim is taken, then the first in
+  cache_controller.db's order.
+* A message arroyo lists twice (its `-wal` and its checkpointed reading) still takes the later row, as
+  before: the two are versions of one message, not two candidates.
+
+On the four test devices none of these cases occurs, and the reports are byte-identical to what the
+loops produced.
+
+**Which id a sticker is matched by** (`_sticker_key_text`). A Sticker message (`content_type` 5) names
+its sticker in one of two places. A sticker from a pack is named by the text at `4.4.4.1.2`. A sticker
+carried as a creative tool item (body `4.4.14`) is named by the bytes at `4.4.14.2.6`, and the
+`customSticker…` claim on its cached file holds those bytes **in base64** in its `EXTERNAL_KEY` — so the
+join looks for the base64 text. The join used to read `4.4.4.1.2` only, which such a message does not
+have, so its file was never attached to it. A sticker message with neither field is not matched.
+
 `getCache` reads claims with `MEDIA_CONTEXT_TYPE IN (2, 3, 19)` (chat-media contexts) for the
 logged-in `USER_ID`; `mergeCache` merges in the `contentManagerDb` rows and **copies each matched
 `CACHE_KEY` file into `cacheFiles/`**. `path_to_image_html` then renders it (video/image/sticker)
 by file type.
+
+**A message sent with several photos or videos** has one `local_message_references` record per item
+(`arroyo_content.media_references`): an 8-byte little-endian length, then a keyed archive whose
+`MEDIA_ID` names the item. The join used to read the first only; every item's file is now attached
+(`getCacheArroyo` adds a row per further file, which the reports fold into the message).
+
+**Chat media kept in pieces** (`scripts/chat_media.py`, both platforms). `mergeCache` copies a claim's
+file only when a *whole* file named after its `CACHE_KEY` is media. A chat video is regularly a
+**bundle** — the file named after the key is a small descriptor, the video and its overlay are child
+files `<CACHE_KEY>_<child>` — and media can also be stored as byte-range shards. Before the join,
+`materialize_chat_media` rebuilds those under their `CACHE_KEY` in a folder the join searches first:
+shards concatenated in offset order, a bundle's largest media child, and a file that is not plaintext
+decrypted with a key / IV pair its message carries. Only bytes that are media by their magic bytes are
+written. Without it a message whose only file was a bundle showed *Media (no cached file)* — unless a
+saved copy named after its conversation, message and part stood in for it. The attachment's "?"
+(`chat_cache_key`) says how the file was put together.
 
 ## Attachment files and their names
 Two kinds of file end up in `cacheFiles/`:
@@ -86,7 +134,10 @@ already-open tab. See [report_ui.md](report_ui.md).
 ## Reading the text a person actually typed
 
 `proto_to_msg` does not read a message's text field: it walks the whole protobuf and concatenates
-**every** string it finds. That is what lets the cache join recognise a media id, so
+**every** string it finds (`protobuf_wire.strings`). Without a schema a length-delimited value is read as
+text when it is printable UTF-8 (line breaks and tabs allowed), searched as a nested message when it
+parses as one to its last byte (protobuf.dev, *Encoding*), and skipped otherwise — raw ids and packed
+numbers are not text. That is what lets the cache join recognise a media id, so
 `message_content` still holds it — but it also glues the encryption key, IV, lens name, sticker name
 and any typed text into one value, so a reply to a Snap reached the report as `…` buried inside
 `<key>=<iv>==<uuid>…`. `getChats` therefore fills `message_text` from the field that holds the text

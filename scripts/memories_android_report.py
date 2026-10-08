@@ -933,7 +933,7 @@ def generate_report(memories, outdir, tz_label, run_id, timefmt, epochfmt, src_r
            + meo_block +
            '<div class="stickytop"><div class="toolbar">'
            '<input type="search" id="q" placeholder="Search snap id, media id, title, date, '
-           'cache key, URL…" oninput="flt()">'
+           'cache key, URL…" oninput="flt()">' + report_ui.search_all_link("../") +
            f'<label>Media <select id="state" onchange="flt()"><option value="">any</option>'
            f'{state_opts}</select></label>'
            '<label>Location <select id="geo" onchange="flt()"><option value="">any</option>'

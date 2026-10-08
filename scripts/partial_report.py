@@ -66,10 +66,17 @@ EDGE_MESSAGE_CACHE = "message_cache"               # cc  <-> msg
 EDGE_CACHE_CACHEMEDIA = "cache_cachemedia"         # cc  <-> cm
 EDGE_MEMORY_CACHEMEDIA = "memory_cachemedia"       # mem <-> cm
 EDGE_CACHEMEDIA_MESSAGE = "cachemedia_message"     # cm  <-> msg
+# A cached asset of a filter a Memory's overlay record lists. Its own edge, never EDGE_MEMORY_CACHE:
+# it is not the Memory's media, and one asset is commonly listed with many Memories.
+EDGE_MEMORY_FILTER_ASSET = "memory_filter_asset"   # mem <-> cc
+# A cached file whose claim key names a message of a conversation that no message row is there for:
+# tied to the conversation, never to a message. Recorded only for a conversation the Conversations
+# report lists.
+EDGE_CONV_CACHE = "conv_cache"                     # cc  <-> conv
 
 EDGES = (EDGE_CONV_MESSAGE, EDGE_CONV_PARTICIPANT, EDGE_MESSAGE_SENDER, EDGE_MEMORY_GROUP,
          EDGE_MEMORY_CACHE, EDGE_MESSAGE_CACHE, EDGE_CACHE_CACHEMEDIA, EDGE_MEMORY_CACHEMEDIA,
-         EDGE_CACHEMEDIA_MESSAGE)
+         EDGE_CACHEMEDIA_MESSAGE, EDGE_MEMORY_FILTER_ASSET, EDGE_CONV_CACHE)
 
 
 class Relation:
@@ -98,10 +105,23 @@ RELATIONS = (
     Relation("conv_messages", "Every message of a selected conversation",
              EDGE_CONV_MESSAGE, "conv", "msg", False,
              "The conversation's own messages, as arroyo.db records them."),
+    # Off by default for the same reason: ticking a conversation for its page is not a request to
+    # disclose the cached files its claims name.
+    Relation("conv_cache",
+             "The cache_controller entries tied to a selected conversation (no message row)",
+             EDGE_CONV_CACHE, "conv", "cc", False,
+             "The same tie as cache_conversation, read from the conversation: cached files whose "
+             "claim EXTERNAL_KEY names a message of this conversation that no row is there for - the "
+             "arroyo.db the run read holds none of that number, in either reading, or its messages "
+             "were not read. Off by default, like conv_messages: ticking a conversation for its page "
+             "is not a request to disclose its files."),
     Relation("msg_cache", "The cache_controller entry behind an included message's media",
              EDGE_MESSAGE_CACHE, "msg", "cc", True,
-             "A chat claim's EXTERNAL_KEY carries <type>:<conversation>:<message>:<part>, so the "
-             "entry names the message directly."),
+             "The cache_controller entries the message's chat links name: the file the chat "
+             "report shows for it, a claim whose EXTERNAL_KEY names the message "
+             "(<type>:<conversation>:<message>:<part>), or one whose EXTERNAL_KEY carries an id the "
+             "message names its media by (its local_message_references media id, a shared item's "
+             "or a sticker's id). Each link's own explanation says which."),
     Relation("msg_sender", "The contact record of an included message's sender",
              EDGE_MESSAGE_SENDER, "msg", "ct", True,
              "The sender's permanent user id on the message (arroyo.db "
@@ -125,13 +145,40 @@ RELATIONS = (
              EDGE_MEMORY_CACHEMEDIA, "mem", "cm", False,
              "caching-media .pack chunks are not indexed by cache_controller.db; they are matched "
              "by the pack's item hash."),
+    # Off by default, both ways: an asset of a listed filter is not the Memory's media, the record
+    # lists filters it does not name as selected, and one asset is commonly listed with many Memories
+    # — following it would add every Memory that lists a common filter.
+    Relation("mem_filter_assets",
+             "The cached assets of the filters a selected Memory's overlay record lists",
+             EDGE_MEMORY_FILTER_ASSET, "mem", "cc", False,
+             "cache_controller entries whose claim EXTERNAL_KEY is exactly the URL of an asset "
+             "(filter image, sky image, font - or the sky item's blimpUrl, when it holds one) of "
+             "a geofilter listed in the Memory's "
+             "ZGALLERYSNAPDETAIL.ZOVERLAY. Not the Memory's media: the record lists the snap's "
+             "geofilters and names the selected one separately."),
     Relation("cache_memory", "The Memory a selected cache entry belongs to",
              EDGE_MEMORY_CACHE, "cc", "mem", True,
              "The same claim shapes as mem_cache, read in the other direction."),
+    Relation("cache_filter_memories",
+             "Every Memory whose overlay record lists a selected cache entry's asset",
+             EDGE_MEMORY_FILTER_ASSET, "cc", "mem", False,
+             "The same match as mem_filter_assets, read the other way. One asset is often listed "
+             "with many Memories."),
     Relation("cache_message", "The chat message a selected cache entry belongs to",
              EDGE_MESSAGE_CACHE, "cc", "msg", True,
-             "The conversation and message id in the claim's EXTERNAL_KEY, matched against the "
-             "chat report's manifest."),
+             "The chat links of the entry: the file the chat report shows for a message, the "
+             "conversation and message its claim's EXTERNAL_KEY names, or an id in that key which a "
+             "message names its media by. A sticker or a shared item can be in several messages, "
+             "and its entry then links to each. Each link's own explanation says which way it was "
+             "made."),
+    Relation("cache_conversation",
+             "The conversation a selected cache entry is tied to (no message row)",
+             EDGE_CONV_CACHE, "cc", "conv", True,
+             "A claim whose EXTERNAL_KEY names <type>:<conversation>:<message>:<part> for a message "
+             "no row is there for - the arroyo.db the run read holds none of that number in that "
+             "conversation, in either reading, or its messages were not read - is tied to the "
+             "conversation itself rather than to a message, when the Conversations report lists it. "
+             "The conversation's row and its page come with it, not its messages."),
     Relation("cache_cachemedia", "Library/Caches copies of a selected cache entry",
              EDGE_CACHE_CACHEMEDIA, "cc", "cm", False,
              "The same CACHE_KEY appearing under Library/Caches as well as in the SCContent "
@@ -192,7 +239,7 @@ def parse_relations(spec):
 
     A bare list turns the named relations on and everything else off; a leading ``-`` on any token
     switches to "the recommended set, minus these", which is what an examiner reaches for far more
-    often than naming all eleven.
+    often than naming every relation.
 
     :data:`POLICY_TOKENS` may appear in the same list and are skipped here — they are switches, not
     relations, and :func:`parse_policy` reads them from the same spec.
@@ -870,7 +917,7 @@ KIND_NOUN = {"conv": "conversation(s)", "msg": "message(s)", "ct": "contact(s)",
 #: ``withheld``       Phase 5: the field keys this extract withholds
 #: ``tool_version``   the version that produced *this* extract
 PROVENANCE_KEYS = ("selection", "sources", "version", "reuse", "case_ref", "built", "tz_label",
-                   "withheld", "tool_version")
+                   "withheld", "tool_version", "cloud")
 
 
 def _esc(value):
@@ -930,6 +977,13 @@ def banner_html(closure, prov=None):
              'listed in <span class="mono">partial_manifest.json</span>.']
     if prov.get("case_ref"):
         parts.append(f'Case / exhibit reference: <b>{_esc(prov["case_ref"])}</b>')
+    if prov.get("cloud"):
+        # Server-retrieved media is not device evidence, and an extract that carries any has to say so
+        # on every page, with the authority it was retrieved under.
+        cloud = prov["cloud"]
+        parts.append(f'&#9729; It contains media <b>retrieved from Snapchat&#39;s servers</b> for '
+                     f'{cloud.get("memories", 0)} Memory/Memories &mdash; not device evidence &mdash; '
+                     f'under: ' + "; ".join(_esc(x.get("note") or "") for x in cloud.get("sessions") or []))
     pulled = sum(1 for kind in closure.included for row_id in closure.included[kind]
                  if not closure.chosen(kind, row_id))
     if pulled:
@@ -1063,6 +1117,15 @@ def provenance_html(closure, prov=None, *, open_by_default=False):
                      f'<span class="mono">{_esc(expanded.get("relations") or "")}</span>, expanded '
                      f'{_esc(expanded.get("when") or "")} and reviewed before this build. Rows kept '
                      f'from an expansion are marked as such in the tables.'))
+    cloud = prov.get("cloud") or {}
+    if cloud:
+        rows.append(("Retrieved from Snapchat's servers",
+                     f'{cloud.get("files", 0)} file(s) for {cloud.get("memories", 0)} Memory/Memories, '
+                     f'{_esc(cloud.get("first_utc") or "")} &hellip; {_esc(cloud.get("last_utc") or "")} '
+                     f'UTC, under: ' + "; ".join(_esc(x.get("note") or "")
+                                                 for x in cloud.get("sessions") or [])
+                     + ' &mdash; not device evidence; every request is in CloudDownloads/'
+                       'cloud_manifest.jsonl of the run folder'))
     reuse = prov.get("reuse") or {}
     if reuse:
         rows.append(("Reused from the full run",
@@ -1257,7 +1320,8 @@ def check_evidence(request, sources):
 #: (the full report folder), because its own reports have not written them yet — see
 #: docs/report_partial.md. Each is what a whole class of cross-report link rests on.
 LINK_MANIFESTS = (
-    ("Conversations/cache_links.json", "which cached file belongs to which chat message"),
+    ("Conversations/cache_links.json", "which cached file belongs to which chat message, and the "
+                                       "conversations arroyo.db holds"),
     ("Memories/memory_pages.json", "which detail page a Memory is on"),
     ("Memories/media_by_cache_key.json", "the decrypted copy of an encrypted cached file"),
     ("Memories/media_by_pack.json", "which Memory a caching-media pack belongs to"),

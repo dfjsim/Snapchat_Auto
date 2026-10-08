@@ -44,6 +44,13 @@ from scripts import partial_report
 from scripts import android_layout
 from scripts.data import sqlite_open
 from scripts.data import sniff
+from scripts.data import arroyo_content
+from scripts.data import snap_overlay
+from scripts.data import snap_session
+from scripts.data import ctp_items
+from scripts import memory_leads
+from scripts import progress
+from scripts import parallel
 # Pure helpers reused from the Memories media report (path rendering, SCContent indexing).
 from scripts.data import device_fs
 from scripts.memories_media_report import (
@@ -51,7 +58,7 @@ from scripts.memories_media_report import (
     find_app_container, find_profiles, index_sccontent, device_path,
     load_path_manifest, make_time_formatter, guess_media,
     has_video_track, _scope_user, _UUID_RE, _SC_SPLIT_RE, classify_snap_claim,
-    cache_controller_paths,
+    cache_controller_paths, decode_memdata, account_matches, map_userids, _account_label,
 )
 from scripts.data import ffmpeg_log
 from scripts.data import poster_worker
@@ -92,7 +99,22 @@ def make_ms_formatter(tz):
 # shown as their raw number. Snapchat reuses these numbers across contexts, so keep this short.
 MCT_LABELS = {
     2: "Chat media", 3: "Chat media", 19: "Full media", 26: "Rendered low-res",
+    34: "Snap editor working copy",
 }
+
+#: Why a context is named, where the name rests on more than the number seen beside a key shape.
+MCT_BASIS = {
+    34: ("Named from the device's own record. The app's preference row "
+         "'SnapEditor-SnapSessionContext' (Documents/user_scoped/<hash>/userPreferences/"
+         "pref.docobjects) names the file(s) of the snap being edited by their CACHE_KEY, together "
+         "with a claim key '<UUID>~<position>' and this context — and the claims on those files are "
+         "exactly that. Where such a record survives for a file it is shown under the claims. The "
+         "label says what kind of claim this is; on its own it links the file to nothing."),
+}
+
+# A claim key the snap editor writes: a UUID and the item's position in the snap.
+_EDITOR_KEY = re.compile(r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+                         r"[0-9A-Fa-f]{12}~\d+$")
 
 
 def classify_external_key(ek, mct):
@@ -122,13 +144,15 @@ def classify_external_key(ek, mct):
         return ("CDN media", None)
     if mct in (2, 3):
         return ("Chat media", None)
+    if mct == 34 and _EDITOR_KEY.match(ek):
+        return ("Snap editor", None)
     return ("Other", None)
 
 
 def _category_of(claims):
     """Pick the most meaningful category across a physical file's claims (Memory beats Other)."""
-    order = ["Memory media", "Memory overlay", "Memory thumbnail", "Chat media", "Video / Discover",
-             "Lens", "Preview", "App install", "CDN media", "Other", "Unknown"]
+    order = ["Memory media", "Memory overlay", "Memory thumbnail", "Chat media", "Snap editor",
+             "Video / Discover", "Lens", "Preview", "App install", "CDN media", "Other", "Unknown"]
     cats = {c["category"] for c in claims}
     for name in order:
         if name in cats:
@@ -247,7 +271,7 @@ def _url_token(url):
     return seg or None
 
 
-def load_memory_index(app):
+def load_memory_index(app, overlays=False):
     """Return three maps used to link cache entries to Memories, in priority order:
 
     * ``snap_ids``  : {UPPER(ZSNAPID): (ZSNAPID, user_hash)} — the primary link (a snap UUID
@@ -260,36 +284,370 @@ def load_memory_index(app):
     Plus ``snap_urls`` : {ZSNAPID: [CDN URL, …]} — the Memory's download URLs, so a cache file
     linked to a Memory can be found by searching that URL (only ~1 cache entry in 3 carries a
     ``CONTENT_RETRIEVAL_METADATA`` URL of its own).
+
+    And ``memdata_ids`` : {UPPER(uuid): {(ZSNAPID, user_hash, field), …}} — the MemData identifiers
+    a Memory records about itself (``ZGALLERYSNAP.ZMEMDATAIDS``, and its entry's
+    ``ZGALLERYENTRY.ZMEMDATAID``; see ``memories_media_report.decode_memdata``). An entry's id is
+    shared by every snap of that entry, so a caller links through one only when it names one snap.
+
+    And, with ``overlays=True``, ``overlay_urls`` : {asset URL: [(ZSNAPID, user_hash, asset)]} — the
+    asset URLs (``snap_overlay.ASSET_FIELDS``) of every geofilter a Memory's overlay record
+    (``ZGALLERYSNAPDETAIL.ZOVERLAY``) lists, keyed by ``snap_overlay.normalise_url``. Not a link to
+    the Memory's media: see :func:`_overlay_links_for`. Opt-in, because decoding every record is the
+    costly part of this index and only the callers that match filter assets read it (this report's
+    ``index`` and the claim-link survey; the Library/Caches report does not); without it the key is
+    ``{}``. iOS only — the Android index has no such key, so callers ``.get`` it.
     """
     if android_layout.is_app_dir(app):
         # the Android app keeps its Memories in memories.db, not in a Core Data store
         from scripts import memories_android_report
         return memories_android_report.memory_index(app)
-    snap_ids, url_keys, media_ids, snap_urls = {}, {}, {}, {}
+    snap_ids, url_keys, media_ids, snap_urls, memdata_ids = {}, {}, {}, {}, {}
+    overlay_urls = {}
+    points = {}            # snap id -> {"kind", "points"}: what memory_leads compares files with
     for p in find_profiles(app):
+        # Both readings, through sqlite_open like every other evidence database: staged copies, so
+        # nothing is ever opened (or given a -shm) in place, and a Memory row the -wal has since
+        # changed or removed still links its cache files. Current rows come first, so they win.
+        views = None
         try:
-            conn = sqlite3.connect(f"file:{p['scdb']}?mode=ro", uri=True)
-            conn.row_factory = sqlite3.Row
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(ZGALLERYSNAP)")}
-            url_cols = [c for c in _MEM_URL_COLS if c in cols]
-            has_mediaid = "ZMEDIAID" in cols
-            for row in conn.execute("SELECT * FROM ZGALLERYSNAP WHERE ZSNAPID IS NOT NULL"):
-                sid = str(row["ZSNAPID"])
-                snap_ids[sid.upper()] = (sid, p["userHash"])
-                if has_mediaid and row["ZMEDIAID"]:
-                    media_ids.setdefault(str(row["ZMEDIAID"]).upper(), (sid, p["userHash"]))
-                for c in url_cols:
-                    if row[c]:
-                        snap_urls.setdefault(sid, []).append(str(row[c]))
-                    tok = _url_token(row[c])
-                    if tok:
-                        ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
-                        url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
-            conn.close()
-        except sqlite3.DatabaseError as error:
+            views = sqlite_open.open_views(p["scdb"])
+            rows, _markers = sqlite_open.read_table(views, "ZGALLERYSNAP")
+            entries, _markers = sqlite_open.read_table(views, "ZGALLERYENTRY")
+            records = snap_overlay.read_overlays(views) if overlays else []
+        except (sqlite3.DatabaseError, OSError) as error:
             logger.debug(f"Could not read memory index from {p['scdb']}: {error}")
+            rows, entries, records = [], [], []
+        finally:
+            if views is not None:
+                views.close()
+        for rec in records:
+            for asset in rec["assets"]:
+                # each record's assets are its own dicts (read_overlays): marked in place, not copied
+                asset["has_overlay_image"] = rec["has_overlay_image"]
+                overlay_urls.setdefault(asset["key"], []).append((rec["snap_id"], p["userHash"], asset))
+        for row in rows:
+            if not row.get("ZSNAPID"):
+                continue
+            sid = str(row["ZSNAPID"])
+            current = sid.upper() not in snap_ids          # the first row of a snap is the current one
+            snap_ids.setdefault(sid.upper(), (sid, p["userHash"]))
+            if row.get("ZMEDIAID"):
+                media_ids.setdefault(str(row["ZMEDIAID"]).upper(), (sid, p["userHash"]))
+            for c in _MEM_URL_COLS:
+                url = row.get(c)
+                if url and (current or str(url) not in snap_urls.get(sid, [])):
+                    snap_urls.setdefault(sid, []).append(str(url))
+                tok = _url_token(url)
+                if tok:
+                    ck = hashlib.sha256(tok.encode()).hexdigest()[:32]
+                    url_keys.setdefault(ck.lower(), (sid, p["userHash"], _MEM_URL_COLS[c]))
+            for field, rec in _memdata_of(row, entries):
+                memdata_ids.setdefault(rec["uuid"], set()).add((sid, p["userHash"], field))
+            if current:
+                points[sid] = _memory_points(row, entries)
     return {"snap_ids": snap_ids, "url_keys": url_keys, "media_ids": media_ids,
-            "snap_urls": snap_urls}
+            "snap_urls": snap_urls, "memdata_ids": memdata_ids, "points": points,
+            "overlay_urls": overlay_urls}
+
+
+_COCOA = 978307200
+
+
+def _memory_points(row, entries):
+    """``{"kind", "points"}`` of one Memory row: its kind and its times as Unix seconds."""
+    kind = {0: "image", 1: "video"}.get(row.get("ZMEDIATYPE"))
+    pts = [(label, row[col] + _COCOA) for col, label in (("ZCREATETIMEUTC", "ZGALLERYSNAP.ZCREATETIMEUTC"),
+                                                         ("ZCAPTURETIMEUTC", "ZGALLERYSNAP.ZCAPTURETIMEUTC"))
+           if isinstance(row.get(col), (int, float)) and row.get(col)]
+    pk = row.get("ZENTRY")
+    for entry in entries:
+        if pk is not None and entry.get("Z_PK") == pk:
+            if isinstance(entry.get("ZCREATETIMEUTC"), (int, float)) and entry.get("ZCREATETIMEUTC"):
+                pts.append(("ZGALLERYENTRY.ZCREATETIMEUTC", entry["ZCREATETIMEUTC"] + _COCOA))
+            break
+    return {"kind": kind, "points": pts}
+
+
+def _memdata_of(row, entries):
+    """``[(field, record)]`` — the MemData identifiers of one ZGALLERYSNAP row and of its entry."""
+    out = [("ZGALLERYSNAP.ZMEMDATAIDS" + (f" › {rec['slot']}" if rec["slot"] else ""), rec)
+           for rec in decode_memdata(row.get("ZMEMDATAIDS")) or []]
+    pk = row.get("ZENTRY")
+    for entry in entries:
+        if pk is not None and entry.get("Z_PK") == pk:
+            out += [("ZGALLERYENTRY.ZMEMDATAID", rec)
+                    for rec in decode_memdata(entry.get("ZMEMDATAID")) or []]
+            break
+    return out
+
+
+def _memdata_link(clist, memdata_ids):
+    """``(memory, basis)`` for the first claim whose EXTERNAL_KEY carries a MemData id that exactly
+    one Memory records about itself, else ``(None, None)``.
+
+    An identifier stored in the Memory's own row is a recorded reference, like rule 3's ZMEDIAID —
+    not a match by time or by content. An entry's id that several snaps share names none of them.
+    """
+    for c in clist:
+        for mo in _UUID_RE.finditer(c["external_key"] or ""):
+            owners = memdata_ids.get(mo.group(0).upper()) or set()
+            if len({sid for sid, _uh, _field in owners}) != 1:
+                continue
+            canonical, user_hash, field = sorted(owners)[0]
+            return ({"snap_id": canonical, "user_hash": user_hash},
+                    f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries {mo.group(0)}, which "
+                    f"Memory {canonical} records about itself in {field} — an identifier stored "
+                    f"in the Memory's own row, not a match by time or by content.")
+    return None, None
+
+
+FILTER_LISTED_BASIS = (
+    "A Memory's overlay record (scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, an NSKeyedArchiver "
+    "archive of SOJUGallerySnapOverlay) lists the snap's geofilters, and a geofilter gives the URL of "
+    "its image, of its sky image and of the font of its text — and its sky item's blimpUrl, read the "
+    "same way when it holds a URL. A claim whose EXTERNAL_KEY is exactly "
+    "one of those URLs — the whole URL, query included, not an id inside it — is a cached asset of a "
+    "filter that Memory's record lists. The record names the selected geofilter separately "
+    "(filters.geoFilterSelectedId / geoFilterSelectedIds), and often names none, so a listed filter is "
+    "not shown to be on the Memory. This file is not the Memory's media: it is none of the Memory "
+    "links, is not counted as linked to a Memory, and is never decrypted with the Memory's key.")
+
+FILTER_MANY_LINK_BASIS = (
+    "This asset is listed in the overlay records of SEVERAL Memories, so the link opens the Memories "
+    "report filtered to those Memories' snap ids, with every matching row expanded, rather than "
+    "jumping to one of them. What you land on is the complete set — the search box shows the query "
+    "that produced it, and clearing it restores the full report.")
+
+FILTER_MANY_BASIS = (
+    "The same asset URL is listed in the overlay records of several Memories, under the same filter "
+    "or under different ones (a font, for one, can be shared by different filters). Each Memory's "
+    "own basis, with the filter (idValue) that lists the asset, is in this entry's detail.")
+
+#: How each answer of the record about the selected geofilter reads in an explanation.
+_SELECTED_SENTENCE = {True: "here it names this filter", False: "here it names another filter",
+                      None: "here it names none"}
+
+
+def _url_difference(ek, url):
+    """What differs between a claim key and the record's URL that :func:`snap_overlay.normalise_url`
+    makes the same — "" when they are the same text."""
+    a, b = str(ek or ""), str(url or "")
+    if a == b:
+        return ""
+    (scheme_a, _sep, rest_a), (scheme_b, _sep, rest_b) = a.partition("://"), b.partition("://")
+    bits = ["the letter case of its scheme"] if scheme_a != scheme_b else []
+    if rest_a != rest_b:
+        # the rule drops nothing but one empty "?" or "#", so a side it shortens ends with one
+        bits += [f"the empty \"{text[-1]}\" {whose} ends with"
+                 for text, whose in ((a, "the claim key"), (b, "the record"))
+                 if len(snap_overlay.normalise_url(text)) < len(text)]
+    return " and ".join(bits)
+
+
+def _filter_facts(asset):
+    """What the record says of the filter an asset belongs to: its type, carousel group and id."""
+    facts = [f"a {asset['filter_type']} geofilter" if asset.get("filter_type") else "a geofilter"]
+    facts += [f"carousel group {asset['group']}"] if asset.get("group") else []
+    facts += [f"idValue {asset['filter_id']}"] if asset.get("filter_id") else []
+    return ", ".join(facts)
+
+
+def _overlay_flag_sentence(flag):
+    """The Memory's own ZHASOVERLAYIMAGE, as a sentence ("" when the schema has no such column)."""
+    if flag is None:
+        return ""
+    return (f" The Memory's own row has ZGALLERYSNAP.ZHASOVERLAYIMAGE = {flag}"
+            + (" (it records an overlay image; the record does not say which listed filter, if "
+               "any, is on it)." if flag else " (it records no overlay image)."))
+
+
+def _filter_link_caveats(claim_user, same_account, wal):
+    """Whose claim it is, when not the Memory's account, and a record only the checkpointed
+    reading holds."""
+    text = ""
+    if same_account is False:
+        text += (f" The claim was made by account {claim_user}, and this Memory is another "
+                 f"account's (its userHash is not SHA-256 of that USER_ID): the same asset URL, "
+                 f"cached by the claim's account.")
+    if wal == sqlite_open.MAIN_ONLY:
+        text += (" This overlay record is in scdb-27 only without its -wal: the write-ahead log has "
+                 "since changed or removed it.")
+    return text
+
+
+def _filter_basis(ek, claim_user, sid, asset, same_account):
+    """The explanation of one link from a cache entry to a Memory whose overlay record lists it."""
+    differs = _url_difference(ek, asset["url"])
+    text = (f"The claim EXTERNAL_KEY \"{ek}\" is the URL"
+            + (f" \"{asset['url']}\" (the same URL but for {differs})" if differs else "")
+            + f" that Memory {sid}'s overlay record gives as the {asset['role']} of one of its "
+            f"geofilters: scdb-27.sqlite3 ZGALLERYSNAPDETAIL.ZOVERLAY, the row whose ZSNAP is this "
+            f"Memory's Z_PK, an NSKeyedArchiver archive of SOJUGallerySnapOverlay, at "
+            f"{asset['field']} ({_filter_facts(asset)}). The record lists the snap's geofilters and "
+            f"names the selected one separately, in filters.geoFilterSelectedId / "
+            f"geoFilterSelectedIds: {_SELECTED_SENTENCE[asset.get('selected')]}.")
+    text += _overlay_flag_sentence(asset.get("has_overlay_image"))
+    text += (" So this cached file is an asset of a filter listed with the Memory. It is not the "
+             "Memory's media, and a listed filter is not shown to be on the Memory. This is an "
+             "exact match of the whole URL, not of an id inside it.")
+    return text + _filter_link_caveats(claim_user, same_account, asset.get("wal"))
+
+
+def _filter_row_basis(fm):
+    """One Memory's row of the detail section (:func:`_filter_memories_html`): only what is that
+    Memory's own. The method — the record, the rule, what a listing is not — is stated once, in the
+    section's "?" (:data:`FILTER_LISTED_BASIS`); repeated per row it made a widely listed asset's
+    detail grow by its whole length for every Memory."""
+    differs = _url_difference(fm["external_key"], fm.get("url") or fm["external_key"])
+    text = (f"Memory {fm['snap_id']}'s overlay record (ZGALLERYSNAPDETAIL.ZOVERLAY) gives this "
+            f"claim's URL"
+            + (f" — as \"{fm['url']}\", the same URL but for {differs} —" if differs else "")
+            + f" as the {fm['role']} of one of its geofilters, at {fm['field']} ({_filter_facts(fm)})"
+            + "".join(f", and at {field}" for field in fm.get("fields") or ())
+            + f". The record names the selected geofilter separately: "
+            f"{_SELECTED_SENTENCE[fm.get('selected')]}.")
+    text += _overlay_flag_sentence(fm.get("has_overlay_image"))
+    return text + _filter_link_caveats(fm.get("claim_user"), False if fm.get("cross_account") else None,
+                                       fm.get("wal"))
+
+
+def _overlay_links_for(clist, overlay_urls, memory_pages=None, skip_sid=None):
+    """The Memories whose overlay record lists one of this entry's claim keys as an asset URL.
+
+    The one rule, which the survey (``--survey-claim-links``) calls too: a claim's EXTERNAL_KEY and a
+    URL the record gives an asset of a listed geofilter are the same URL by
+    ``snap_overlay.normalise_url`` — scheme, host, path and the whole query. An id inside the URL is
+    not enough (the same last path segment recurs under other hosts and paths, and one ``mo=`` /
+    ``bo=`` value under other ids), and the claim's context and account are not restricted: the
+    account is stated in the explanation instead. ``skip_sid`` is the Memory the entry already links
+    to as its media.
+
+    One link per Memory, by snap id: the field of the filter the record names as selected when one
+    of the matching fields is that filter's, else the record's first matching field; any others in
+    ``fields``; and the claim of the Memory's own account when the entry has one.
+    """
+    memory_pages = memory_pages or {}
+    found = {}                                     # snap id -> (user hash, [(claim, its key, asset)])
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        key = snap_overlay.normalise_url(ek)
+        if not key:
+            continue
+        for sid, user_hash, asset in overlay_urls.get(key) or ():
+            if sid != skip_sid:
+                found.setdefault(sid, (user_hash, []))[1].append((c, ek, asset))
+    links = []
+    for sid in sorted(found):
+        user_hash, hits = found[sid]
+        # the claim of the Memory's own account first, when the entry has one; then an asset of the
+        # filter the record names as selected (one asset can be listed under several filters, and the
+        # link's "selected" must be what the record says of any of them); else record order
+        hits.sort(key=lambda hit: (account_matches(hit[0].get("user_id") or "", user_hash) is False,
+                                   hit[2].get("selected") is not True))
+        claim, ek, asset = hits[0]
+        user = claim.get("user_id") or ""
+        same = account_matches(user, user_hash)
+        links.append({
+            "snap_id": sid, "user_hash": user_hash, "page": memory_pages.get(sid),
+            "role": asset["role"], "field": asset["field"], "url": asset["url"],
+            "fields": list(dict.fromkeys(a["field"] for _c, _ek, a in hits
+                                         if a["field"] != asset["field"])),
+            "filter_id": asset.get("filter_id") or "", "filter_type": asset.get("filter_type") or "",
+            "group": asset.get("group") or "", "selected": asset.get("selected"),
+            "has_overlay_image": asset.get("has_overlay_image"), "wal": asset.get("wal"),
+            "external_key": ek, "claim_user": user, "cross_account": same is False,
+            "basis": _filter_basis(ek, user, sid, asset, same)})
+    return links
+
+
+def _ctp_basis(ek, hit, claim_user, same_account):
+    """The explanation of one creative-tools item that names a claim key (``ctp_items.match``)."""
+    where = " and ".join(w for w, _text in hit["where"])
+    held = hit["where"][0][1]                              # the text as the item stores it
+    item = f"item {hit['item_id']}"
+    if hit["rule"] == "id_bytes":
+        text = (f"The claim EXTERNAL_KEY \"{ek}\" is \"{hit['prefix']}\" followed by base64 of the same "
+                f"bytes as {where} of {item} (\"{held}\")"
+                + (": the same id, in another base64 alphabet or padding."
+                   if ek[len(hit["prefix"]):] != held else "."))
+    else:
+        rest = ek if hit["rule"] == "key" else ek[len(hit["prefix"]):]
+        differs = _url_difference(rest, held)
+        text = (f"The claim EXTERNAL_KEY \"{ek}\" is "
+                + (f"\"{hit['prefix']}\" followed by " if hit["rule"] == "after_prefix" else "")
+                + "the text" + (f" \"{held}\" (the same URL but for {differs})" if differs else "")
+                + f" at {where} of {item}.")
+    info = hit.get("feed_info")
+    if info:
+        tree = ("only the checkpointed version of the store's feed tree" if info.get("prior")
+                else "the store's feed tree")
+        text += (f" The item is of feed {info['feed']}"
+                 + (f", which {tree} names {info['short']}" if info["short"]
+                    else "" if info["in_tree"]
+                    else ", which is not named: a document of the store's feed tree could not be read"
+                    if info.get("tree_unread") else ", which the store's feed tree does not list")
+                 + (f" (payload field 2.{hit['kind']})" if hit.get("kind") is not None else "") + ".")
+    if not hit.get("decoded"):
+        text += (" Its document (column p) does not have the layout this report reads, so it is not "
+                 "decoded: the match is on the item_id column alone.")
+    same = [i for i in hit.get("same_item") or () if i != hit["item_id"]]
+    if same:
+        text += (f" The store lists the same item — the same own id — under {len(same) + 1} item_ids, "
+                 f"one per feed; each is shown: {', '.join([hit['item_id']] + same)}.")
+    if hit.get("references"):
+        refs = hit["references"]
+        text += (f" {len(refs)} other item(s) of the store hold the same text in their payload — a "
+                 f"reference to this item — and are not shown: {', '.join(refs)}.")
+    if same_account is True:
+        text += " The store is the claiming account's own: its folder is SHA-256 of the claim's USER_ID."
+    elif same_account is False:
+        text += (f" The claim was made by account {claim_user}, and this store is another account's: "
+                 f"the same text, kept in that account's store.")
+    if hit.get("rewritten"):
+        text += (" The version shown is the current one, written after the store's last checkpoint "
+                 "(-wal only). The checkpointed version of the item, without the -wal, holds this "
+                 "text too: the -wal rewrote the item's row, and that version's other texts are not "
+                 "shown.")
+    elif hit.get("wal") == sqlite_open.MAIN_ONLY:
+        text += (" This version of the item is in primary.docobjects only without its -wal: the "
+                 "write-ahead log has since changed or removed it, so it is prior state, not the "
+                 "store's current content.")
+    return text
+
+
+def _ctp_hits(clist, ctp_index):
+    """The creative-tools items that name one of this entry's claim keys — the one rule, which the
+    survey (``--survey-claim-links``) calls too (``ctp_items.match``). One per item and store, from the
+    claim of the store's own account when the entry has one, sorted by account and item_id."""
+    if not ctp_index or not ctp_index.get("stores"):
+        return []
+    found = {}
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        user = c.get("user_id") or ""
+        for hit in ctp_items.match(ek, ctp_index):
+            ident = (hit["store"], hit["item_id"])
+            same = account_matches(user, hit["user_hash"])
+            if ident in found and not (same is True and found[ident]["own_account"] is not True):
+                continue
+            found[ident] = dict(hit, claim_key=ek, claim_user=user, own_account=same,
+                                basis=_ctp_basis(ek, hit, user, same))
+    return sorted(found.values(), key=lambda h: (h["user_hash"], h["item_id"]))
+
+
+def _ctp_store_state(store):
+    """What was read of one creative-tools store (``ctp_items.read``'s store record), for the header:
+    its sizes and -wal, and whether the two readings differ — said of the tables read (ctp__item_5,
+    ctp__feedtree) only, never of the whole store, whose other tables (the contacts among them) are
+    not compared. Without a -wal the readings are one, and that is true of the whole file."""
+    info = store.get("info") or {}
+    if not info.get("wal_bytes"):
+        return sqlite_open.describe(info)
+    text = sqlite_open.describe(dict(info, differs=None))
+    for table, differs in (store.get("differs") or {}).items():
+        text += f"; {table}: " + ("the two readings DIFFER" if differs else "both readings agree")
+    return text
 
 
 def load_chat_links(report_dir):
@@ -326,12 +684,144 @@ def load_chat_links(report_dir):
             by_key, by_message = data.get("by_key") or {}, data.get("by_message") or {}
         else:
             by_key, by_message = data, {}                      # legacy (v1) manifest
+        # The Conversations manifest also lists every message, attachment or not: a claim's key can
+        # name a message whose file the chat join did not attach (see write_cache_links).
+        for conv, info in (data.get("messages") or {}).items():
+            for smid, anchor in (info.get("anchors") or {}).items():
+                by_message.setdefault(f"{conv}|{smid}", [{
+                    "conversation_id": conv, "server_message_id": smid, "anchor": anchor,
+                    "title": info.get("title") or "", "href": f'{info.get("href")}#{anchor}'}])
         if document:                                           # single-document report: one base
             for records in list(by_key.values()) + list(by_message.values()):
                 for rec in records:
                     rec.setdefault("base", f"{report}/{document}")
         return by_key, by_message
     return {}, {}
+
+
+class ChatIdIndex:
+    """What the chat manifest says about messages beyond the files it attached to them.
+
+    * ``by_number``: every message by its conversation and bare message number, so a claim key that
+      names message 12 finds it whether the report lists it as ``12.0`` or under another part;
+    * the ids each message names its media by (``by_content_id``, see
+      ``arroyo_content.content_ids``), indexed by the token a claim key would carry them as;
+    * every conversation the report lists (``conversations``), and what the arroyo.db the run read
+      holds (``arroyo``: whether its messages and its conversation tables were read, its account,
+      the message numbers of each conversation) — for a claim whose key names a message no row is
+      there for
+      (:func:`_conversation_links_for`). Without an ``arroyo`` section (an older manifest, or the
+      legacy Communications one) neither is known, and nothing is tied to a conversation.
+    """
+
+    def __init__(self, by_message, by_content_id=None, conversations=None, arroyo=None):
+        self.by_number = {}
+        for key, records in by_message.items():
+            conv, _bar, smid = key.partition("|")
+            number = arroyo_content.message_number(smid)
+            if number:
+                self.by_number.setdefault(f"{conv.lower()}|{number}", []).extend(records)
+        self.by_token = {}
+        for cid, refs in (by_content_id or {}).items():
+            records = []
+            for ref in refs:
+                found = by_message.get(f'{ref.get("conversation_id")}|{ref.get("server_message_id")}')
+                if found:
+                    records.append((ref.get("rule") or "", found[0]))
+            token = _content_token(cid)
+            if records and token:
+                self.by_token.setdefault(token, []).append((cid, records))
+        arroyo = arroyo if isinstance(arroyo, dict) else None
+        # by lower-case id, each carrying the id as the report spells it (its anchor is built from it)
+        self.conversations = {str(conv).lower(): dict(rec, id=conv)
+                              for conv, rec in ((conversations or {}).items() if arroyo else ())
+                              if isinstance(rec, dict)}
+        self.arroyo_read = bool(arroyo and arroyo.get("read"))
+        # whether its conversation tables were read in full: what saying none of them names a
+        # conversation rests on (a manifest without the flag has not said so)
+        self.conversations_read = bool(arroyo and arroyo.get("conversations_read"))
+        self.arroyo_account = str((arroyo or {}).get("account") or "").strip().lower()
+        self.held = None                         # conversation -> {message number}; None: not read
+        if self.arroyo_read:
+            self.held = {}
+            for conv, numbers in (arroyo.get("held") or {}).items():
+                self.held[str(conv).lower()] = {n for n in map(_as_number, numbers or ())
+                                                if n is not None}
+
+    def conversation(self, conv):
+        """The Conversations report's record of conversation ``conv`` (any letter case), or None
+        when it does not list it."""
+        return self.conversations.get(str(conv or "").lower())
+
+    def holds(self, conv, number):
+        """Whether the arroyo.db the run read holds message ``number`` of conversation ``conv``, in
+        either reading: True / False, or None when its messages were not read."""
+        if self.held is None:
+            return None
+        return _as_number(number) in self.held.get(str(conv or "").lower(), ())
+
+    def holds_any(self, conv):
+        """Whether that arroyo.db holds any message of ``conv``; None when its messages were not
+        read."""
+        if self.held is None:
+            return None
+        return bool(self.held.get(str(conv or "").lower()))
+
+    def message(self, conv, number):
+        """Every record of message ``number`` in conversation ``conv``, lowest part first."""
+        records = self.by_number.get(f"{str(conv).lower()}|{arroyo_content.message_number(number)}")
+        return sorted(records or (), key=lambda r: str(r.get("server_message_id")))
+
+    def content_links(self, external_key):
+        """``[(id, rule, record)]`` for each message id a claim key contains."""
+        ek = str(external_key or "")
+        tokens = {m.group(0).lower() for m in _CONTENT_UUID.finditer(ek)}
+        tokens |= {r.lower() for pattern in (_CONTENT_RUN, _CONTENT_B64) for r in pattern.findall(ek)}
+        out = []
+        for token in tokens:
+            for cid, records in self.by_token.get(token, ()):
+                # a UUID-based id in any letter case; anything else (base64 above all) exactly
+                inside = (cid.lower() in ek.lower()) if _CONTENT_UUID.search(cid) else (cid in ek)
+                if inside:
+                    out.extend((cid, rule, record) for rule, record in records)
+        return out
+
+
+_CONTENT_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{12}")
+_CONTENT_RUN = re.compile(r"[A-Za-z0-9+/=_-]{8,}")
+_CONTENT_B64 = re.compile(r"[A-Za-z0-9+/=]{8,}")
+
+
+def _as_number(value):
+    """A message number as an int (``12``, ``"12"``, ``"012"``, ``"12.0"`` are all 12), or None."""
+    number = arroyo_content.message_number(value)
+    return int(number) if number else None
+
+
+def _content_token(cid):
+    """What a claim key holds a content id as: its UUID when it has one, else its longest run."""
+    mo = _CONTENT_UUID.search(cid)
+    if mo:
+        return mo.group(0).lower()
+    runs = _CONTENT_RUN.findall(cid)
+    return max(runs, key=len).lower() if runs else ""
+
+
+def load_chat_ids(report_dir, by_message):
+    """A :class:`ChatIdIndex` over the chat manifest ``load_chat_links`` read (Conversations only:
+    the legacy manifests carry no content ids, conversations or arroyo.db facts)."""
+    data = {}
+    cand = os.path.join(report_dir or "", "Conversations", "cache_links.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as fh:
+                data = json.load(fh) or {}
+        except Exception as error:                                 # noqa: BLE001
+            logger.debug(f"Could not read the content ids of {cand}: {error}")
+    data = data if isinstance(data, dict) else {}
+    return ChatIdIndex(by_message, data.get("by_content_id") or {},
+                       conversations=data.get("conversations"), arroyo=data.get("arroyo"))
 
 
 def load_memory_media(report_dir):
@@ -350,6 +840,57 @@ def load_memory_media(report_dir):
         except Exception as error:
             logger.debug(f"Could not read decrypted-media manifest {cand}: {error}")
     return {}
+
+
+def load_memory_content(report_dir):
+    """The Memories report's ``media_by_content.json``: the cache files on the device proven
+    byte-identical to a Memory's media — recovered from the device, or retrieved from Snapchat's
+    servers (cloud_memories.find_identical). ``{}`` when there is none."""
+    cand = os.path.join(report_dir or "", "Memories", "media_by_content.json")
+    if os.path.isfile(cand):
+        try:
+            with open(cand, encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as error:
+            logger.debug(f"Could not read content manifest {cand}: {error}")
+    return {}
+
+
+CONTENT_BASIS = (
+    "Proven by content: this file is byte-identical (SHA-256 {sha}) to the copy of Memory {sid}'s "
+    "{role} retrieved from Snapchat's servers on {when} (UTC){what}, at the examiner's request under: "
+    "{note}. The server copy is not device evidence; it is the reference that identifies this file, "
+    "which no identifier on the device connects to the Memory.")
+
+DEVICE_CONTENT_BASIS = (
+    "Proven by content: this file is byte-identical (SHA-256 {sha}) to Memory {sid}'s {role} as this "
+    "run recovered it from the device — {source}. No identifier on the device connects this file to "
+    "the Memory; the bytes do, and both copies are device evidence. A file like this is typically the "
+    "snap editor's working copy of a snap that was then saved to Memories.")
+
+
+def content_basis(rec, sid=None):
+    """The basis of a link proven by content, for a record of cloud_memories.find_identical."""
+    sid = sid or rec.get("snap_id", "")
+    if rec.get("what") == "device":
+        src, ref = rec.get("source") or "", rec.get("from") or ""
+        if src.startswith("caching-media"):
+            source = f"from the caching-media pack {ref}, decrypted with the Memory's own key"
+        elif ref:
+            source = f"from its {src or 'SCContent'} cache file {ref}"
+        else:
+            source = f"from {src or 'its cache'}"
+        return DEVICE_CONTENT_BASIS.format(sha=rec.get("sha256", ""), sid=sid,
+                                           role=rec.get("role") or "media", source=source)
+    return CONTENT_BASIS.format(
+        sha=rec.get("sha256", ""), sid=sid, role=rec.get("role") or "media",
+        when=rec.get("retrieved_utc", ""), note=rec.get("authority_note", ""),
+        what=" as received, before decryption" if rec.get("what") == "encrypted"
+        else ", decrypted with that Memory's own key")
+
+
+#: How a Memory chip says the link was proven by content: ≡ the device's own copy, ☁ a server copy.
+CONTENT_MARKS = {"device": " ≡", "cloud": " ☁"}
 
 
 def load_memory_pages(report_dir):
@@ -582,16 +1123,17 @@ POSTER_BASIS = (
 
 
 def publish_posters(entries, files_dir, get_view=None,
-                    file_timeout=poster_worker.FILE_TIMEOUT_S, budget=poster_worker.BUDGET_S):
+                    file_timeout=poster_worker.FILE_TIMEOUT_S, budget=None):
     """Extract a poster frame beside every published video: ``files/<name>_poster.jpg``.
 
     Sets ``entry["poster"]`` (a URL relative to the report) on each entry that gets one and returns
     ``(made, undecodable, not_attempted)``. A poster left by an earlier run into the same folder is
     reused rather than re-extracted, which keeps a re-run into an existing report folder cheap.
 
-    The work runs in a **killable subprocess**, one video at a time, because a cached video that
-    cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of them
-    does. The worker announces each file before it starts, so when it stops answering the parent
+    The work runs in **killable subprocesses**, one video at a time each, because a cached video
+    that cannot be decoded does not fail — it blocks the decoder forever, and roughly one in six of
+    them does. ``budget`` (seconds) limits the pass; by default the run's setting applies, which is
+    no limit (see :mod:`scripts.data.poster_worker`). The worker announces each file before it starts, so when it stops answering the parent
     knows which file to skip and restarts it on the rest. Nothing is ever merely abandoned: see
     :mod:`scripts.data.poster_worker` for what abandoning it cost.
 
@@ -627,7 +1169,8 @@ def publish_posters(entries, files_dir, get_view=None,
     # complete=False: a cache holds whatever byte ranges the device streamed, so seeking into a
     # cached video regularly lands past the bytes that are there.
     done, stderr_chunks = poster_worker.run_jobs([(j[0], j[1], False) for j in jobs],
-                                                 file_timeout, budget)
+                                                 file_timeout,
+                                                 **({"budget": budget} if budget else {}))
     # "moov atom not found" here means the device cached only part of that video — a finding, so
     # FFmpeg's chatter is summarised into the log rather than dropped on the floor.
     ffmpeg_log.log_summary(stderr_chunks, "poster-frame extraction from cached video", logger)
@@ -645,9 +1188,10 @@ def publish_posters(entries, files_dir, get_view=None,
                                     "not decode, which usually means the device stored only part "
                                     "of it (the link still opens the bytes that are there)")
         else:
-            # Never attempted: the worker could not be started, or the pass ran out of budget. The
-            # sentence above would be a finding about the evidence that nothing established, so the
-            # absence is attributed where it belongs — to this tool, on this run.
+            # Never attempted: the worker could not be started, or the pass was skipped or ran out
+            # of the time it was given. The sentence above would be a finding about the evidence
+            # that nothing established, so the absence is attributed where it belongs — to this
+            # tool, on this run.
             entry["poster_note"] = ("no poster frame: thumbnail extraction did not run for this "
                                     "file on this run (see the run log) — that is a limit of this "
                                     "tool here, not a statement about whether the video decodes")
@@ -678,26 +1222,43 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
     the run's timezone; without one they are left as the file states them.
     """
     os.makedirs(files_dir, exist_ok=True)
+    embedded_todo = []                                      # (target, view), read after the loop
 
     def read_embedded(target, view):
-        if not view:
-            return
-        target["embedded"] = media_meta.extract(os.path.join(files_dir, os.path.basename(view)))
-        target["embedded_times"] = report_ui.file_time_rows(target["embedded"],
-                                                            epochfmt or (lambda sec: ""))
-        if epochfmt is None:                                # nothing to convert with: as written
-            for t in target["embedded_times"]:
-                t["shown"] = t["wall"]
+        if view:
+            embedded_todo.append((target, view))
 
-    for e in entries:
+    def hashed(paths):
+        """``("ok", (md5, sha256, head, total))`` or ``("err", error)`` — never raises."""
+        try:
+            return "ok", _hash_stream(paths)
+        except OSError as error:
+            return "err", error
+
+    def hash_entry(e):
+        """Every read this entry needs, done ahead of the loop below and on several threads: the
+        reading and hashing are independent per entry; publishing and naming are not, and stay in
+        the loop, in its order."""
         if not e["on_disk"]["found"]:
-            continue
+            return None
         paths, _single = _ondisk_paths_ordered(e["cache_key"], scfull, scparts)
+        kids = []
+        for ch in e["children"]:
+            cpaths = child_ondisk_paths(e["cache_key"], ch.get("name"), scfull, scparts)
+            kids.append((cpaths, hashed(cpaths) if cpaths else None))
+        return paths, (hashed(paths) if paths else None), kids
+
+    for n_e, (e, pre) in enumerate(zip(entries, parallel.ordered_map(hash_entry, entries)), 1):
+        progress.step("hashing and publishing cached files", n_e, len(entries))
+        if pre is None:
+            continue
+        paths, main_hash, kid_hashes = pre
         if paths:
-            try:
-                e["ondisk_md5"], e["ondisk_sha256"], head, total = _hash_stream(paths)
-            except OSError as error:
-                logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {error}")
+            status, value = main_hash
+            if status == "ok":
+                e["ondisk_md5"], e["ondisk_sha256"], head, total = value
+            else:
+                logger.debug(f"Could not read on-disk bytes for {e['cache_key']}: {value}")
                 head, total = b"", 0
             e["ondisk_bytes"] = total
             ext = guess_media(head)
@@ -721,16 +1282,15 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 
         # bundle children: each is its own file with its own type
         kids = []
-        for ch in e["children"]:
-            cpaths = child_ondisk_paths(e["cache_key"], ch.get("name"), scfull, scparts)
+        for ch, (cpaths, kid_hash) in zip(e["children"], kid_hashes):
             if not cpaths:
                 continue
             kid = {"name": ch.get("name"), "paths": cpaths}
-            try:
-                kid["md5"], kid["sha256"], head, total = _hash_stream(cpaths)
-            except OSError as error:
-                logger.debug(f"Could not read bundle child {ch.get('name')}: {error}")
+            status, value = kid_hash
+            if status != "ok":
+                logger.debug(f"Could not read bundle child {ch.get('name')}: {value}")
                 continue
+            kid["md5"], kid["sha256"], head, total = value
             kid["bytes"] = total
             kid["type"] = guess_media(head)
             _kkind, _kext, kid["label"], kid["encrypted"] = sniff.classify(head, total)
@@ -753,6 +1313,16 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
                 e["view_note"] = (f"bundle child {best['name']} ({best['type']}) — "
                                   f"{best.get('note', '')}")
 
+    # what each published file says about itself — reading headers only, independent per file
+    def extract(job):
+        return media_meta.extract(os.path.join(files_dir, os.path.basename(job[1])))
+    for (target, _view), meta in zip(embedded_todo, parallel.ordered_map(extract, embedded_todo)):
+        target["embedded"] = meta
+        target["embedded_times"] = report_ui.file_time_rows(meta, epochfmt or (lambda sec: ""))
+        if epochfmt is None:                                # nothing to convert with: as written
+            for t in target["embedded_times"]:
+                t["shown"] = t["wall"]
+
 
 # A chat claim's EXTERNAL_KEY is "<type>:<conversation id>:<message id>:<part>[:…]" — e.g.
 # "thumbnail~1:19e0693c-…:12:0:0". The (conversation, message.part) it carries is what ties a cache
@@ -760,13 +1330,21 @@ def materialize_ondisk(entries, scfull, scparts, files_dir, report_dir,
 _CHAT_EK_RE = re.compile(r"^(?P<type>[^:]*):(?P<conv>[0-9a-fA-F-]{36}):(?P<msg>\d+):(?P<part>\d+)")
 
 
-def _chat_links_for(clist, cache_key, by_key, by_message):
-    """Chat messages this cache entry belongs to, with an explanation of how each was matched."""
+def _chat_links_for(clist, cache_key, by_key, by_message, ids=None):
+    """Chat messages this cache entry belongs to, with an explanation of how each was matched.
+
+    In order: the file the chat report attached (``route`` "file"); the message a claim key names by
+    conversation and number ("key"); the message whose own id for its media a claim key carries
+    ("content" — ``ids``, a :class:`ChatIdIndex`).
+    """
     out, seen = [], set()                                      # one chip per (conversation, message)
     for rec in by_key.get(cache_key, []):
         anchor = rec.get("anchor") or f"cf-{cache_key}"
-        seen.add((rec.get("conversation_id"), rec.get("server_message_id")))
-        out.append(dict(rec, anchor=anchor, basis=(
+        ident = (rec.get("conversation_id"), rec.get("server_message_id"))
+        if ident in seen:
+            continue
+        seen.add(ident)
+        out.append(dict(rec, anchor=anchor, route="file", basis=(
             f"This CACHE_KEY is the attachment file the chat report recorded for "
             f"message {rec.get('server_message_id') or '(unknown)'} in conversation "
             f"{rec.get('conversation_id') or '(unknown)'} (via its local_message_references / "
@@ -776,27 +1354,254 @@ def _chat_links_for(clist, cache_key, by_key, by_message):
         if not mo:
             continue
         smid = f"{mo.group('msg')}.{mo.group('part')}"
-        for rec in by_message.get(f"{mo.group('conv')}|{smid}", []):
+        records = by_message.get(f"{mo.group('conv')}|{smid}", [])
+        exact = bool(records)
+        if not records and ids is not None:
+            # the report lists the message under another part (a message is "12.0" there unless a
+            # claim of that part was joined onto it), or a file it did not attach: still message 12
+            records = ids.message(mo.group("conv"), mo.group("msg"))[:1]
+        for rec in records:
             anchor = rec.get("anchor")
             ident = (rec.get("conversation_id"), rec.get("server_message_id"))
             if not anchor or ident in seen:
                 continue
             seen.add(ident)
-            out.append(dict(rec, anchor=anchor, basis=(
+            listed = (f"message {smid}, which the chat report reported for that message" if exact
+                      else f"message number {mo.group('msg')} (part {mo.group('part')}), which "
+                           f"the chat report lists as message "
+                           f"{rec.get('server_message_id')}")
+            out.append(dict(rec, anchor=anchor, route="key", basis=(
                 f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries the conversation id "
-                f"{mo.group('conv')} and message {smid}, which the chat report reported "
-                f"for that message. The link therefore points at the message rather than at this "
-                f"exact file — a message can have several cached files (full media, thumbnail, raw "
-                f"content claim), and only one of them is displayed in the chat report.")))
+                f"{mo.group('conv')} and {listed}. The link therefore points at the message "
+                f"rather than at this exact file — a message can have several cached files (full "
+                f"media, thumbnail, raw content claim), and only one of them is displayed in the "
+                f"chat report.")))
+    for c in clist if ids is not None else ():
+        for cid, rule, rec in ids.content_links(c["external_key"]):
+            anchor = rec.get("anchor")
+            ident = (rec.get("conversation_id"), rec.get("server_message_id"))
+            if not anchor or ident in seen:
+                continue
+            seen.add(ident)
+            out.append(dict(rec, anchor=anchor, route="content", basis=(
+                f"The claim EXTERNAL_KEY \"{c['external_key']}\" contains {cid}: "
+                f"{arroyo_content.CONTENT_ID_RULES.get(rule, rule)} of message "
+                f"{rec.get('server_message_id')} in conversation {rec.get('conversation_id')} "
+                f"(arroyo.db). An exact identifier match, not one by time or content. The link "
+                f"points at the message: the chat report displays at most one of its cached files, "
+                f"and this is another one stored under the same id.")))
     return out
 
 
+CONV_TIE_BASIS = (
+    "A chat claim's EXTERNAL_KEY names a conversation and a message "
+    "(<type>:<conversation>:<message>:<part>), and there is no message row to link it to: the "
+    "arroyo.db this run read holds no message of that number in that conversation, in either reading "
+    "(with and without its -wal) — or, for a conversation the Conversations report lists, its "
+    "messages could not be read. Such an entry is tied to the conversation the key names, never to a "
+    "message: the chip opens the conversation when the Conversations report lists it, and otherwise "
+    "filters this report to every entry whose claim names the same conversation. Each chip's \"?\" "
+    "says which, and whose account made the claim. Counted apart from the entries linked to a chat.")
+
+
+def _conversation_links_for(clist, chats, ids):
+    """The conversations this entry's claims name, for a message that is not there to link to.
+
+    A claim key of the chat shape (:data:`_CHAT_EK_RE`) names a conversation and a message. When no
+    chat link of the entry (``chats``, :func:`_chat_links_for`) reaches that message and the
+    Conversations report lists no message of that number, the key still names the conversation —
+    and that is all it is tied to:
+
+    * a message the arroyo.db the run read **holds** makes no tie: a report that does not list it is
+      missing a rule, which ``--survey-claim-links`` is for, not this;
+    * a conversation the report lists is a link (``route`` "conversation"), to its page;
+    * one it does not list is a stated fact (``route`` "named"), and only when that arroyo.db's
+      messages were read — absent from both its readings, not merely absent from the report.
+
+    ``ids`` is the :class:`ChatIdIndex`; with none, or one whose manifest has no ``arroyo`` section,
+    nothing is tied. One record per (conversation, message), the parts of every claim naming it in
+    ``parts`` and every claim's key and account in ``claims``: one entry can be claimed by two
+    accounts, and the "?" says whose each claim is. ``user_id`` is arroyo.db's own account when a
+    claim is that account's (as :func:`_ctp_hits` prefers its own-account hit), else the first account
+    a claim names.
+    """
+    if ids is None:
+        return []
+    reached = {(str(ch.get("conversation_id") or "").lower(),
+                _as_number(ch.get("server_message_id"))) for ch in chats or ()}
+    ties = {}
+    for c in clist:
+        ek = str(c.get("external_key") or "")
+        mo = _CHAT_EK_RE.match(ek)
+        if not mo:
+            continue
+        conv, number = mo.group("conv").lower(), _as_number(mo.group("msg"))
+        if (conv, number) in reached or ids.message(conv, mo.group("msg")):
+            continue
+        held = ids.holds(conv, number)
+        record = ids.conversation(conv)
+        if held is True or (held is None and record is None):
+            continue
+        tie = ties.get((conv, number))
+        if tie is None:
+            listed = record is not None
+            tie = ties[(conv, number)] = {
+                "route": "conversation" if listed else "named",
+                "conversation_id": record["id"] if listed else mo.group("conv"),
+                "number": str(number), "parts": [], "external_keys": [], "claims": [],
+                "external_key": ek, "user_id": "",
+                "listed": listed, "held": held,
+                "in_arroyo": bool(listed and record.get("in_arroyo")) or bool(ids.holds_any(conv)),
+            }
+            if listed:
+                tie.update(href=record.get("href") or "", title=record.get("title") or "",
+                           anchor=record.get("anchor") or f"conv-{record['id']}")
+        if mo.group("part") not in tie["parts"]:
+            tie["parts"].append(mo.group("part"))
+        if ek not in tie["external_keys"]:
+            tie["external_keys"].append(ek)
+        claim = (ek, str(c.get("user_id") or "").strip())
+        if claim not in tie["claims"]:
+            tie["claims"].append(claim)
+    out = []
+    for tie in ties.values():
+        tie["parts"].sort(key=int)
+        users = [user for _ek, user in tie["claims"] if user]
+        tie["user_id"] = next((u for u in users if u.lower() == ids.arroyo_account),
+                              users[0] if users else "")
+        tie["basis"] = _conversation_basis(tie, ids)
+        out.append(tie)
+    return out
+
+
+def _conversation_basis(tie, ids):
+    """The explanation of one conversation tie (:func:`_conversation_links_for`).
+
+    What the arroyo.db the run read holds is said of **that** database — "the arroyo.db this run
+    read", in both readings — never of the extraction; and never "no longer": nothing in either
+    reading shows the message was ever there. Every claim's account is compared with that
+    database's own (its ``required_values`` USERID) when both are known (:func:`_claim_accounts`),
+    because a second account's cache sits beside the first account's chat database on a phone with
+    two, and its claims name conversations and messages that database need never have held. That no
+    conversation table names a conversation is said only when they were read in full
+    (``ChatIdIndex.conversations_read``).
+    """
+    conv, n, keys = tie["conversation_id"], tie["number"], tie["external_keys"]
+    parts = tie["parts"]
+    named = (f'The claim EXTERNAL_KEY "{keys[0]}" names' if len(keys) == 1 else
+             "The claim EXTERNAL_KEYs " + ", ".join(f'"{k}"' for k in keys) + " name")
+    text = (f"{named} conversation {conv}, message {n} ({'part' if len(parts) == 1 else 'parts'} "
+            f"{', '.join(parts)}) — the <type>:<conversation>:<message>:<part> shape of a chat claim "
+            f"key.")
+    whose, own, others, theirs = _claim_accounts(tie, ids.arroyo_account)
+    absent = (f"The arroyo.db this run read holds no message {n} of this conversation, in either "
+              f"reading (with and without its -wal)")
+    opens = " The link opens the conversation, not a message: there is no message row to point at."
+    unread = ("arroyo.db's conversation tables would not read in full in this run, so whether a "
+              "conversation, feed_entry or user_conversation row names it is not known")
+    if tie["listed"] and tie["held"] is None:                                       # E
+        return (text + whose + " arroyo.db's messages were not read in this run (no arroyo.db was "
+                f"read, or its conversation_message table was not read in full, in both readings), "
+                f"so whether it holds message {n} is not known; the Conversations report lists this "
+                f"conversation, with no message {n} in it." + opens)
+    if tie["listed"] and tie["in_arroyo"]:                                          # A, B
+        text += (f" {absent}, though it holds the conversation itself — a message of it, or a "
+                 f"conversation, feed_entry or user_conversation row: no conversation_message row "
+                 f"has this client_conversation_id and message number {n} (its server_message_id, or "
+                 f"the client_message_id of a message the server never numbered).")
+        if own:
+            return (text + whose + " So the account cached a file of a message its own chat database "
+                    "does not hold; only a recovery of deleted records could say whether it ever "
+                    "held one." + opens)
+        if others:
+            return (text + whose + f" {theirs}, the message may never have been in this database."
+                    + opens)
+        return text + opens
+    if tie["listed"]:                                                               # C
+        tables = (", and no conversation, feed_entry or user_conversation row; the Conversations "
+                  "report lists it from the friends / groups lists or from cached chat files, not "
+                  "from arroyo.db." if ids.conversations_read else
+                  f"; {unread}. The Conversations report lists it from the friends / groups lists or "
+                  f"from cached chat files.")
+        return text + f" {absent} — no message of it at all" + tables + whose + opens
+    holds = ids.holds_any(conv)                                                    # D
+    text += f" {absent}"
+    if holds:
+        text += ("; it holds other messages of this conversation, but the Conversations report does "
+                 "not list it, so there is no page to link to.")
+    elif ids.conversations_read:
+        text += (", nor any other message of it, and no report lists the conversation: neither "
+                 "arroyo.db's conversation tables nor the friends / groups lists name it.")
+    else:
+        text += (", nor any other message of it, and no report lists the conversation: the friends "
+                 f"/ groups lists do not name it, and {unread}.")
+    text += whose
+    if others and not own:
+        # a database that holds messages of the conversation held the conversation: only the
+        # message can be one it never held
+        text += (f" {theirs}, the message may never have been in this database." if holds else
+                 " The conversation may be one of " + " or ".join(f"{u}'s" for u in others)
+                 + " that the database this run read never held.")
+    return (text + " The chip filters this report to every cache entry whose claim names the same "
+            "conversation.")
+
+
+def _claim_accounts(tie, account):
+    """Whose claims name a tie's message, against ``account`` — arroyo.db's own, lower case, "" when
+    not known: ``(sentence, own, others, theirs)``.
+
+    ``sentence`` is what the "?" says of it; ``own`` whether a claim is that account's; ``others`` the
+    other accounts that made one, as their claims spell them; ``theirs`` the subject of the sentence
+    that draws the other-account conclusion ("The claim being another account's"). Every claim's
+    account, never only the first's: one entry can be claimed by two accounts, and the own account's
+    claim is the stronger evidence. Nothing is said when ``account`` is not known or no claim names
+    an account.
+    """
+    claims = tie.get("claims") or [(tie.get("external_key") or "", tie.get("user_id") or "")]
+    by_user = {}                                   # lower-case account -> (as spelled, [its keys])
+    for ek, user in claims:
+        keys = by_user.setdefault(user.strip().lower(), (user.strip(), []))[1]
+        if ek not in keys:
+            keys.append(ek)
+    others = [spelled for low, (spelled, _keys) in by_user.items() if low and low != account]
+    own = bool(account) and account in by_user
+    if not (account and (own or others)):
+        return "", False, [], ""
+    belongs = f"the arroyo.db this run read belongs to account {account} (its required_values USERID)"
+    many = len(claims) > 1
+    if len(by_user) == 1:                          # every claim one account's
+        if own:
+            return (f" The claim{'s were' if many else ' was'} made by the account that arroyo.db "
+                    f"belongs to (its required_values USERID).", True, [], "")
+        return (f" {'These claims were' if many else 'This claim was'} made by account {others[0]}; "
+                f"{belongs}.", False, others,
+                f"The claim{'s' if many else ''} being another account's")
+    said = []
+    for low, (spelled, keys) in by_user.items():
+        quoted, one = ", ".join(f'"{k}"' for k in keys), len(keys) == 1
+        said.append(f"{quoted} {'was' if one else 'were'} made by the account that arroyo.db belongs "
+                    f"to" if low == account else
+                    f"{quoted} {'was' if one else 'were'} made by account {spelled}" if low else
+                    f"{quoted} {'names' if one else 'name'} no account (no USER_ID)")
+    lowered = {u.lower() for u in others}
+    theirs_n = sum(1 for _ek, user in claims if user.strip().lower() in lowered)
+    theirs = (f"The claim{'s' if theirs_n > 1 else ''} of "
+              + " and ".join(f"account {u}" for u in others)
+              + (" being another account's" if len(others) == 1 else " being other accounts'"))
+    return (f" Of the claims naming it, {'; '.join(said)}. {belongs[0].upper()}{belongs[1:]}.",
+            own, others, theirs)
+
+
 def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memory_pages=None,
-                  chat_by_message=None, workdir=None):
+                  chat_by_message=None, workdir=None, memory_content=None, chat_ids=None,
+                  ctp_index=None):
     """Build one entry dict per physical cache file (CACHE_KEY) from a cache_controller.db.
 
     Returns (entries, virtualization_rows, wal_info). Each entry aggregates its claims, metadata,
-    on-disk resolution and cross-report links.
+    on-disk resolution and cross-report links. ``ctp_index`` is ``ctp_items.read``'s: the items of
+    the creative-tools stores that name a file are attached to it (``ctp_items``), and give it
+    :data:`CTP_CATEGORY` in place of a category of :data:`CTP_REPLACES` when no chat message,
+    conversation tie or Memory link says what it is.
 
     The database is read **twice** — with and without its ``-wal`` — so claims the write-ahead log
     has already superseded or deleted are recovered instead of silently lost. Each claim carries
@@ -806,6 +1611,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
     url_keys = mem_index["url_keys"]
     media_ids = mem_index["media_ids"]
     snap_urls = mem_index.get("snap_urls") or {}
+    memdata_ids = mem_index.get("memdata_ids") or {}
+    overlay_urls = mem_index.get("overlay_urls") or {}
     # the id columns in the words the link's explanation uses (iOS: the Core Data columns)
     labels = mem_index.get("labels") or {"snap": "ZSNAPID", "media": "ZMEDIAID"}
     memory_pages = memory_pages or {}
@@ -871,7 +1678,8 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
 
     entries = []
     all_keys = set(by_key) | set(tomb_by_key)
-    for key in all_keys:
+    for n_key, key in enumerate(all_keys, 1):
+        progress.step("reading cache entries", n_key, len(all_keys))
         clist = by_key.get(key, [])
         meta = meta_by_key.get(key, {})
         children = parse_children(meta.get("CHILDREN"))
@@ -902,10 +1710,45 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                     basis = (f"Fallback: EXTERNAL_KEY UUID {mo.group(0)} matches this Memory's "
                              f"{labels['media']} (Memory {canonical}).")
                     break
+        if not memory:                                         # 3b. ZSNAPID in a full-media
+            for c in clist:                                    #     key of no Memory-scoped shape
+                mo = _UUID_RE.search(c["external_key"])
+                if mo and not c["snap_uuid"] and c["mct"] == 19 \
+                        and mo.group(0).upper() in snap_ids:
+                    canonical, user_hash = snap_ids[mo.group(0).upper()]
+                    memory = {"snap_id": canonical, "user_hash": user_hash}
+                    basis = (f"The claim EXTERNAL_KEY \"{c['external_key']}\" carries "
+                             f"{mo.group(0)}, this Memory's {labels['snap']} — an exact identifier, "
+                             f"in a key that is not one of the Memory-scoped shapes "
+                             f"(MEDIA_CONTEXT_TYPE {c['mct']}).")
+                    break
+        if not memory:                                         # 4. a MemData id the Memory records
+            memory, basis = _memdata_link(clist, memdata_ids)
+        proofs = (memory_content or {}).get(key.lower()) or []
+        if not memory and proofs:                              # 5. byte-identical to its media
+            rec = proofs[0]                                    # the device's own copy first
+            canonical, user_hash = snap_ids.get(str(rec["snap_id"]).upper(), (rec["snap_id"], ""))
+            memory = {"snap_id": canonical, "user_hash": user_hash,
+                      "by_content": "device" if rec.get("what") == "device" else "cloud"}
+            basis = content_basis(rec, canonical)
         if memory:                                             # detail sub-page, when available
             memory["page"] = memory_pages.get(memory["snap_id"])
             memory["urls"] = snap_urls.get(memory["snap_id"]) or []
-        chats = _chat_links_for(clist, key, chat_links, chat_by_message or {})
+        chats = _chat_links_for(clist, key, chat_links, chat_by_message or {}, chat_ids)
+        # a key naming a message no row is there for: tied to the conversation, never to a message
+        conv_links = _conversation_links_for(clist, chats, chat_ids)
+        # an asset of a filter a Memory's overlay record lists: a relation of its own, never the
+        # Memory link above (see FILTER_LISTED_BASIS)
+        filters = _overlay_links_for(clist, overlay_urls, memory_pages,
+                                     skip_sid=(memory or {}).get("snap_id"))
+        # the creative-tools items that name the file: information, not a link — they say what the
+        # file is when no chat message, conversation tie or Memory link does (a tie does: the key
+        # names whose conversation's file it is; the filter listing above does not: it is a
+        # relation, not what the file is)
+        items = _ctp_hits(clist, ctp_index)
+        category = _category_of(clist) if clist else "Deleted (tombstone)"
+        if items and category in CTP_REPLACES and not chats and not conv_links and not memory:
+            category = CTP_CATEGORY
 
         users = sorted({c["user_id"] for c in clist if c["user_id"]}
                        or {t["user_id"] for t in tomb_by_key.get(key, []) if t["user_id"]})
@@ -924,7 +1767,7 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                               [t["wal"] for t in tomb_by_key.get(key, [])]),
             # the checkpointed version(s) of this file's metadata row, when the -wal changed it
             "meta_prior": [p for p in meta_prior_by_key.get(key, []) if p is not meta],
-            "category": _category_of(clist) if clist else "Deleted (tombstone)",
+            "category": category,
             "claims": clist,
             "users": users,
             "meta": {
@@ -944,7 +1787,11 @@ def build_entries(db, app, scfull, scparts, mem_index, chat_links, ms_fmt, memor
                         "scope_by_path": scope_by_path, "cross_scope": cross_scope},
             "memory": memory,
             "memory_basis": basis,
+            "filter_memories": filters,
+            "ctp_items": items,
+            "content_proof": proofs,
             "chats": chats,
+            "conv_links": conv_links,
             "tombstones": tomb_by_key.get(key, []),
             "created_sort": created_sort,
         })
@@ -1042,7 +1889,7 @@ def orphan_entries(scfull, scparts, claimed_paths, ms_fmt):
             "children": [], "retrieval": {},
             "on_disk": {"paths": paths, "bytes": sum(_size(p) for p in paths), "found": True,
                         "scope_by_path": {p: _scope_user(p) for p in paths}, "cross_scope": []},
-            "memory": None, "memory_basis": None, "chats": [], "tombstones": [],
+            "memory": None, "memory_basis": None, "chats": [], "conv_links": [], "tombstones": [],
             "meta_prior": [], "cache_media": [],
             "created_sort": 0, "orphan": True,
         })
@@ -1102,6 +1949,249 @@ def _mct_label(mct):
 
 def _esc(v):
     return html.escape(str(v)) if v not in (None, "") else ""
+
+
+SESSION_BASIS = (
+    "The app's own record of the snap its editor is working on: the row 'SnapEditor-SnapSessionContext' "
+    "of docprefitem in userPreferences/pref.docobjects. It names this file by its CACHE_KEY and gives "
+    "the claim key ('<UUID>~<position>') and context the file is claimed under, with when the record "
+    "was saved and when the snap was edited (Unix seconds and milliseconds, converted to this report's "
+    "timezone). Only the latest session is a live row; earlier versions survive in write-ahead-log "
+    "frames a later write superseded, and are carved from them — kept only when a claim in "
+    "cache_controller.db says the same (same CACHE_KEY, claim key and context). It says which editing "
+    "session the file belonged to; it does not say what became of the snap afterwards.")
+
+
+#: The category of a file an item of an account's creative-tools store names (scripts/data/ctp_items.py)
+#: — given only in place of these, and only when no chat message, conversation tie or Memory link says
+#: what the file is.
+CTP_CATEGORY = "Creative tools asset"
+CTP_REPLACES = frozenset(("CDN media", "Other", "Chat media"))
+
+CTP_BASIS = (
+    "This file is named by an item of an account's creative-tools item store: a claim's EXTERNAL_KEY, "
+    "or the part of it after a word and ':' or '~' (music:<url>, customSticker~<id>; never '://'), is "
+    "a text the item holds — a text of its payload such as the URL of one of its assets, its item_id or "
+    "its own id — or, failing that, that part read as base64 is the same bytes as the item's own id "
+    "(payload field 6, or its item_id or own id read as base64), in either base64 alphabet, padded or "
+    "not. The store is table ctp__item_5 of Documents/user_scoped/<userHash>/DocObjects/"
+    "primary.docobjects, one per account (userHash is SHA-256 of the account's user id), where the app "
+    "keeps the items of the feeds its camera's creative tools (captions, filters, stickers) are filled "
+    "from. Each row is one item: its item_id column and a document (column p). In the layout this "
+    "report reads — a FlatBuffers document whose slot 0 repeats the item_id — slot 3 holds the item's "
+    "own id, slot 4 its feed and slot 2 a protobuf message whose texts include the item's asset URLs; "
+    "a document of another layout is not read. The feed is named from the store's feed tree "
+    "(ctp__feedtree: each feed's TYPE and CONTEXT and the creativetools service it is fetched from) "
+    "when the tree lists it. Texts are compared whole and exactly (a URL in the one form the reports "
+    "share, so an empty trailing '?' or '#' and the letter case of its scheme aside), and the rule that "
+    "matched is stated per item: never a URL's query parameters on their own (bo= is a set of fetch "
+    "options many cached files share), never a part of a text, and a text several items of one store "
+    "hold is attributed only to the one whose own id it is — one item listed in several feeds is one "
+    "item, shown in each; different items holding it, to none. Both readings of the store are read, "
+    "with and without its -wal. On the "
+    "stores examined, an item in that layout carries no date, and nothing in it says the account put "
+    "the item in a snap, or when. Its texts are shown as stored, under their protobuf field numbers, "
+    "which are numbers and not names.")
+
+#: Beside a context-2/3 claim of a file a creative-tools item names, when no chat message, conversation
+#: tie or Memory link says what the file is (and never beside a key of a chat message's shape): the
+#: context's name is a reading of the number, and these contexts claim more than chat media.
+MCT_CTP_NOTE = (
+    "The label \"Chat media\" is read from the context number alone. This file is claimed under that "
+    "context, no chat message links to it, and an item of a creative-tools store names it instead "
+    "(see the section on the creative-tools item below): the context claims creative-tools assets — "
+    "custom stickers among them — as well as chat media.")
+
+FEED_NOT_IN_TREE_BASIS = (
+    "The store's feed tree (ctp__feedtree) does not list this feed, so it is not named: the feed id "
+    "is shown as the item stores it — feed:<TYPE>-<CONTEXT>-<n> — and its numbers are not read as a "
+    "name.")
+
+#: A feed missing from the trees that were read, in a store with a tree document that was not.
+FEED_TREE_UNDECODED_BASIS = (
+    "The store's feed tree (ctp__feedtree) has a document this report cannot read (it does not hold "
+    "an archive of a CTPFeed), so whether the tree lists this feed is not known: the feed id is shown "
+    "as the item stores it and is not named.")
+
+UNDECODED_ITEM_BASIS = (
+    "This item's document (ctp__item_5.p) does not have the layout this report reads — its FlatBuffers "
+    "slot 0 is not the row's item_id — so nothing is read from it, and what it holds (a date, a snap, "
+    "anything else) is not known. The item is still an item: its item_id column is what the claim key "
+    "names.")
+
+
+#: The categories whose files can be a lead: the snap editor's working copies, files no claim names,
+#: and Memory-shaped claims whose Memory row is gone. A file of no recognised shape ("Other") only when
+#: the app itself claimed it as Memories media (context 19): otherwise every image the app cached
+#: during a busy session would be a "possible Memory".
+LEAD_CATEGORIES = {"Snap editor", ORPHAN_CATEGORY, "Memory media"}
+
+
+def _head_of(paths, size=64):
+    """The first bytes of a cached file (its whole copy, else its first part), for sniffing."""
+    for path in sorted(paths):
+        try:
+            with open(path, "rb") as fh:
+                return fh.read(size)
+        except OSError:
+            continue
+    return b""
+
+
+def _leads_html(entry, rel_prefix, closure=None):
+    """The *Possible Memory — NOT proven* panel; ``""`` when the file has no lead."""
+    found = entry.get("leads")
+    if not found:
+        return ""
+    rows = []
+    for lead in found["leads"]:
+        sid = lead["snap_id"]
+        link = report_ui.xref(
+            f'<a class="chip lead" target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">possible: '
+            f'{_esc(sid)}</a>', [("mem", f"mem-{sid}")], closure=closure)
+        pairs = "<br>".join(f"{_esc(p['file'])} vs {_esc(p['memory'])}: "
+                            f"{_signed(p['delta_s'])}" for p in lead["pairs"][:4])
+        rows.append(f"<tr><td>{link}</td><td>{_signed(lead['best_delta_s'])}</td>"
+                    f"<td class='mono'>{pairs}</td></tr>")
+    ids = _esc(json.dumps([lead["snap_id"] for lead in found["leads"]]))
+    copy_button = (f"<button class='copyids' onclick='scCopySnapIds({ids},"
+                   f"&quot;possible Memories of this file&quot;)'>📋 Copy snap IDs</button>")
+    more = found["in_window"] - len(found["leads"])
+    return ("<div class='sect'>Possible Memory — NOT proven"
+            + _info(memory_leads.basis(found["window_s"])) + "</div>"
+            f"<div class='leadnote'>{found['in_window']} Memory/Memories of this kind have a time within "
+            f"{found['window_s'] // 60} minutes of this file's"
+            + (f" (the closest {len(found['leads'])} shown)" if more > 0 else "")
+            + (" · the app claimed this file as Memories media (context 19)"
+               if found["leads"] and found["leads"][0].get("ctx19") else "")
+            + " " + copy_button + " <span class='muted'>to retrieve them from Snapchat&#39;s "
+              "servers and compare</span></div>"
+            "<table class='sub'><tr><th>Memory</th><th>closest</th>"
+            "<th>file time vs Memory time (Memory minus file)</th></tr>" + "".join(rows) + "</table>")
+
+
+def _tc(records, epochfmt):
+    """``{"tc": [...]}`` — the inode-change times of device records, when there are any (paid per
+    row, so absent rather than empty). See report_ui.FS_TIME_KINDS."""
+    keys = report_ui.ts_keys(*report_ui.fs_times(records, epochfmt or (lambda seconds: ""),
+                                                 kinds=("ctime",)))
+    return {"tc": keys} if keys else {}
+
+
+def _signed(seconds):
+    """A difference as the leads show it; tenths under ten seconds, where "−0 s" would hide them.
+
+    memory_leads.MEMORY_JS ``scLeadSigned`` writes the same text on the Memory's side.
+    """
+    sign = "+" if seconds >= 0 else "−"
+    seconds = abs(seconds)
+    if seconds < 10:
+        return f"{sign}{seconds:.1f} s"
+    if seconds < 120:
+        return f"{sign}{seconds:.0f} s"
+    return f"{sign}{seconds / 60:.1f} min"
+
+
+def _session_html(entry, src_root, manifest):
+    """The snap editor's session record(s) naming this file, when any survives."""
+    rows = []
+    for rec in entry.get("session") or []:
+        if rec["wal"] == sqlite_open.CARVED:
+            read = ('<span class="walbadge mainonly">carved</span>'
+                    + _info(sqlite_open.MARKER_HELP[sqlite_open.CARVED]))
+        else:
+            read = _wal_cell(rec["wal"])
+        rows.append(f"<tr><td>{_esc(rec.get('saved'))}</td><td>{_esc(rec.get('edited'))}</td>"
+                    f"<td class='mono'>{_esc(rec['claim_uuid'])}~{_esc(rec['position'])}</td>"
+                    f"<td>{_esc(_mct_label(rec['context']))}</td>"
+                    f"<td class='mono'>{_esc(device_path(rec['store'], src_root, manifest))}</td>"
+                    f"<td>{read}</td></tr>")
+    if not rows:
+        return ""
+    return ("<div class='sect'>Snap editor session record — pref.docobjects › docprefitem "
+            "'SnapEditor-SnapSessionContext'" + _info(SESSION_BASIS) + "</div>"
+            "<table class='sub'><tr><th>saved</th><th>snap edited</th><th>claim key</th>"
+            "<th>context</th><th>store</th><th>(read from)</th></tr>" + "".join(rows) + "</table>")
+
+
+def _ctp_feed_cell(hit):
+    """The item's feed, named only as the store's feed tree names it."""
+    info = hit.get("feed_info")
+    if not info:
+        return ""
+    feed = f"<span class='mono'>{_esc(info['feed'])}</span>"
+    if not info["in_tree"]:
+        if info.get("tree_unread"):
+            return feed + " — ctp__feedtree not decoded" + _info(FEED_TREE_UNDECODED_BASIS)
+        return feed + " — not in ctp__feedtree" + _info(FEED_NOT_IN_TREE_BASIS)
+    said = " · ".join(bit for bit in (f"NAME {info['name']}" if info["name"] else "",
+                                       f"COMPUTE_ENDPOINT {info['endpoint']}" if info["endpoint"]
+                                       else "") if bit)
+    lists = ("Only the checkpointed version of the store's feed tree (ctp__feedtree read without its "
+             "-wal) lists this feed" if info.get("prior")
+             else "The store's feed tree (ctp__feedtree) lists this feed")
+    return (feed + (f" — {_esc(info['short'])}" if info["short"] else " — unnamed in ctp__feedtree")
+            + (" (prior state)" if info.get("prior") else "")
+            + _info(f"{lists} — TYPE {info['type']}, CONTEXT {info['context']} — "
+                    + (f"with {said}" if said else "with no NAME and no COMPUTE_ENDPOINT")
+                    + ". The short name is the word after '.creativetools.' in the endpoint, else "
+                      "the NAME, as stored."
+                    + (" The -wal's version of the tree does not list it, so the name is prior "
+                       "state, not the tree as the app last left it." if info.get("prior") else "")))
+
+
+def _ctp_texts(texts):
+    """An item's texts as the detail lists them — its URLs first, then the rest in field order — and
+    how many more there are than are shown."""
+    ordered = ([(p, t) for p, t in texts if snap_overlay.normalise_url(t)]
+               + [(p, t) for p, t in texts if not snap_overlay.normalise_url(t)])
+    return ordered[:ctp_items.MAX_TEXTS], max(0, len(ordered) - ctp_items.MAX_TEXTS)
+
+
+def _ctp_items_html(entry, src_root, manifest):
+    """The creative-tools items that name this file (``entry["ctp_items"]``); ``""`` when none.
+
+    Information on the file, not a link: the item store has no report of its own. One row per item,
+    each with its own "?", and under the table the texts each item holds, as stored.
+    """
+    hits = entry.get("ctp_items") or []
+    if not hits:
+        return ""
+    rows, texts = [], []
+    for hit in hits:
+        who = _esc(hit.get("account") or _account_label(hit["user_hash"]))
+        whose = {True: " — the claiming account&#39;s own store",
+                 False: " — another account&#39;s store"}.get(hit.get("own_account"), "")
+        item = f"<span class='mono'>{_esc(hit['item_id'])}</span>"
+        if hit.get("own_id") and hit["own_id"] != hit["item_id"]:
+            item += f"<br>own id <span class='mono'>{_esc(hit['own_id'])}</span>"
+        if not hit.get("decoded"):
+            item += ("<br><span class='muted'>document not decoded (layout differs)</span>"
+                     + _info(UNDECODED_ITEM_BASIS))
+        kind = (f"payload field 2.{hit['kind']}" if hit.get("kind") is not None
+                else "payload not readable" if hit.get("decoded") and not hit.get("payload_ok")
+                else "")
+        rule = ctp_items.RULE_LABELS.get(hit.get("rule"), "").format(prefix=hit.get("prefix") or "")
+        where = "<br>".join(_esc(w) for w, _text in hit.get("where") or ())
+        rows.append(f"<tr><td>{who}{whose}<br><span class='mono'>"
+                    f"{_esc(device_path(hit['store'], src_root, manifest))}</span></td>"
+                    f"<td>{item}</td><td>{_ctp_feed_cell(hit)}</td><td>{_esc(kind)}</td>"
+                    f"<td>{_esc(rule)}{_info(hit.get('basis'))}<br><span class='mono'>{where}</span></td>"
+                    f"<td>{_wal_cell(hit.get('wal'))}</td></tr>")
+        shown, more = _ctp_texts(hit.get("texts") or ())
+        if shown:
+            texts.append(f"<div class='scopehdr'>texts in item <span class='mono'>"
+                         f"{_esc(hit['item_id'])}</span> (as stored)</div><div class='grid'>"
+                         + "".join(f"<div class='k'>payload {_esc(path)}</div>"
+                                   f"<div class='v'>{_esc(text)}</div>" for path, text in shown)
+                         + "</div>"
+                         + (f"<div class='muted'>+{more} more not shown</div>" if more else ""))
+    return ("<div class='sect'>Named by a creative-tools item — primary.docobjects › ctp__item_5"
+            + _info(CTP_BASIS) + "</div>"
+            "<table class='sub'><tr><th>account (store)</th><th>item_id</th><th>feed</th>"
+            "<th>kind</th><th>the claim&#39;s key is</th><th>(read from)</th></tr>"
+            + "".join(rows) + "</table>" + "".join(texts))
 
 
 # What the search box should match for a row read from only one of the two database views, so an
@@ -1241,7 +2331,8 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
             f'<a class="chip mem" target="scauto_memories" '
             f'title="open this Memory\'s row in the Memories index" '
             f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
-            f'🧠 Memory {_esc(sid[:8])}…</a>',
+            f'🧠 Memory {_esc(sid[:8])}…'
+            + CONTENT_MARKS.get(entry["memory"].get("by_content"), '') + '</a>',
             [("mem", f"mem-{sid}")], closure=closure, brief=compact)
             + why(entry.get("memory_basis")))
         if page:
@@ -1250,6 +2341,45 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
                 f'title="open this Memory\'s own detail page" '
                 f'href="{rel_prefix}Memories/{_esc(page)}#mem-{_esc(sid)}">📄 detail</a>',
                 [("mem", f"mem-{sid}")], closure=closure, brief=compact))
+    # An asset of a filter a Memory's overlay record lists — dashed, and worded so it cannot be read
+    # as the Memory link above. One asset is commonly listed for many Memories, so several are ONE
+    # chip that opens the Memories report filtered to all of them (as the Library/Caches chip does).
+    filters = entry.get("filter_memories") or []
+    if len(filters) == 1:
+        fm = filters[0]
+        sid = fm["snap_id"]
+        chips.append(report_ui.xref(
+            f'<a class="chip mem filt" target="scauto_memories" '
+            f'title="an asset of a geofilter this Memory\'s overlay record lists — not the Memory\'s '
+            f'media" href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">'
+            f'🧠 Memory {_esc(sid[:8])}… · filter {"selected" if fm.get("selected") else "listed"}'
+            f'</a>', [("mem", f"mem-{sid}")], closure=closure, brief=compact)
+            + why(fm.get("basis")))
+        if fm.get("page"):
+            chips.append(report_ui.xref(
+                f'<a class="chip mem filt" target="scauto_memories" '
+                f'title="open this Memory\'s own detail page" '
+                f'href="{rel_prefix}Memories/{_esc(fm["page"])}#mem-{_esc(sid)}">📄 detail</a>',
+                [("mem", f"mem-{sid}")], closure=closure, brief=compact))
+    elif filters:
+        sids = [fm["snap_id"] for fm in filters]
+        # narrowed first, so the link does not open the Memories report filtered to rows it lacks
+        kept, dropped = report_ui.narrow(closure, "mem", sids, lambda s: f"mem-{s}")
+        shown = kept or sids
+        # one only where a partial report narrowed the list: a full report has two or more here
+        one = len(shown) == 1
+        whom = "the Memory" if one else f"the {len(shown)} Memories"
+        chips.append(report_ui.xref(
+            f'<a class="chip mem filt" target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html{report_ui.find_fragment(shown)}" '
+            f'title="open the Memories report filtered to {whom} whose overlay record lists this '
+            f'asset, {"expanded — not its media" if one else "all expanded — not their media"}">'
+            f'🧠 {len(shown)} {"Memory" if one else "Memories"} · filter listed</a>',
+            [("mem", f"mem-{s}") for s in shown], closure=closure, brief=compact)
+            + why(FILTER_MANY_LINK_BASIS + " " + FILTER_MANY_BASIS
+                  + (f" {dropped} further {'Memory' if dropped == 1 else 'Memories'} whose record "
+                     f"lists it {'is' if dropped == 1 else 'are'} not part of this partial report."
+                     if kept and dropped else "")))
     for ch in entry["chats"]:
         conv = ch.get("conversation_id", "")
         smid = ch.get("server_message_id", "")
@@ -1270,6 +2400,28 @@ def _links_html(entry, rel_prefix, compact=False, closure=None):
                                     f'💬 Chat{label}</a>',
                                     target_rows, closure=closure, brief=compact)
                      + why(ch.get("basis")))
+    # A claim naming a message no row is there for: tied to the conversation, dashed, and never
+    # worded as a message link. A conversation the Conversations report lists opens at its page's
+    # header (the same target window and fragment the Contacts report uses); one it does not list has
+    # nothing to open, so its chip filters this report to every entry naming the same conversation.
+    for tie in entry.get("conv_links") or ():
+        if tie.get("listed"):
+            name = (tie.get("title") or "")[:24] or (tie["conversation_id"][:8] + "…")
+            state = "not in arroyo.db" if tie.get("held") is False else "not listed"
+            chips.append(report_ui.xref(
+                f'<a class="chip chat gone" target="scauto_conv_page" '
+                f'href="{rel_prefix}{_esc(tie["href"])}#{_esc(tie["anchor"])}" '
+                f'title="open the conversation this claim names — not a message">'
+                f'💬 {_esc(name)} · msg {_esc(tie["number"])} — {state}</a>',
+                [("conv", tie["anchor"])], closure=closure, brief=compact)
+                + why(tie.get("basis")))
+        else:
+            chips.append(
+                f'<a class="chip chat gone" '
+                f'href="{_esc(report_ui.find_fragment([tie["conversation_id"]]))}" '
+                f'title="show every cache entry whose claim names this conversation">'
+                f'💬 conversation {_esc(tie["conversation_id"][:8])}… — in no report</a>'
+                + why(tie.get("basis")))
     # A copy of these bytes found under Library/Caches by the cached-media report. The same cached
     # content routinely sits under several paths there, so when there is more than one the chip is
     # ONE link that opens that report filtered to this CACHE_KEY with every match expanded — the
@@ -1443,6 +2595,82 @@ def _meta_prior_html(entry):
             + _info(META_PRIOR_BASIS) + "</div>" + "".join(out))
 
 
+#: The most Memories the detail section of one file lists. One asset (a font, say) can be listed by a
+#: large share of a gallery's Memories, and a row each would make that file's detail — and the chunk
+#: of 250 details it is in — grow with the gallery. The chip opens all of them, the search finds the
+#: file by every one's snap id, and each Memory's page lists its cached filter assets.
+FILTER_DETAIL_ROWS = 200
+
+
+def _filter_rows_shown(listed, closure=None):
+    """The links :func:`_filter_memories_html` gives a row, in their own order (by snap id): all of
+    them up to :data:`FILTER_DETAIL_ROWS`, else first those whose record names the filter as
+    selected, then (in a partial report) those whose Memory it holds, then by snap id."""
+    if len(listed) <= FILTER_DETAIL_ROWS:
+        return list(listed)
+    held = set(report_ui.narrow(closure, "mem", [fm["snap_id"] for fm in listed],
+                                lambda s: f"mem-{s}")[0]) if closure is not None else set()
+    ranked = sorted(listed, key=lambda fm: (fm.get("selected") is not True,
+                                            fm["snap_id"] not in held, fm["snap_id"]))
+    keep = {id(fm) for fm in ranked[:FILTER_DETAIL_ROWS]}
+    return [fm for fm in listed if id(fm) in keep]
+
+
+def _filter_memories_html(entry, rel_prefix, closure=None):
+    """The Memories whose overlay record lists this file as an asset of a geofilter; ``""`` when none.
+
+    One row per Memory, each with its own "?" — the field and what the record says about the selected
+    filter differ from one Memory to the next; the method is the section's "?" — up to
+    :data:`FILTER_DETAIL_ROWS` rows, and a line saying how many more there are and where they are.
+    """
+    listed = entry.get("filter_memories") or ()
+    shown = _filter_rows_shown(listed, closure)
+    rows = []
+    for fm in shown:
+        sid = fm["snap_id"]
+        link = report_ui.xref(
+            f'<a target="scauto_memories" '
+            f'href="{rel_prefix}Memories/Memories_report.html#mem-{_esc(sid)}">{_esc(sid)}</a>',
+            [("mem", f"mem-{sid}")], closure=closure)
+        if fm.get("page"):
+            link += " " + report_ui.xref(
+                f'<a target="scauto_memories" title="open this Memory\'s own detail page" '
+                f'href="{rel_prefix}Memories/{_esc(fm["page"])}#mem-{_esc(sid)}">📄</a>',
+                [("mem", f"mem-{sid}")], closure=closure)
+        where = _esc(fm["field"]) + "".join(f"<br>also {_esc(f)}" for f in fm.get("fields") or ())
+        kind = " · ".join(bit for bit in (fm.get("filter_type"), fm.get("group"),
+                                           f"idValue {fm['filter_id']}" if fm.get("filter_id") else "")
+                          if bit)
+        claim = (f"<span class='mono'>{_esc(fm['external_key'])}</span><br>"
+                 f"<span class='mono'>{_esc(fm['claim_user'])}</span>"
+                 + (" <span class='xscope'>another account&#39;s claim</span>"
+                    if fm.get("cross_account") else ""))
+        rows.append(f"<tr><td class='mono'>{link}{_wal_badge(fm.get('wal'))}"
+                    f"{_info(_filter_row_basis(fm))}</td>"
+                    f"<td>{_esc(fm['role'])}</td><td class='mono'>{where}</td>"
+                    f"<td>{_esc(kind)}</td>"
+                    f"<td>{_esc(snap_overlay.SELECTED_TEXT[fm.get('selected')])}</td>"
+                    f"<td>{claim}</td></tr>")
+    if not rows:
+        return ""
+    return ("<div class='sect'>Listed with a Memory&#39;s filters — not its media"
+            + _info(FILTER_LISTED_BASIS) + "</div>"
+            "<table class='sub'><tr><th>Memory</th><th>asset</th><th>where in the overlay record</th>"
+            "<th>filter</th><th>selected, per the record</th><th>claim (EXTERNAL_KEY, USER_ID)</th>"
+            "</tr>" + "".join(rows) + "</table>" + _filter_rows_more(len(listed) - len(shown)))
+
+
+def _filter_rows_more(more):
+    """The line under a capped detail section: how many listing Memories it does not show, and
+    where they are (``""`` when it shows them all)."""
+    if not more:
+        return ""
+    return (f"<div class='muted'>+{more} more {'Memory lists' if more == 1 else 'Memories list'} "
+            f"this asset, not shown here: the link above opens the Memories report filtered to all "
+            f"of them (in a partial report, those it holds), this report's search finds this file by "
+            f"each one's snap id, and each Memory's page lists its cached filter assets.</div>")
+
+
 def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
     """Expandable detail block for one physical cache file."""
     e = entry
@@ -1455,9 +2683,15 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
 
     # claims — headers are the real CACHE_FILE_CLAIM column names (description in parentheses)
     rows = []
+    # beside a file a creative-tools item names and no chat links to, the label "Chat media" explained
+    # — never beside a key of a chat message's shape, which names a conversation and a message itself
+    ctp_named = e.get("category") == CTP_CATEGORY
     for c in e["claims"]:
+        note = (MCT_CTP_NOTE if ctp_named and c["mct"] in (2, 3)
+                and not _CHAT_EK_RE.match(str(c["external_key"] or "")) else None)
         rows.append(f"<tr><td class='mono'>{_esc(c['external_key'])}</td>"
-                    f"<td>{_esc(_mct_label(c['mct']))}</td><td class='mono'>{_esc(c['user_id'])}</td>"
+                    f"<td>{_esc(_mct_label(c['mct']))}{_info(MCT_BASIS.get(c['mct']))}{_info(note)}</td>"
+                    f"<td class='mono'>{_esc(c['user_id'])}</td>"
                     f"<td>{_esc(c['category'])}</td><td>{_esc(c['created'])}</td>"
                     f"<td>{_esc(c['expires'])}</td><td>{_esc(c['deleted'])}</td>"
                     f"<td>{_wal_cell(c.get('wal'))}</td></tr>")
@@ -1468,6 +2702,40 @@ def _detail_html(entry, rel_prefix, src_root, manifest, closure=None):
                      "<th>EXPIRATION_TIMESTAMP_MILLIS (expires)</th>"
                      "<th>DELETED_TIMESTAMP_MILLIS (deleted)</th><th>(read from)</th></tr>"
                      + "".join(rows) + "</table>")
+    session = _session_html(e, src_root, manifest)
+    if session:
+        parts.append(session)
+    items = _ctp_items_html(e, src_root, manifest)
+    if items:
+        parts.append(items)
+    leads = _leads_html(e, rel_prefix, closure)
+    if leads:
+        parts.append(leads)
+    device = [r for r in e.get("content_proof") or () if r.get("what") == "device"]
+    cloud = [r for r in e.get("content_proof") or () if r.get("what") != "device"]
+    if device:
+        rows = "".join(
+            f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
+            f"<td>{_esc(r.get('source'))}</td><td class='mono'>{_esc(r.get('from'))}</td></tr>"
+            for r in device)
+        parts.append("<div class='sect'>≡ Identical to a Memory&#39;s media recovered on this device"
+                     + _info(content_basis(device[0])) + "</div>"
+                     "<table class='sub'><tr><th>Memory</th><th>role</th><th>recovered from</th>"
+                     "<th>cache file / pack</th></tr>" + rows + "</table>")
+    if cloud:
+        rows = "".join(
+            f"<tr><td class='mono'>{_esc(r.get('snap_id'))}</td><td>{_esc(r.get('role'))}</td>"
+            f"<td>{'as received' if r.get('what') == 'encrypted' else 'decrypted'}</td>"
+            f"<td>{_esc(r.get('retrieved_utc'))}</td><td>{_esc(r.get('authority_note'))}</td></tr>"
+            for r in cloud)
+        parts.append("<div class='sect'>☁ Identical to media retrieved from Snapchat&#39;s servers"
+                     + _info(CONTENT_BASIS.format(sha="…", sid="…", role="media", when="…", what="",
+                                                  note="the authority recorded")) + "</div>"
+                     "<table class='sub'><tr><th>Memory</th><th>role</th><th>compared</th>"
+                     "<th>retrieved (UTC)</th><th>legal authority</th></tr>" + rows + "</table>")
+    filters = _filter_memories_html(e, rel_prefix, closure)
+    if filters:
+        parts.append(filters)
 
     # metadata grid — real CACHE_FILE_METADATA column names with descriptions in parentheses
     m = e["meta"]
@@ -1700,7 +2968,7 @@ def _external_key_summary(claims):
 
 def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, manifest,
                     db_display, run_id="default", wal_infos=None, closure=None, prov=None,
-                    platform="ios"):
+                    platform="ios", ctp_stores=None):
     # The source fingerprints this run recorded, so the examiner's saved selection carries
     # them and a later partial run can check the extraction it is handed against this one.
     sources_js = report_ui.sources_script(os.path.dirname(os.path.abspath(outdir)))
@@ -1708,6 +2976,15 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
     on_disk = sum(1 for e in entries if e["on_disk"]["found"])
     mem_linked = sum(1 for e in entries if e["memory"])
     chat_linked = sum(1 for e in entries if e["chats"])
+    # a claim naming a message no row is there for, and nothing else tying the entry to a chat: not
+    # counted as linked to a chat, which is a message
+    conv_tied = sum(1 for e in entries if e.get("conv_links") and not e["chats"])
+    # every tie draws a dashed chip, one beside a chat link too: its style goes with any tie
+    conv_chips = any(e.get("conv_links") for e in entries)
+    # counted apart from mem_linked: an asset of a listed filter is not linked to a Memory's media
+    filter_linked = sum(1 for e in entries if e.get("filter_memories"))
+    # information on the file, not a link: counted on a line of its own
+    ctp_named = sum(1 for e in entries if e.get("ctp_items"))
     deleted = sum(1 for e in entries if e["tombstones"])
     xscope = sum(1 for e in entries if e["on_disk"].get("cross_scope"))
     orphans = sum(1 for e in entries if e.get("orphan"))
@@ -1742,6 +3019,10 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             linkbits.append("Memory")
         if e["chats"]:
             linkbits.append("Chat")
+        elif e.get("conv_links"):
+            linkbits.append("Conversation")                # tied to a conversation only
+        if e.get("filter_memories"):
+            linkbits.append("Filter")                      # not "Memory": the filter matches by indexOf
         is_xscope = bool(e["on_disk"].get("cross_scope"))
         users = ", ".join(u[:8] + "…" for u in e["users"])
         # cells carry as little markup as possible — per-column styling is in the CSS (.vc.cN),
@@ -1784,6 +3065,19 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             searchable += e["memory"].get("urls") or []
         for ch in e["chats"]:
             searchable += [ch.get("conversation_id", ""), ch.get("server_message_id", "")]
+        # a tied conversation's id as the Conversations report spells it (the key's spelling is in
+        # the EXTERNAL_KEY already)
+        searchable += [tie["conversation_id"] for tie in e.get("conv_links") or ()]
+        # the Memories whose overlay record lists this asset, so their snap id finds it
+        searchable += [fm["snap_id"] for fm in e.get("filter_memories") or ()]
+        # the creative-tools items that name it: their ids, feed and texts (not the category word: a
+        # file that kept its category is not in it, and the search must agree with the filter)
+        for hit in e.get("ctp_items") or ():
+            info = hit.get("feed_info") or {}
+            searchable += ["ctp__item_5", hit["item_id"], hit.get("own_id") or "",
+                           info.get("feed") or "", info.get("short") or "", info.get("endpoint") or "",
+                           f"payload 2.{hit['kind']}" if hit.get("kind") is not None else ""]
+            searchable += [text for _path, text in _ctp_texts(hit.get("texts") or ())[0]]
         for k in e.get("child_files") or []:
             searchable += [str(k.get("name") or ""), k.get("md5") or "", k.get("sha256") or ""]
             searchable += report_ui.embedded_search_terms(k.get("embedded"), k.get("embedded_times"),
@@ -1802,7 +3096,8 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
              "7": ("2" if e.get("view") else "1" if e["on_disk"]["found"] else "0")},
             chunk_of.get(anchor),
             {"cat": e["category"], "disk": disk,
-             "link": ",".join(linkbits), "xs": "yes" if is_xscope else "no",
+             "link": ",".join(linkbits + (["Possible"] if e.get("leads") else [])),
+             "xs": "yes" if is_xscope else "no",
              # "enc" is the *measured* state of the bytes, not "we could not display it"
              "enc": ("y" if e.get("ondisk_encrypted") and not e.get("decrypted") else
                      "dec" if e.get("ondisk_encrypted") else "n"),
@@ -1811,7 +3106,18 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
              # The hash of the bytes on disk, recorded with a selection as a fallback match. The
              # CACHE_KEY itself is a key in cache_controller.db and no parsing change can move it,
              # so this is belt and braces rather than the primary route.
-             **({"sha": e["ondisk_sha256"]} if e.get("ondisk_sha256") else {})},
+             **({"sha": e["ondisk_sha256"]} if e.get("ondisk_sha256") else {}),
+             # Every time the row shows — the claims, the last read, the device's own record of the
+             # file, and what the file says about itself where it states its zone — as the wall
+             # clocks displayed (report_ui.ts_key), for the search over every report.
+             "ts": report_ui.ts_keys(
+                 *[c.get("created") for c in e["claims"]], e["meta"].get("last_read"),
+                 *(e.get("ondisk_mtimes") or {}).values(),
+                 *report_ui.fs_times((e.get("ondisk_fs") or {}).values(),
+                                     e.get("_epochfmt") or (lambda seconds: "")),
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")]),
+             # the device's inode-change times, apart: searched only when asked for
+             **_tc((e.get("ondisk_fs") or {}).values(), e.get("_epochfmt"))},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1830,6 +3136,27 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
             + vrows + "</table>")
 
     cat_opts = "".join(f"<option value='{_esc(c)}'>{_esc(c)}</option>" for c in categories)
+    # Written only when an entry has one, so a report with none is byte for byte what it was.
+    filter_css = "\n .chip.mem.filt{border-style:dashed}" if filter_linked else ""
+    filter_opt = ('<option value="Filter">filter listed with a Memory (not its media)</option>'
+                  if filter_linked else "")
+    filter_sum = (f'<div class="sum"><b>{filter_linked}</b> cached file(s) are an asset of a filter '
+                  f'listed with a Memory — not its media{_info(FILTER_LISTED_BASIS)}</div>'
+                  if filter_linked else "")
+    # the same for a conversation tie: the dashed chip's style when any entry has a tie, the Linked
+    # option and the count when one is tied to nothing else. The option's words hold for every tie it
+    # selects — one whose arroyo.db messages were not read too, where an absence is not known
+    conv_css = ("\n .chip.chat.gone{background:#fff;border:1px dashed #8cc49e}" if conv_chips else "")
+    conv_opt = ('<option value="Conversation">chat conversation only (no message row)</option>'
+                if conv_tied else "")
+    conv_sum = (f" &middot; <b>{conv_tied}</b> tied only to a conversation{_info(CONV_TIE_BASIS)}"
+                if conv_tied else "")
+    read_from = " · ".join(f"{html.escape(device_path(s['path'], src_root, manifest))} "
+                           f"({html.escape(_ctp_store_state(s))})" for s in ctp_stores or ())
+    ctp_sum = (f'<div class="sum"><b>{ctp_named}</b> cached file(s) are named by an item of an '
+               f"account's creative-tools store (primary.docobjects ctp__item_5){_info(CTP_BASIS)}"
+               + (f" — read from {read_from}" if read_from else "") + "</div>"
+               if ctp_named else "")
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Snapchat cache_controller.db</title>{report_ui.emoji_font_link(rel_prefix)}<style>{report_ui.EMBEDDED_CSS}{report_ui.DEVICE_FS_CSS}
@@ -1887,8 +3214,12 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  .chiprow>*{{flex:0 0 auto}} .chiprow .chip{{margin:0}}
  .chips{{margin-top:4px}} .chip{{display:inline-block;margin:2px 6px 2px 0;padding:2px 8px;border-radius:10px;
    font-size:11px;text-decoration:none;font-weight:600}}
- .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}
- .chip.chat{{background:#e7f6ea;color:#1f6b39;border:1px solid #b3ddc0}}
+ .chip.mem{{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0}}{filter_css}
+ .chip.lead{{background:#fff;color:#6b5a00;border:1px dashed #c9a400;text-decoration:none}}
+ .leadnote{{font-size:12px;color:#6b5a00;margin:2px 0 4px}}
+ button.copyids{{font-size:11.5px;padding:2px 8px;border:1px solid #bcbcd0;border-radius:5px;
+   background:#fff;cursor:pointer;font-weight:600;color:#2d2d71}}
+ .chip.chat{{background:#e7f6ea;color:#1f6b39;border:1px solid #b3ddc0}}{conv_css}
  .chip.cm{{background:#fdf0e3;color:#8a5a1c;border:1px solid #e8cfae}}
  .chip.ok{{background:#eef7ee;color:#2f7d32}} .chip.miss{{background:#f6efef;color:#9a5a5a}}
  .chip.warn{{background:#fff3d6;color:#8a5a00;border:1px solid #e6c983}}
@@ -1924,7 +3255,7 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
 <script>{report_ui.VTABLE_JS}</script></head><body>
 <header><h1>Snapchat cache_controller.db</h1>
  <div class="sum">{total} physical cache files &middot; <b>{on_disk}</b> present on disk &middot;
- <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat &middot;
+ <b>{mem_linked}</b> linked to a Memory &middot; <b>{chat_linked}</b> linked to a chat{conv_sum} &middot;
  <b>{xscope}</b> with a cross-scope copy &middot; {deleted} with a deletion record &middot;
  times in <b>{html.escape(tz_label)}</b></div>
  <div class="sum"><b>{encrypted_total}</b> cached file(s) hold encrypted bytes
@@ -1934,18 +3265,20 @@ def generate_report(entries, virtual, outdir, tz_label, rel_prefix, src_root, ma
  {_info(ORPHAN_BASIS) if orphans else ''}</div>
  <div class="sum">Scope: {html.escape(_words(platform)["scope"])}</div>
  <div class="sum">Source: {html.escape(db_display)}</div>
- {figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
+ {filter_sum}{ctp_sum}{figures}{_wal_summary(wal_infos, wal_only, main_only, meta_changed)}</header>
 {banner}{report_ui.missing_data_banner('CacheController_report.html')}
 <div class="stickytop">
 <div class="toolbar">
  <input type="search" id="q" placeholder="Search cache key, EXTERNAL_KEY, hash, URL, user…"
    title="Separate several terms with | to match any of them — that is what a cross-report link
 with more than one target fills in here." oninput="flt()">
+ {report_ui.search_all_link("../")}
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>On disk <select id="disk" onchange="flt()"><option value="">any</option>
    <option value="yes">on disk</option><option value="no">not on disk</option></select></label>
  <label>Linked <select id="link" onchange="flt()"><option value="">any</option>
-   <option value="Memory">Memory</option><option value="Chat">Chat</option></select></label>
+   <option value="Memory">Memory</option><option value="Chat">Chat</option>
+   <option value="Possible">possible Memory (not proven)</option>{conv_opt}{filter_opt}</select></label>
  <label title="Only files with an on-disk copy in a different account's SCContent scope than the claim">
    <input type="checkbox" id="xscope" onchange="flt()"> ⚠ cross-scope only</label>
  <label title="Measured from the bytes: high entropy and a length that is a multiple of the AES
@@ -1989,6 +3322,7 @@ counted as encrypted.">Encrypted <select id="enc" onchange="flt()"><option value
 {report_ui.HINT_JS}
 {report_ui.NAV_JS}
 {report_ui.SELECT_TOOLBAR_JS}
+{report_ui.CLIPBOARD_JS}
 var flt_t=0;
 function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
 function xall(btn){{
@@ -2036,7 +3370,8 @@ scConsumeHash();
     with open(report, "w", encoding="utf-8") as f:
         f.write(doc)
     return report, {"total": total, "on_disk": on_disk, "mem": mem_linked,
-                    "chat": chat_linked, "deleted": deleted, "orphans": orphans,
+                    "chat": chat_linked, "conv": conv_tied, "filter": filter_linked, "ctp": ctp_named,
+                    "deleted": deleted, "orphans": orphans,
                     "wal_only": wal_only, "main_only": main_only,
                     "meta_changed": meta_changed, "encrypted": encrypted_total,
                     "encrypted_locked": encrypted_locked}
@@ -2069,7 +3404,17 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     device_fs_records = load_fs_records(src_root, app_or_root, app)
 
     scfull, scparts = index_sccontent(app)
-    mem_index = load_memory_index(app)
+    mem_index = load_memory_index(app, overlays=True)
+    # every account's creative-tools item store, staged in a temporary folder (never beside the
+    # report: it is the contacts' store too), and the userIds its folders are named after. Optional
+    # evidence: a store that cannot be read loses its items, never the report.
+    try:
+        ctp_index = ctp_items.read(app)
+    except Exception as error:                                     # noqa: BLE001 - optional store
+        logger.warning(f"  creative-tools item stores (primary.docobjects ctp__item_5) not read: "
+                       f"{error}")
+        ctp_index = ctp_items.empty_index()
+    userids = map_userids(app)
     # report_dir defaults to the parent of outdir when the report is placed under …/Reports/CacheController
     rdir = report_dir or os.path.dirname(os.path.abspath(outdir))
     # The manifests the Memories, Conversations and Library/Caches reports write are read from
@@ -2079,8 +3424,10 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     # evidence read by the same build (see docs/report_partial.md).
     ldir = links_dir or rdir
     chat_links, chat_by_message = load_chat_links(ldir)
+    chat_ids = load_chat_ids(ldir, chat_by_message)
     memory_pages = load_memory_pages(ldir)
     memory_media = load_memory_media(ldir)
+    memory_content = (load_memory_content(ldir) or {}).get("by_cache_key") or {}
     cache_media = load_cache_media(ldir)
     # the shared, examiner-owned selection file every report of this run loads
     report_ui.write_selection_stub(rdir, report_ui.run_id(rdir))
@@ -2092,10 +3439,14 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     for db in dbs:
         entries, virt, wal_info = build_entries(db, app, scfull, scparts, mem_index, chat_links,
                                                 ms_fmt, memory_pages, chat_by_message,
-                                                workdir=outdir)
+                                                workdir=outdir, memory_content=memory_content,
+                                                chat_ids=chat_ids, ctp_index=ctp_index)
         all_entries.extend(entries)
         virtual.extend(virt)
         wal_infos.append(wal_info)
+    for e in all_entries:                                  # whose store, as every panel names one
+        for hit in e.get("ctp_items") or ():
+            hit["account"] = _account_label(hit["user_hash"], userids)
 
     # Files that are on disk but that the index does not account for. Without these the report only
     # shows what cache_controller.db remembers, and a recovered file it has forgotten is invisible.
@@ -2106,6 +3457,17 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                     f"cache_controller.db — listed as \"{ORPHAN_CATEGORY}\"")
         all_entries.extend(orphans)
         all_entries.sort(key=lambda e: (e["category"], -e["created_sort"], e["cache_key"]))
+
+    # The snap editor's session records, attached to the files they name (see snap_session).
+    claims_by_key = {}
+    for e in all_entries:
+        for c in e["claims"]:
+            claims_by_key.setdefault(e["cache_key"].lower(), []).append((c["external_key"], c["mct"]))
+    sessions = snap_session.read(app, claims_by_key)
+    for e in all_entries:
+        e["session"] = [dict(rec, saved=ms_fmt(rec["saved_unix"] * 1000),
+                             edited=ms_fmt(rec["edited_ms"]) if rec["edited_ms"] else "")
+                        for rec in sessions.get(e["cache_key"].lower(), [])]
 
     for e in all_entries:
         stamps, records = {}, {}
@@ -2121,6 +3483,36 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                             if record and record.get("mtime") is not None else "")
         e["ondisk_mtimes"] = stamps
         e["ondisk_fs"] = records
+
+    # Possible Memory — leads, never links (scripts/memory_leads.py): for each on-disk media file no
+    # identifier, chat or byte comparison connects to anything, the Memories of its kind whose times
+    # fall near the file's own. Kept in e["leads"] only: never a link, a count or a closure edge.
+    lead_files = {}
+    for e in all_entries:
+        # Only files nothing else accounts for: a category that names what the file is (a lens, a
+        # story preview, a Discover video…) already says it is not a Memory's media.
+        ctx19 = any(c.get("mct") == 19 for c in e["claims"])
+        # an asset of a filter a Memory's record lists is accounted for, though not as its media; a
+        # file a creative-tools item names is explained by the item, whatever its category; and one
+        # whose claim names a chat conversation is that conversation's, though no message row is there
+        if (e.get("memory") or e.get("chats") or e.get("filter_memories") or e.get("ctp_items")
+                or e.get("conv_links") or not e["on_disk"]["found"]
+                or not (e["category"] in LEAD_CATEGORIES or (e["category"] == "Other" and ctx19))):
+            continue
+        kind = memory_leads.kind_of_ext(guess_media(_head_of(e["on_disk"]["paths"])))
+        if not kind:
+            continue
+        pts = [(f"claim, context {c['mct']}", c["created_sort"] / 1000) for c in e["claims"]
+               if c.get("created_sort")]
+        for rec in (e.get("ondisk_fs") or {}).values():
+            for field, label in (("btime", "file created"), ("mtime", "file modified"),
+                                 ("atime", "file last read")):
+                if rec and rec.get(field):
+                    pts.append((label, rec[field] / device_fs.NS))
+        lead_files[e["cache_key"]] = {"kind": kind, "points": pts, "ctx19": ctx19}
+    leads = memory_leads.find_leads(lead_files, mem_index.get("points") or {})
+    for e in all_entries:
+        e["leads"] = leads.get(e["cache_key"])
 
     # which platform's words the explanations use (see PLATFORM_WORDS)
     platform = "android" if android_layout.is_app_dir(app) else "ios"
@@ -2138,16 +3530,28 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
         if e.get("memory"):
             sel.link(partial_report.EDGE_MEMORY_CACHE, row_id, "mem",
                      f"mem-{e['memory']['snap_id']}")
+        # an edge of its own, never EDGE_MEMORY_CACHE: following a Memory to its media must not
+        # bring the assets of every filter its record lists (relations mem_filter_assets and
+        # cache_filter_memories, both off by default)
+        for fm in e.get("filter_memories") or ():
+            sel.link(partial_report.EDGE_MEMORY_FILTER_ASSET, row_id, "mem", f"mem-{fm['snap_id']}")
         for chat in e.get("chats") or ():
             if chat.get("conversation_id") and chat.get("server_message_id"):
                 sel.link(partial_report.EDGE_MESSAGE_CACHE, row_id, "msg",
                          f"conv-{chat['conversation_id']}|msg-{chat['server_message_id']}")
+        # a conversation tie, to the row the Conversations report lists (its anchor is built from the
+        # id as that report spells it, not as the key does); one it does not list has no row to reach
+        for tie in e.get("conv_links") or ():
+            if tie.get("listed") and tie.get("anchor"):
+                sel.link(partial_report.EDGE_CONV_CACHE, row_id, "conv", tie["anchor"])
+        # a creative-tools item that names the file is no edge: the store has no report of its own
 
     return partial_report.Stage("cc", all_entries, sel, app=app, outdir=outdir, dbs=dbs,
                                 virtual=virtual, wal_infos=wal_infos, tz_label=tz_label,
                                 rel_prefix=rel_prefix, rdir=rdir, scfull=scfull, scparts=scparts,
                                 manifest=manifest, src_root=src_root, memory_media=memory_media,
-                                cache_media=cache_media, ms_fmt=ms_fmt, platform=platform)
+                                cache_media=cache_media, ms_fmt=ms_fmt, platform=platform,
+                                ctp_stores=ctp_index["stores"])
 
 
 def _drop_sqlite_views(outdir):
@@ -2200,7 +3604,15 @@ def render(stage, closure=None, prov=None):
                                     stage["rel_prefix"], src_root, manifest, db_display,
                                     report_ui.run_id(rdir), stage["wal_infos"],
                                     closure=closure, prov=prov,
-                                    platform=stage.get("platform") or "ios")
+                                    platform=stage.get("platform") or "ios",
+                                    ctp_stores=stage.get("ctp_stores"))
+    # The same leads, seen from the Memory: the Memories pages, already written, load this file. A
+    # partial extract's names only the Memories it holds.
+    memory_leads.write_script(os.path.join(outdir, "data"),
+                              {e["cache_key"]: e.get("leads") for e in all_entries},
+                              report_ui.run_id(rdir),
+                              keep=None if closure is None else
+                              (lambda sid: closure.has("mem", f"mem-{sid}")))
     logger.info(f"cache_controller report: {os.path.abspath(report)}")
     if closure is not None:
         removed = _drop_sqlite_views(outdir)
@@ -2211,6 +3623,15 @@ def render(stage, closure=None, prov=None):
     logger.info(f"  {stats['total']} cache files, {stats['on_disk']} on disk, "
                 f"{stats['mem']} linked to Memories, {stats['chat']} linked to chats, "
                 f"{stats['deleted']} deleted")
+    if stats.get("conv"):
+        logger.info(f"  {stats['conv']} tied only to a conversation: a claim key names a message no "
+                    f"row is there for — not counted as linked to a chat")
+    if stats.get("filter"):
+        logger.info(f"  {stats['filter']} an asset of a filter a Memory's overlay record lists "
+                    f"(ZGALLERYSNAPDETAIL.ZOVERLAY) — not the Memory's media, and not counted above")
+    if stats.get("ctp"):
+        logger.info(f"  {stats['ctp']} named by an item of an account's creative-tools store "
+                    f"(primary.docobjects ctp__item_5) — information on the file, not a link")
     logger.info(f"  {stats['encrypted']} hold encrypted bytes (high entropy + AES block "
                 f"alignment), {stats['encrypted_locked']} of them with no key available; "
                 f"everything else on disk was identified by its magic bytes")

@@ -1,9 +1,7 @@
 pandas
-pyasn1
 numpy
 filetype
 blackboxprotobuf
-requests
 opencv-python
 Pillow
 FreeSimpleGUI

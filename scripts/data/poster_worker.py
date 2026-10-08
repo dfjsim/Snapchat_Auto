@@ -16,28 +16,71 @@ Killing needs a process. A thread cannot be stopped, and abandoning one is worse
   interpreter then cannot flush ``sys.stderr`` at shutdown, ``Py_FinalizeEx`` fails, and the process
   exits **120** — reports written, run reported as failed.
 
-So: :func:`run_jobs` (the parent half) feeds one job at a time to a subprocess running
-:func:`main` (the child half), and kills it if it stops answering. The child announces each file
+So: :func:`run_jobs` (the parent half) feeds one job at a time to each of a few subprocesses running
+:func:`main` (the child half), and kills one that stops answering. The child announces each file
 *before* it starts, so the parent knows which one to skip when it restarts. Nothing is abandoned.
+
+Three things keep a large case from waiting on thumbnails:
+
+* **Several workers** (:func:`default_workers`) decode at once; each is still one process with one
+  file at a time, and still killed when that file hangs. A video's result does not depend on which
+  worker took it, so only how long the pass takes changes.
+* **A thumbnail cache** (:func:`set_cache_dir`, the run folder's ``.thumbnail_cache``): a frame is
+  stored under the SHA-256 of the video it came from, so the same bytes are decoded once per run
+  folder — not again by the next report that holds a copy, nor by a partial run or a refresh later.
+  Only frames are cached; a hang is decided afresh by each run.
+* **No time limit, and a Skip.** A pass runs until it is done. The run window's *Skip thumbnails*
+  (``progress.request_skip(SKIP_KEY)``) stops it between files, and a headless run can set a limit
+  (:func:`set_budget`, ``--thumbnail-minutes``). Either way a video not reached is **not attempted**
+  — never reported as undecodable.
 """
 
 import os
 import sys
 import time
 import queue
+import shutil
+import hashlib
 import logging
 import threading
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+from scripts import progress
 
 logger = logging.getLogger(__name__)
 
-# Wall-clock bounds on one video and on the whole pass, both enforced by killing the worker. A frame
-# that comes out at all comes out in well under a second, so the per-file bound is not a judgement
-# about how long decoding takes — it is the line past which a file is not decoding at all, set with
-# headroom for slow hardware. The budget is the backstop for a case where much of the cached video
-# is undecodable; reaching it costs nothing but thumbnails, and what it did not reach is reported.
+# The wall-clock bound on one video, enforced by killing its worker. A frame that comes out at all
+# comes out in well under a second, so this is not a judgement about how long decoding takes — it is
+# the line past which a file is not decoding at all, set with headroom for slow hardware.
 FILE_TIMEOUT_S = 3.0
-BUDGET_S = 600.0
+#: No limit on a whole pass by default: the run window can skip the rest instead (see the module doc).
+BUDGET_S = None
+#: At most this many workers, whatever the machine: each holds a decoder and its buffers.
+MAX_WORKERS = 4
+#: The name the run window's Skip button and the passes agree on.
+SKIP_KEY = "thumbnails"
+
+_settings = {"cache_dir": None, "budget": BUDGET_S, "workers": None}
+
+
+def set_cache_dir(path):
+    """Keep frames under ``path`` (a run folder's ``.thumbnail_cache``), or nowhere with None."""
+    _settings["cache_dir"] = path
+
+
+def set_budget(seconds):
+    """A limit on each pass in seconds, for a headless run (``--thumbnail-minutes``); None for none."""
+    _settings["budget"] = seconds
+
+
+def set_workers(n):
+    _settings["workers"] = n
+
+
+def default_workers():
+    """One worker per core but one, between 1 and :data:`MAX_WORKERS`."""
+    return max(1, min(MAX_WORKERS, (os.cpu_count() or 2) - 1))
 
 
 # --------------------------------------------------------------------------- parent half
@@ -118,34 +161,6 @@ def _drain(stream, sink):
         pass
 
 
-# The worker cannot run at all (it failed to import what it needs). Distinct from a hang: a hang is
-# a statement about the file, this is a statement about the tool, and only one of the two may be
-# written into a report as a property of the evidence.
-FATAL = object()
-
-
-def _await_result(lines, timeout):
-    """True/False for the current file, ``FATAL``, or None when the worker stopped answering."""
-    end = time.monotonic() + timeout
-    while True:
-        remaining = end - time.monotonic()
-        if remaining <= 0:
-            return None
-        try:
-            line = lines.get(timeout=remaining).strip()
-        except queue.Empty:
-            return None
-        if line.startswith("START "):                          # reached the file, still working
-            continue
-        if line.startswith("OK ") or line.startswith("NO "):
-            return line.startswith("OK ")
-        if line.startswith("FATAL "):
-            logger.warning(f"Poster frames unavailable: the extraction worker could not start "
-                           f"({line[6:]}) — the videos are listed without a thumbnail, which says "
-                           f"nothing about whether they decode")
-            return FATAL
-
-
 def _kill(proc):
     """Stop a worker and everything it is doing. Unlike a thread, it actually stops.
 
@@ -171,17 +186,82 @@ def _kill(proc):
             pass
 
 
-def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=BUDGET_S):
+_DEFAULT = object()
+
+
+def _drain_tagged(stream, sink, tag):
+    """Like :func:`_drain`, tagging each line with the process it came from: the workers share one
+    queue, and a line from a worker that has since been killed must not be read as its successor's."""
+    try:
+        for line in stream:
+            sink.put((tag, line))
+    except Exception:                                          # the pipe died with the worker
+        pass
+
+
+class _Slot:
+    """One worker process, and the file it is on."""
+
+    def __init__(self):
+        self.proc, self.job, self.deadline = None, None, 0.0
+
+    def start(self, lines, stderr_chunks):
+        self.proc = _spawn()
+        threading.Thread(target=_drain_tagged, args=(self.proc.stdout, lines, self.proc),
+                         daemon=True).start()
+        threading.Thread(target=_drain, args=(self.proc.stderr, stderr_chunks), daemon=True).start()
+
+    def stop(self):
+        _kill(self.proc)
+        self.proc, self.job = None, None
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _cache_keys(jobs, cache_dir):
+    """``{src: key}`` — the video's SHA-256 and whether it is complete, which decides the frame."""
+    if not cache_dir:
+        return {}
+    keys = {}
+
+    def one(job):
+        _key, src, _dst, complete = job
+        try:
+            return src, f"{_sha256(src)}-{'c' if complete else 'p'}"
+        except OSError:
+            return src, None
+    with ThreadPoolExecutor(max_workers=4) as pool:          # reading, mostly: threads are enough
+        for src, key in pool.map(one, jobs):
+            if key:
+                keys[src] = key
+    return keys
+
+
+def _copy(src, dst):
+    try:
+        shutil.copyfile(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=_DEFAULT, workers=None):
     """Run ``[(src, dst, complete)]`` and return ``({src: True/False}, stderr chunks)``.
 
     A file the worker does not answer for within ``file_timeout`` is recorded as undecodable
-    (``False``) and skipped; the worker is killed and a new one takes over from the next file. The
-    whole pass stops at ``budget``, whatever is left undone — a thumbnail is a convenience, and no
-    convenience may cost the examiner their report.
+    (``False``) and skipped; that worker is killed and a new one takes its place. The pass stops
+    early only when skipped from the run window or when a ``budget`` (seconds) runs out — by default
+    there is none — and then whatever is left is not attempted.
 
-    A key is **absent** from the result when that file was never attempted — the worker could not be
-    started, it died on its own, or the budget ran out first. Callers must keep that apart from
-    ``False``: "this video did not decode" is a finding about the evidence, and it may not be
+    A key is **absent** from the result when that file was never attempted — no worker could be
+    started, one could not run at all, or the pass was stopped first. Callers must keep that apart
+    from ``False``: "this video did not decode" is a finding about the evidence, and it may not be
     written next to a file this tool never opened.
     """
     # Resolve here, in the parent, where the working directory is the run folder: the worker runs
@@ -189,44 +269,129 @@ def run_jobs(jobs, file_timeout=FILE_TIMEOUT_S, budget=BUDGET_S):
     # there — or, as it did, no file at all and a silent zero posters.
     jobs = [(src, os.path.abspath(src), os.path.abspath(dst), complete)
             for src, dst, complete in jobs]
+    budget = _settings["budget"] if budget is _DEFAULT else budget
     results, stderr_chunks = {}, []
-    index, deadline, killed = 0, time.monotonic() + budget, 0
-    while index < len(jobs) and time.monotonic() < deadline:
-        try:
-            proc = _spawn()
-        except Exception as error:
-            logger.warning(f"Poster frames unavailable: the extraction worker could not be started "
-                           f"({error}) — {len(jobs) - index} video(s) will be listed without a "
-                           f"thumbnail, and are NOT reported as undecodable")
-            return results, stderr_chunks
-        lines = queue.Queue()
-        threading.Thread(target=_drain, args=(proc.stdout, lines), daemon=True).start()
-        threading.Thread(target=_drain, args=(proc.stderr, stderr_chunks), daemon=True).start()
-        try:
-            while index < len(jobs) and time.monotonic() < deadline:
-                key, src, dst, complete = jobs[index]
+    total, reused = len(jobs), 0
+    cache_dir = _settings["cache_dir"]
+    keys = _cache_keys(jobs, cache_dir)
+
+    # what the cache already holds, and the same bytes asked for twice in one pass: decoded once
+    pending, followers = [], {}
+    for job in jobs:
+        key, _src, dst, _complete = job
+        ck = keys.get(job[1])
+        if ck and _copy(os.path.join(cache_dir, ck + ".jpg"), dst):
+            results[key] = True
+            reused += 1
+            continue
+        if ck and ck in followers:
+            followers[ck].append(job)
+            continue
+        if ck:
+            followers[ck] = []
+        pending.append(job)
+    n_workers = min(workers or _settings["workers"] or default_workers(), len(pending)) or 1
+    if pending:
+        logger.info(f"Thumbnails: {len(pending)} video(s) to decode with {n_workers} worker(s)"
+                    + (f"; {reused} frame(s) reused from the thumbnail cache" if reused else ""))
+
+    lines = queue.Queue()
+    slots = [_Slot() for _ in range(n_workers)]
+    queue_ = list(reversed(pending))                           # popped from the end, in order
+    deadline = time.monotonic() + budget if budget else None
+    killed, stopped, fatal = 0, False, False
+    tries = {}                                                 # src -> failed hand-overs
+
+    def answered(slot, ok):
+        results[slot.job[0]] = ok
+        slot.job = None
+        progress.step("cutting thumbnails from cached video", len(results), total)
+
+    try:
+        while True:
+            if not stopped and (fatal or progress.skip_requested(SKIP_KEY)
+                                or (deadline and time.monotonic() >= deadline)):
+                stopped = True
+            for slot in slots:                                 # hand out work
+                if stopped or slot.job is not None or not queue_:
+                    continue
+                if slot.proc is None:
+                    try:
+                        slot.start(lines, stderr_chunks)
+                    except Exception as error:
+                        logger.warning(f"Poster frames unavailable: the extraction worker could not "
+                                       f"be started ({error}) — {len(queue_)} video(s) will be "
+                                       f"listed without a thumbnail, and are NOT reported as "
+                                       f"undecodable")
+                        stopped = fatal = True
+                        break
+                job = queue_.pop()
                 try:
-                    proc.stdin.write(f"{src}\t{dst}\t{1 if complete else 0}\n")
-                    proc.stdin.flush()
-                except OSError:
-                    break                                      # the worker died on its own
-                answered = _await_result(
-                    lines, min(file_timeout, max(0.1, deadline - time.monotonic())))
-                if answered is FATAL:                          # nothing further will work either
-                    return results, stderr_chunks              # the rest stay "never attempted"
-                index += 1                                     # dealt with, either way
-                if answered is None:
+                    slot.proc.stdin.write(f"{job[1]}\t{job[2]}\t{1 if job[3] else 0}\n")
+                    slot.proc.stdin.flush()
+                except OSError:                                # the worker died on its own
+                    slot.stop()
+                    tries[job[0]] = tries.get(job[0], 0) + 1
+                    if tries[job[0]] < 3:
+                        queue_.append(job)                     # a fresh worker takes it
+                    continue
+                slot.job, slot.deadline = job, time.monotonic() + file_timeout
+            busy = [slot for slot in slots if slot.job is not None]
+            if not busy and (stopped or not queue_):
+                break
+            # wait for the first answer, or for the earliest file to run out of time
+            now = time.monotonic()
+            wait = max(0.01, min([slot.deadline for slot in busy], default=now + 0.1) - now)
+            try:
+                proc, line = lines.get(timeout=wait)
+            except queue.Empty:
+                proc, line = None, ""
+            line = line.strip()
+            for slot in busy:
+                if proc is not None and slot.proc is proc and slot.job is not None:
+                    if line.startswith("OK ") or line.startswith("NO "):
+                        answered(slot, line.startswith("OK "))
+                    elif line.startswith("FATAL "):
+                        logger.warning(f"Poster frames unavailable: the extraction worker could not "
+                                       f"start ({line[6:]}) — the videos are listed without a "
+                                       f"thumbnail, which says nothing about whether they decode")
+                        slot.job = None                        # not attempted
+                        stopped = fatal = True
+                if slot.job is not None and time.monotonic() >= slot.deadline:
                     killed += 1
-                    results[key] = False                       # attempted, and it hung: undecodable
-                    break                                      # hung: kill it, start a new one
-                results[key] = answered                        # keyed as the caller passed it
-        finally:
-            _kill(proc)
+                    answered(slot, False)                      # attempted, and it hung: undecodable
+                    slot.stop()                                # a fresh worker takes the next one
+    finally:
+        for slot in slots:
+            slot.stop()
+
+    # the frames the cache did not have yet, and the copies asked for twice
+    for job in pending:
+        key, src, dst, _complete = job
+        ck = keys.get(src)
+        if not ck:
+            continue
+        if results.get(key) and cache_dir:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                target = os.path.join(cache_dir, ck + ".jpg")
+                if not os.path.exists(target):
+                    shutil.copyfile(dst, target + ".tmp")
+                    os.replace(target + ".tmp", target)
+            except OSError:
+                pass
+        for follower in followers.get(ck, ()):
+            if key not in results:
+                continue                                       # not attempted: nor are its copies
+            results[follower[0]] = bool(results[key]) and _copy(dst, follower[2])
     if killed:
         logger.debug(f"{killed} video(s) blocked the decoder and were skipped")
-    if index < len(jobs):
-        logger.info(f"Poster frames: stopped after {budget:.0f}s with {len(jobs) - index} video(s) "
-                    f"not attempted — they are listed without a thumbnail")
+    left = total - len(results)
+    if left and not fatal:
+        why = ("skipped from the run window" if progress.skip_requested(SKIP_KEY)
+               else f"stopped after {budget / 60:.0f} min" if budget else "stopped")
+        logger.info(f"Thumbnails: {why} with {left} video(s) not attempted — they are listed "
+                    f"without a thumbnail")
     return results, stderr_chunks
 
 
@@ -239,7 +404,7 @@ def main(argv=None):
                        ("OPENCV_VIDEOIO_DEBUG", "0")):
         os.environ.setdefault(var, value)
     try:
-        from scripts.memories_media_report import generate_poster
+        from scripts.data.poster_frame import generate_poster
     except Exception as error:                                 # pragma: no cover - import guard
         sys.stdout.write(f"FATAL {error}\n")
         sys.stdout.flush()
@@ -265,9 +430,9 @@ def main(argv=None):
         sys.stdout.write(f"START {src}\n")
         sys.stdout.flush()
         try:
-            # quiet=False: this process's stderr belongs to the parent, which captures and
+            # no stderr capture: this process's stderr belongs to the parent, which captures and
             # summarises it. A per-call fd-2 redirect here would take that away.
-            ok = generate_poster(src, dst, complete=complete, quiet=False)
+            ok = generate_poster(src, dst, complete=complete)
         except Exception:
             ok = False
         sys.stdout.write(f"{'OK' if ok else 'NO'} {src}\n")

@@ -15,6 +15,365 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   the source column keeps at least 18em; a note spans both columns. The other expandable index
   reports draw two-column grids or tables and were not affected.
 
+## [1.9.0-beta.3] — 2026-10-07
+
+### Added
+- **`--survey-claim-links <run folder>`** — `scripts/claim_link_survey.py`. For every
+  `cache_controller.db` claim: whether the reports tie it to a chat message (by the attached file, by
+  the message its key names), and where in `arroyo.db` the ids its key carries occur — table, column,
+  protobuf field, content_type, reading, how many rows hold each id — grouped by the key's shape
+  (`customSticker~<b64:13>`). Shapes, counts and field paths only, in the log and
+  `claim_link_survey_<stamp>.json`. It finds, in one run on a case, the claim kinds a link rule is
+  missing for. A second section does the same for every file under `Library/Caches` whose path carries
+  a UUID (`filtered-<UUID>.mp4` …), looked up in every database of the extraction.
+  `protobuf_wire.values_with_paths` lists every value of a message with its field path. A claim keyed
+  by the URL of an asset of a filter a Memory's overlay record lists has a status of its own, `Memory:
+  listed in its filter record`, by the cache_controller report's own `_overlay_links_for`, and so has
+  one an item of a creative-tools store names, `creative-tools item (ctp__item_5)`, by
+  `ctp_items.match`, and one whose key names a message no row is there for in a conversation the
+  Conversations report lists, `conversation: named in the key`, by `_conversation_links_for` — checked
+  right after the message routes.
+  See [docs/claim_link_survey.md](docs/claim_link_survey.md).
+- **Expand all / Collapse all in the Library/Caches report**, as in the cache_controller and
+  Conversations reports.
+- **Search by date from the run's index page** — `global_search.index_form`. The index's search box
+  now carries the same date/time window as `search.html` (between two moments, or within ± N of one,
+  and *incl. inode changed*), alone or with the words; it was only on the search page itself. The
+  window travels in the fragment (`#q=…&mode=…`) and the search page sets its controls from it. The
+  index page also links the reports' emoji font, as every other page does.
+- **The survey says what arroyo.db holds of the message an untied key names**
+  (`untied_named_message`): the message, only its conversation (a message of it, or a `conversation`,
+  `feed_entry` or `user_conversation` row), or neither — and then whether the claim's `USER_ID` is the
+  `required_values` `USERID` of an `arroyo.db` or another account's (`claim_link_survey._arroyo_facts`,
+  `_named_label`). A message it holds is a missing rule. A message it does not hold, in a conversation
+  it holds or of its own account, is one only a recovery of deleted records could give a rule. A
+  conversation it does not hold, claimed by another account, is one no rule written from that
+  `arroyo.db` can tie — said only when every `arroyo.db` names its account. Every `arroyo.db` of the
+  extraction is read, a table that will not read in either reading makes it unread rather than empty
+  (`_rows`), and so does a `-wal` beside a file that will not open without it (its checkpointed
+  reading was not read), and a message the server never numbered counts as held by its
+  `client_message_id`. A
+  claim's snap id is looked up in the Memories of the app folder the reports read its
+  `cache_controller.db` from (`_apps`), which on Android is not four folders above it. A claim the
+  report ties to the conversation its key names gets the same label, counted apart
+  (`conversation_tie`), so the survey says which tied messages a recovery of deleted records could
+  bring back.
+- **The survey looks untied claims up in every database**, not only arroyo.db (`found_in_any_database`):
+  a Story, a preference or a Memory can hold the id a claim carries. A hit in a message the server never
+  numbered says so, and an owner username in a key's `<USERNAME>~` position is masked out of the shapes.
+- **A cached filter asset links to the Memories whose overlay record lists it — never as their media** —
+  `scripts/data/snap_overlay.py`, `cache_controller_report._overlay_links_for`. A Memory's
+  `ZGALLERYSNAPDETAIL.ZOVERLAY` (scdb-27, plain on both storage schemas) is an NSKeyedArchiver archive
+  listing the snap's geofilters with the URLs of their image, sky image and font (and a sky item's
+  `blimpUrl`, read the same way when it holds one). A cache_controller
+  claim keyed by exactly one of those URLs — the whole URL, query included (`snap_overlay.normalise_url`)
+  — now links to each Memory whose record lists it: a dashed *filter listed* chip (*filter selected*
+  only when the record names that filter), one `#find=` chip for several Memories, a detail section, a
+  *Linked* option and a header count, each written only when there is such a link. The record lists
+  filters it does not name as selected, so nothing says a filter is on the Memory, and the link is never
+  the Memory link: not counted as one, never decrypted with its key, never a lead. A claim of another
+  account than the Memory's is linked and says so; a Bitmoji filter's shared address is never an asset.
+  The Memory's page lists the same files under *Cached assets of filters listed with this Memory — not
+  its media* (`memories_media_report.index_claim_urls`, `_filter_assets_html`), on a shared page each
+  under the Memory that lists it. A file's detail lists at most `FILTER_DETAIL_ROWS` listing Memories
+  (one asset can be listed by a large share of a gallery) and says how many more, each row's "?" holding
+  only what is that Memory's own; the chip and the search carry them all. Only the readers that match
+  filter assets decode the records (`load_memory_index(app, overlays=True)`), and the Memories report
+  keeps a Memory's cached assets, not every asset its record lists. `scripts/data/keyed_archive.py` is a
+  new strict NSKeyedArchiver resolver, which `decode_memdata` now uses too. See
+  [docs/report_memories.md](docs/report_memories.md) and
+  [docs/cross_report_linking.md](docs/cross_report_linking.md).
+- **A cached file named by an item of an account's creative-tools store says so** —
+  `scripts/data/ctp_items.py`, `cache_controller_report._ctp_hits`. Each account's `primary.docobjects`
+  keeps the items of the camera's creative-tools feeds (captions, filters, stickers) in `ctp__item_5`: a
+  FlatBuffers document per item with a protobuf payload holding its asset URLs and its own id, the feed
+  named only from the store's `ctp__feedtree`. A claim whose whole key, or key after `<word>:` /
+  `<word>~` (`music:`, `customSticker~`), is a text an item holds — or, when that part reads as base64,
+  the same bytes as its own id in another alphabet or padding — gets a detail section naming the item,
+  its feed and kind, where in it the text sits, whose store and which reading; and, when no chat link,
+  conversation tie or Memory link says what the file is, the category *Creative tools asset* in place of
+  *CDN media*,
+  *Other* or *Chat media*. Exact whole texts only: never a query value (`bo=` is a set of fetch options
+  many files share) or a part of a text; a text several items of a store hold is attributed only to the
+  one whose own id it is — a custom sticker is one item listed in each sticker-picker feed that shows
+  it, and each is shown — and to none when different items hold it. It is information on the
+  file, not a link, and the file is never a lead; the header line, the category option and the log line
+  appear only when some file is named. An item whose document has another layout is still matched by
+  its `item_id` column, and nothing is said of what it holds; a feed only the checkpointed feed tree
+  lists is named as prior state, and one a tree document that cannot be read might list is not said to
+  be missing. Every account's store is read, staged in a temporary folder. `flatbuffers_doc` reads a
+  sub-table and a `[ubyte]` vector (`table_field`, `bytes_field`, `string_field(…, table=)`), and
+  `trace_ids.base64_bytes` moved to `scripts/data/base64_text.py`, still re-exported. See
+  [docs/report_cache_controller.md](docs/report_cache_controller.md).
+- **A cached file whose claim names a message arroyo.db does not hold is tied to the conversation** —
+  `cache_controller_report._conversation_links_for`, `conversations_report.load_arroyo_messages`. A chat
+  claim's key (`<type>:<conversation>:<message>:<part>`) names a conversation as well as a message.
+  When no chat link reaches the message and the arroyo.db the run read holds no message of that number
+  in that conversation, in either reading — or, for a conversation the Conversations report lists, its
+  messages were not read, which the "?" says is not known — the entry is tied to the conversation,
+  never to a message: a dashed chip to the conversation's page when the Conversations report lists it,
+  otherwise a stated fact and a chip that filters the report to every entry naming the same
+  conversation (`#find=`). A message arroyo.db holds makes no tie. Each "?" says what that arroyo.db
+  holds of the conversation — that no conversation table names it only when they read in full — and,
+  when both are known, whether each claim's `USER_ID` is its account (`required_values` `USERID`): on a
+  phone with two accounts the second account's claims can name conversations and messages that
+  database need never have held, so no wording says "no longer". Counted apart from chat links (*tied
+  only to a conversation*), with a *Linked* option of its own (*no message row*), and never a lead; the
+  header count and the option appear only when some entry is tied only to a conversation, the chip
+  style whenever some entry has a tie. The Conversations manifest (`cache_links.json`, still version 3)
+  gains `conversations` (every listed conversation, with its header anchor and whether arroyo.db holds
+  it) and `arroyo` (its account, the message numbers it holds and whether its conversation tables read
+  in full, read from arroyo.db itself in both readings — unknown, not empty, when a reading will not
+  read or the checkpointed copy will not open), the latter left out of a partial extract. See
+  [docs/cross_report_linking.md](docs/cross_report_linking.md).
+
+### Fixed
+- **A custom sticker sent in a chat is linked to its cached file** — `ParseSnapchat_iOS.getCacheArroyo`
+  (`_sticker_key_text`). A Sticker message whose body is a creative tool item (`4.4.14`) names its
+  sticker by the bytes at `4.4.14.2.6`, and the `customSticker…` claim on the cached file holds them in
+  base64; the join read only the pack sticker's text id (`4.4.4.1.2`), so these messages never got
+  their file — not in the chat reports, and not as a chat link on the claim in the cache_controller
+  report. See [docs/report_communications.md](docs/report_communications.md).
+- **A cached file links to the chat message it belongs to even when it is not the file the chat
+  report shows** — `cache_controller_report._chat_links_for`, `ChatIdIndex`. Two kinds of claim were
+  left without a chat link: a key naming a message (`animationmedia~1:<conversation>:<message>:<part>`)
+  whose file the chat join had not attached, or under a part the report does not list — the manifest
+  listed only messages with an attachment; and a key carrying an id the message names its media by —
+  `content~`, `thumbnail~` or `SnapVideoFilterState-` with the media id of the message's
+  `local_message_references`, or a shared item's or a sticker's other files. The Conversations
+  manifest now lists every message and those ids (`conversations_report.load_arroyo_messages`,
+  `arroyo_content.content_ids`); each link's "?" names the id and the field it came from. See
+  [docs/cross_report_linking.md](docs/cross_report_linking.md). A message the server never numbered
+  (not sent, or still sending) is found by its `client_message_id`, and a `local_message_references`
+  media id is read in any letter case.
+- **Every photo or video of a message sent with several is attached** — `arroyo_content.media_references`,
+  `ParseSnapchat_iOS.getCacheArroyo`. `local_message_references` holds one record per media item (an
+  8-byte length, then a keyed archive); only the first was read, so the others' cached files were never
+  attached and their claims linked to nothing.
+- **A full-media claim keyed by a Memory's own snap id links to that Memory, in both reports** —
+  `cache_controller_report` (fallback after `ZMEDIAID`) and `memories_media_report.collect_media`. A
+  context-19 claim keyed `<snapId>~1` carries the Memory's `ZSNAPID` exactly, but only the Memory-scoped
+  key shapes were read for one; the Memories report now locates and decrypts that file for the Memory.
+- **A chat video kept as a bundle is shown with its message on iOS** — `scripts/chat_media.py`. The
+  file named after a bundle's CACHE_KEY is a descriptor and the video is a child file, so the join, which
+  copies only a whole file that is media, left such a message showing *Media (no cached file)* unless a
+  saved copy named after its conversation, message and part stood in. The rebuild the Android run used
+  (shards concatenated, a bundle's largest media child, a file decrypted with its message's key) moved
+  out of `ParseSnapchat_Android` into a shared module and now runs on iOS too. Where the saved copy and
+  the cached file are the same bytes, the Conversations report shows them as one attachment and lists
+  the other name (`same_as`).
+- **A Library/Caches file byte-identical to a bundle's child or a byte-range part links to its cache
+  entry** — `cache_media_report.sccontent_key`. The link named the piece's file name
+  (`<CACHE_KEY>_<child>`), which is a cache_controller row only when no claimed bundle lists the child,
+  so it usually opened the report without landing anywhere. And `thumbnail~<UUID>` /
+  `profilethumbnail~<UUID>` no longer report "thumbnail" as the claim's owner username (`claim_owner`).
+- **A staged copy of a database that will not open is no longer left in the temp folder** —
+  `sqlite_open._open_ro`. The connection whose first read failed was not closed, and it holds the staged
+  file open until the garbage collector runs, so on Windows `Views.close()` could not remove the folder:
+  a copy of the evidence database (`arroyo.db`, an account's `primary.docobjects`) stayed in `%TEMP%`.
+  It is closed there and then, and `close()` collects and retries once, then logs the folder it could
+  not remove.
+- **The Related items dialog's buttons are always in reach** — `Snapchat_Auto._relations_dialog`. Minimal,
+  Recommended, Everything, Ok and Cancel were the last row of the scrolling list, which is taller than
+  the dialog, so they opened out of sight; they are under it now, and the list's requested height is
+  kept small enough that a window shrunk to its minimum still shows them.
+- **A relation a later build adds starts at its default in the GUI** — `Snapchat_Auto._saved_relations`.
+  The relation policy the GUI remembers names only the relations of the build that saved it, and the
+  dialog read an absent one as off, so a new relation that is on by default stayed off for every
+  examiner who had saved a policy. A saved policy names every relation of the build that saved it, so
+  one it lacks is new: a policy saved as *Minimal* (all off) or *Everything* (all on) gives a new
+  relation the same answer, and only a hand-mixed one starts it at its default. The dialog names the
+  relations added since the policy was saved, and a key this build no longer has is dropped instead of
+  making the run refuse its own `--relations` spec.
+
+### Changed
+- **Partial-report relations for the filter-asset link and the conversation tie** —
+  `partial_report.EDGE_MEMORY_FILTER_ASSET`: `mem_filter_assets` (the cached assets of the filters a
+  selected Memory's overlay record lists) and `cache_filter_memories` (every Memory whose record lists a
+  selected cache entry's asset), both off by default. The file is not the Memory's media and one asset
+  is listed with many Memories, so neither is followed unless asked, and `mem_cache` / `cache_memory`
+  never follow this edge. `partial_report.EDGE_CONV_CACHE`: `cache_conversation` (the conversation a
+  selected cache entry's claim names, for a message no row is there for — its row and page, not its
+  messages), on by default, and `conv_cache` (the reverse — only those tie entries, not the cached files
+  of the conversation's messages, and labelled *(no message row)* like its pair), off like
+  `conv_messages`; recorded only for a conversation the Conversations report lists. See
+  [docs/report_partial.md](docs/report_partial.md).
+- **Python 3.14.8 and Nuitka 4.2.2.** `.python-version` pins 3.14.8, and `[tool.uv]
+  python-preference = "system"` has uv build `.venv` on the python.org runtime instead of its own older
+  3.14 copy, which a rebuilt `.venv` would otherwise have used — and the MSI bundled. Nuitka is required
+  at 4.2.2 or later. That runtime keeps the Tcl/Tk 9 script libraries inside its Tcl DLLs, where Nuitka's
+  tk-inter plugin does not look, so both builds stopped with "Could not find Tcl": a Nuitka user plugin,
+  `build_tools/nuitka_tcl_zipfs.py` (named by a `# nuitka-project:` line in `Snapchat_Auto.py`),
+  extracts them from those DLLs into `build/tcl_zipfs/` for the plugin to bundle.
+- **`--trace-ids` and `--survey-claim-links` say where in a keyed archive an id sits** —
+  `keyed_archive.text_paths`. A hit in a binary plist `NSKeyedArchiver` wrote (a Memory's overlay record
+  in `ZGALLERYSNAPDETAIL.ZOVERLAY`) is placed by the path of the text that holds it, in the archive's
+  own class and key names (`SOJUGallerySnapOverlay.filters.geoFilters[2].imageUrl`; the survey folds a
+  list's positions to `[]`), instead of
+  "(text inside the blob)" — what a link rule for an id kept there needs. A dictionary's entry is `{}`:
+  its keys are values, and a path never carries one.
+- **`--trace-ids` finds a base64 identifier where it is kept as bytes, and names the protobuf field a
+  hit is in** — `scripts/trace_ids.py`. An identifier that is base64 (padded, using `+` or `/`, or
+  mixing cases and digits) is also searched as the bytes it encodes, their hex, without its padding
+  and in the other base64 alphabet; it used to be searched as the text given only, so the same id
+  stored as raw bytes in another database was reported as not there. A row-level hit inside a protobuf
+  blob now carries `field` — the dotted path of the field it lies in, read from the wire alone
+  (`protobuf_wire.field_path`) — so the trace says where in a `message_content` an id sits, not only
+  which row. A shorter form found inside a longer one at the same place is reported once, as the
+  longer one. A raw hit in a database file on a free page, in a page's unallocated space or in a
+  freeblock now says so (`where`) and is marked as in no row, hit by hit — it used to count as "in
+  rows" whenever some other row held the same identifier. See [docs/trace_ids.md](docs/trace_ids.md).
+- **The build no longer warns that FreeSimpleGUI imports pydoc.** `Snapchat_Auto.py` carries
+  `# nuitka-project: --noinclude-pydoc-mode=allow`, which Nuitka reads for the portable EXE and the
+  MSI alike: pydoc stays in the build (leaving it out breaks `import FreeSimpleGUI`) and the warning
+  goes.
+
+## [1.9.0-beta.2] — 2026-10-05
+
+### Added
+- **Search all reports by date** — `scripts/global_search.py`. A **date / time window** (between two
+  moments, or within ± N of one) finds rows by when, alone or with the words, which a row must then
+  match as well. Every report's rows now carry the times they show — the Contacts, cache_controller and
+  Library/Caches rows newly (claims, last read, the device's created / modified / read times, a media
+  file's own zoned times). The device's **inode-change** times can be left out with *incl. inode
+  changed* — ticked by default — here and in the Memories index's own Time filter: copying or acquiring
+  a file can set that time.
+- **A run says where it is** — `scripts/progress.py`. The pipeline reports its stages and the count
+  inside each one (*decrypting SCContent media, 340 of 1,320*); whenever nothing has been logged for 30
+  seconds a *still working* line names the stage, the step and the count, so a long stage no longer
+  looks like a crash; and the end of every run — one that failed included — logs how long each stage
+  took. A retrieval from Snapchat's servers logs its long waits, and its item numbers start at 1.
+  See [docs/progress_and_performance.md](docs/progress_and_performance.md).
+- **The same reports in less time** — `scripts/parallel.py`. Reading, hashing and decoding cached
+  files (Library/Caches, cache_controller) and decrypting Memories run on several threads, with every
+  naming and de-duplication decision still taken in the original order, so the reports are
+  byte-identical; the SCContent listing is taken once per run. **Thumbnails** are cut by several
+  workers at once, kept in the run folder's `.thumbnail_cache/` by the video's SHA-256 (the same video
+  is decoded once per run folder), and no longer stop after ten minutes: the run window can skip them,
+  and a headless run can set `--thumbnail-minutes`. A packaged build starts a thumbnail worker without
+  loading the GUI and the parsers.
+- **The run window** — `scripts/run_window.py`. A run started from the GUI happens behind a window
+  showing the stages done with their times, the step and count of the one running, how long since
+  anything was logged, the log with its warnings and errors, and at the end *Open report* / *Open
+  folder*; *Skip thumbnails* while thumbnails are cut. A retrieval from Snapchat's servers during the
+  run shows its progress and controls (pace, Pause, Stop) in the same window instead of its own, and
+  no longer waits for that window to be closed before the run goes on.
+
+### Fixed
+- **Chat parsing took the last match wherever there were several, and took hours on a large phone.**
+  `fixSenders`, `getCacheArroyo` and `mergeCacheChats` compared every message with every friend and
+  every cache claim, each match overwriting the one before. They are lookups now, and each choice is
+  stated: a user id with several names shows all of them (« / »); a share or sticker takes its media
+  before its thumbnail; a message naming a key claimed twice takes this account's claim; each is
+  logged with a count when it happens. `getSCPersistentMedia` no longer rebuilds its table after every
+  file. Identical output on the test devices, where none of these cases occurs.
+  See [docs/report_communications.md](docs/report_communications.md#when-a-value-has-several-candidates).
+
+## [1.9.0-beta.1] — 2026-10-02
+
+### Added
+- **`--trace-ids <run folder> <id> …`** — `scripts/trace_ids.py`. Searches every file a run extracted
+  for each identifier — as text in any case, UTF-16, dashless hex, the raw and little-endian UUID
+  bytes and base64 — reads every database row by row in both readings (with and without its
+  `-wal`), and places `-wal` hits in their frame, marking superseded frames. It reports where each
+  identifier occurs — file, offset, table, column, row — and never the content, in the log and in
+  `trace_ids_<stamp>.json`. For asking whether the device recorded a connection no report makes yet,
+  on the machine that holds the case. See [docs/trace_ids.md](docs/trace_ids.md).
+- **The MemData identifiers are read** — `memories_media_report.decode_memdata`.
+  `ZGALLERYSNAP.ZMEMDATAIDS` and `ZGALLERYENTRY.ZMEMDATAID` (newer app versions) showed as
+  `<blob N bytes>`; they are NSKeyedArchiver records of a uuid, a creation time and an entry type, and
+  the Memory page now shows them as such. The uuids are searchable and the creation times join the
+  Memory's timestamps.
+- **A cache claim carrying a Memory's MemData identifier links to that Memory**, in both reports
+  (`cache_controller_report._memdata_link`, `memories_media_report.index_claim_uuids`): a recorded
+  identifier, like a `ZMEDIAID`, used only when nothing stronger matched and only when exactly one
+  Memory records it.
+- **Context-34 claims are the snap editor's working copy** — `scripts/data/snap_session.py`. They are
+  categorised *Snap editor*, and the app's own session record (`userPreferences/pref.docobjects`,
+  `SnapEditor-SnapSessionContext`), which names the file's CACHE_KEY with the claim key and context
+  and dates the editing, is shown under the claims — the live row, and earlier versions carved from
+  superseded `-wal` frames when a claim corroborates them. `pref.docobjects` joins the source
+  fingerprint. `scripts/data/protobuf_wire.py` is the protobuf reader `arroyo_content` already used,
+  now shared.
+- **Retrieving Memories media from Snapchat's servers** — `scripts/cloud_download.py`,
+  `scripts/cloud_memories.py`, `scripts/cloud_refresh.py`; [docs/cloud_download.md](docs/cloud_download.md).
+  Off unless asked. It will not start until the examiner confirms holding the legal authority and types
+  what it is; it requests only the addresses a Memory's row records (`ZMEDIADOWNLOADURL`, then
+  `ZMEDIAREDIRECTURI`; the overlay columns), https to the recorded CDN only, no cookies or credentials,
+  one at a time with a delay, a per-minute cap, `Retry-After` and back-off, all adjustable while it runs;
+  it decrypts with the Memory's own key and keeps the bytes as received and decrypted in
+  `CloudDownloads/`, with a hash-chained record of every request. What to retrieve: Memories whose media
+  is **missing** or whose device copy is **incomplete** (the Memories index now filters on that), a
+  selection file, or snap ids — copied from a Memory page's *Get from Snapchat's servers…* or from
+  *Copy snap IDs* for the ticked Memories — narrowed by include/exclude **date rules** on any of the
+  Memory's timestamps. During a run (`--cloud …`) or on an existing run folder (`--cloud-download`),
+  which refreshes the affected reports without unzipping again. Retrieved media is marked ☁, never mixed
+  with device media, and the authority is stated beside it, on `index.html` and in partial extracts.
+  In the GUI: a *Snapchat's servers* section on the main window, a Cloud download window (the
+  authority, what to retrieve with counts, the date-rule table with *Add for checked* and *Copy
+  range to…*, the pace) and a progress window — progress, the request in flight, a log, and the
+  pace, Pause and Stop while it runs (`scripts/cloud_gui.py`).
+  Method after DFIR-HBG's Snapchat_DownloadMemories_iOS (overlay retrieval there by John Hyla); that
+  repository has no licence, so none of its code is used.
+- **Proven by content** — a cached file byte-identical to a Memory's media links to that Memory in the
+  cache_controller and Library/Caches reports: first to the media as this run **recovered it from the
+  device** (marked ≡ — no retrieval needed), then to a copy retrieved from the servers (decrypted, or as
+  received; marked ☁, with the retrieval and its authority). It is how a file no identifier connects to
+  its Memory — the snap editor's working copy of a snap later saved to Memories — is proven to be its
+  media; on a test device the working copies that are a Memory's media now link without a retrieval.
+  The device's copies are never compared with a file some Memory's media was recovered from, and every
+  recorded identifier still wins. The Memory's page names those files beside the media they match.
+- **Possible Memory — not proven** — `scripts/memory_leads.py`. A cached media file nothing connects to
+  a Memory (a snap editor's working copy, a file no claim names, a Memory-shaped claim whose row is gone,
+  or an unrecognised one the app claimed as Memories media) lists the Memories of the same kind whose
+  creation or capture time falls within ten minutes of the file's claim or filesystem times — ranked,
+  with every difference and how many Memories fell in the window, never as a link. Its *Copy snap IDs*
+  feeds the Cloud download, which proves or rules the lead out. Shown on **both** sides: on the file's
+  row, and on the Memory's — a *≈ possible file* badge and a *Possible cached file* filter in the
+  Memories index, and a panel on the Memory's page with every difference and where the Memory ranks
+  among the file's leads. The cache_controller report writes them once, as `data/memory_leads.js`, and
+  the Memories pages load it (`SCV.annotate` adds it to the index rows). Differences under ten seconds
+  are shown to the tenth.
+- **Search all reports** — `scripts/global_search.py`, `search.html` beside the reports. One search over
+  every report and every conversation's messages at once, from the run's `index.html` or the *🔎 All
+  reports* link beside each report's search box. It is each report's own search (its rows' search text,
+  `|` for either) on its own `data/index.js`, so the counts agree; each hit opens its row, *Open all*
+  opens the report filtered to the same search. Written with every `index.html`, partial extracts
+  included.
+
+### Changed
+- **The two GPL-licensed files are gone; both were compiled into the MIT-labelled EXE and MSI.**
+  `scripts/data/keychain.py` (GPL-3.0-or-later) is replaced by `scripts/data/ufed_keychain.py`, written
+  from [docs/ufed_keychain_format.md](docs/ufed_keychain_format.md); on every UFED keychain in the test
+  corpus it yields the same items and the same keychain status. `scripts/data/parse3.py` (GPL-2.0) is
+  replaced by `protobuf_wire.strings`: the reports are unchanged on the corpus; the legacy
+  Communications report's concatenated value for a media message can differ — a stray control
+  character is gone, and a printable CDN token the old parser took for a nested message is now listed.
+  `requests`, `urllib3` and `pyasn1` are no longer dependencies.
+- **The licences travel with the application.** `THIRD_PARTY_NOTICES.md` names every file in the
+  repository that is not this project's own (CCL Forensics' `ccl_bplist.py`, the SQLCipher shell with
+  its SQLite and OpenSSL, Bootstrap, the emoji font) and what the build carries (FreeSimpleGUI,
+  opencv's FFmpeg, CPython and Tcl/Tk, the Nuitka runtime, the update helper); `THIRD_PARTY_LICENSES.txt`
+  holds the licence of every Python package the build carries, generated from `uv.lock` by
+  `build_tools/collect_licenses.py`. The EXE and the MSI now ship both, and LICENSE, which neither
+  shipped before. The README no longer says LICENSE is unmodified.
+
+### Fixed
+- **The cache_controller report read `scdb-27` in place** (`load_memory_index`), which gives a WAL
+  database a `-shm` beside the evidence file, and only with its `-wal` applied. It now reads both
+  readings from staged copies through `sqlite_open`, so a cache file named through a URL the `-wal`
+  has since replaced still links to its Memory.
+- **A Memory's page named only the first cache file its media came from.** The file table shows one row
+  per distinct content and described only the first record of it, so the same bytes recovered again —
+  a thumbnail from SCContent and from a caching-media pack, a pack from two folders, a file under two
+  members of a group — lost every other source: the Library/Caches report linked a pack (*2 copies*)
+  to the Memory while its page named none. Each row now lists every source, with its link and paths
+  (`memories_media_report._media_sources`).
+- **Library/Caches files linked to a Memory were not listed on the Memory's page** unless they were a
+  pack it had decrypted itself. That report renders after the Memories report, so it now writes its
+  Memory links to `CacheMedia/data/memory_links.js` and the page lists every one — pack, CDN URL key,
+  identical content — with how it was linked (`scripts/memory_backlinks.py`).
+
 ## [1.8.0-beta.4] — 2026-10-01
 
 ### Fixed

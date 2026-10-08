@@ -1,0 +1,364 @@
+"""Searching every report at once (``search.html``, scripts/global_search.py).
+
+The page must run the reports' own search — the same text, the same rule — over the rows the reports
+wrote, so its counts are the counts each report's box gives. So beside the Python side (which reports
+a folder holds, which conversation pages it lists, the index page's search box), the page itself is
+run in node over a folder of synthetic reports: its data files loaded as a browser would, a query
+given in the fragment, and the results it draws read back.
+
+Every input is synthetic.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+
+import pytest
+
+import Snapchat_Auto as app
+from scripts import global_search, report_ui
+
+NODE = shutil.which("node")
+needs_node = pytest.mark.skipif(NODE is None, reason="node is not on PATH")
+
+CK1, CK2 = "a" * 32, "b" * 32
+
+
+def _report(root, page, data_dir, rows):
+    os.makedirs(os.path.join(root, os.path.dirname(page)), exist_ok=True)
+    with open(os.path.join(root, page), "w", encoding="utf-8") as fh:
+        fh.write("<!doctype html>")
+    if data_dir is not None:
+        os.makedirs(os.path.join(root, data_dir), exist_ok=True)
+        report_ui.write_rows(os.path.join(root, data_dir), rows)
+
+
+def _row(anchor, cells, text):
+    return [anchor, cells, text.lower(), {}, None, {}]
+
+
+@pytest.fixture
+def folder(tmp_path):
+    root = str(tmp_path / "Reports")
+    _report(root, "Contacts/Contacts_report.html", "Contacts/data", [
+        _row("ct-u1", ["", "Alice Test", "alice-test", "", "u-0001"], "alice test alice-test u-0001")])
+    _report(root, "Conversations/Conversations_report.html", "Conversations/data", [
+        _row("conv-c1", ["", "Private", "Chat with Alice", "c1",
+                         "Alice Test", "", "", "", "", "<a href='pages/k1.html#conv-c1'>open</a>"],
+             "chat with alice c1")])
+    _report(root, "Conversations/pages/k1.html", "Conversations/pages/data/k1", [
+        _row("msg-1.0", ["", "2024-03-10 08:30", "Received", "alice-test", "Text", "see " + CK1],
+             "see " + CK1),
+        _row("msg-2.0", ["", "2024-03-10 08:31", "Sent", "owner", "Text", "nothing"], "nothing")])
+    _report(root, "CacheController/CacheController_report.html", "CacheController/data", [
+        _row(f"ck-{CK1}", ["", "Snap editor", CK1, "", "", "mp4", "1.0 MB"], f"{CK1} snap editor mp4"),
+        _row(f"ck-{CK2}", ["", "Other", CK2, "", "", "jpg", "2 KB"], f"{CK2} other jpg")])
+    _report(root, "Memories/Memories_report.html", None, [])            # a page with no data folder
+    return root
+
+
+# ----------------------------------------------------------------------------------- the folder
+
+def test_only_the_reports_the_folder_holds_are_searched(folder):
+    srcs = global_search.sources(folder)
+    assert [s["key"] for s in srcs] == ["contacts", "conversations", "messages", "cache"]
+    msgs = srcs[2]
+    assert msgs["pages"] == [["k1", "Conversations/pages/k1.html",
+                              "Conversations/pages/data/k1/index.js"]]
+    assert msgs["tab"] == "scauto_conv_page"
+    assert global_search.sources(folder, "android")[0]["cells"] == list(global_search.SOURCES[0][5])
+
+
+def test_android_memories_are_labelled_from_their_own_columns(folder):
+    report_ui.write_rows(os.path.join(folder, "Memories", "data"), [])
+    srcs = {s["key"]: s for s in global_search.sources(folder, "android")}
+    assert srcs["memories"]["cells"] == list(global_search.ANDROID_MEMORY_CELLS)
+
+
+def test_no_report_no_page(tmp_path):
+    assert global_search.write_page(str(tmp_path)) is None
+    assert not (tmp_path / global_search.PAGE).exists()
+
+
+def test_the_page_names_what_it_cannot_search(folder):
+    _report(folder, "Communications_legacy/Communications_legacy_report.html", None, [])
+    path = global_search.write_page(folder)
+    doc = open(path, encoding="utf-8").read()
+    assert "Not searched: Communications (legacy)" in doc
+    assert "<\\/" not in doc or "</script>" in doc                 # the source list stays in its script
+
+
+def test_the_index_page_has_a_search_box_that_opens_the_page(folder):
+    run = os.path.dirname(folder)
+    app.write_index(run, "Reports")
+    doc = open(os.path.join(run, "index.html"), encoding="utf-8").read()
+    assert 'action="Reports/search.html"' in doc and 'target="scauto_search"' in doc
+    assert os.path.isfile(os.path.join(folder, "search.html"))
+    # the date/time window sits beside the box, not only on the search page
+    assert 'id="gmode"' in doc and 'id="gfrom"' in doc and 'id="gctime" checked' in doc
+    assert "function scWinParams" in doc and "function scTimeWin" in doc
+    assert 'href="Reports/emoji_font.css"' in doc
+
+
+def test_every_report_links_to_it_from_its_search_box():
+    link = report_ui.search_all_link("../")
+    assert 'href="../search.html"' in link and 'target="scauto_search"' in link
+    assert "scSearchAll(this)" in link and "function scSearchAll" in report_ui.NAV_JS
+
+
+# ------------------------------------------------------------------------------------ the search
+
+def _node(source):
+    proc = subprocess.run([NODE, "-"], input=source, text=True, encoding="utf-8", capture_output=True)
+    if proc.returncode:
+        pytest.fail(f"node failed:\n{proc.stderr}")
+    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+
+@needs_node
+def test_the_core_is_the_reports_own_search():
+    rows = [["a", ["<b>Alice</b> &amp; co", "x"], "alice u-1", {}, None, {}],
+            ["b", ["Bob", "y"], "bob u-2", {}, None, {}],
+            ["c", ["—", "Carol"], "carol", {}, None, {}]]
+    out = _node(global_search.CORE_JS + f"var R={json.dumps(rows)};" + r"""
+console.log(JSON.stringify({
+ terms:SCQ.terms(' Alice | | BOB '),
+ hits:SCQ.hits(R,SCQ.terms('alice|bob')),
+ none:SCQ.hits(R,SCQ.terms('')),
+ label:SCQ.label(R[0],[0,1]),
+ skip:SCQ.label(R[2],[0,1]),
+ snip:SCQ.snippet('xxxxxxxx alice yyyy',['alice'],4),
+ find:SCQ.findHash(['a b','c'])}));""")[0]
+    assert out["terms"] == ["alice", "bob"]
+    assert out["hits"] == [0, 1] and out["none"] == []
+    assert out["label"] == "Alice & co · x"                        # markup dropped, references read
+    assert out["skip"] == "Carol"                                  # an empty-dash cell is no label
+    assert out["snip"] == {"pre": "…xxx ", "hit": "alice", "post": " yyy…"}
+    assert out["find"] == "#find=a%20b|c"
+
+
+_DOM = r"""
+const fs=require('fs'),path=require('path'),vm=require('vm');
+const ROOT=process.env.SC_ROOT;
+const EL={};
+function el(id){return EL[id]||(EL[id]={id:id,value:'',innerHTML:'',textContent:'',style:{}});}
+globalThis.document={getElementById:el,addEventListener:function(){},
+ createElement:function(){return {};},
+ head:{appendChild:function(sc){
+  const file=path.join(ROOT,sc.src);
+  if(!fs.existsSync(file)){sc.onerror();return;}
+  vm.runInThisContext(fs.readFileSync(file,'utf8'));sc.onload();}}};
+globalThis.window={addEventListener:function(){}};
+globalThis.location={hash:process.env.SC_HASH,search:''};
+"""
+
+
+def _search(folder, query, after_writing=None):
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    if after_writing:
+        after_writing()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    env = dict(os.environ, SC_ROOT=folder, SC_HASH="#q=" + query)
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + f"vm.runInThisContext({json.dumps(script)});"
+        "console.log(JSON.stringify({summary:el('summary').innerHTML,results:el('results').innerHTML,"
+        "status:el('status').textContent,q:el('gq').value,hash:location.hash}));",
+        text=True, encoding="utf-8", capture_output=True, env=env)
+    if proc.returncode:
+        pytest.fail(f"node failed:\n{proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+@needs_node
+def test_one_query_finds_a_value_in_every_report_that_holds_it(folder):
+    out = _search(folder, CK1.upper())
+    assert out["q"] == CK1.upper() and out["hash"] == "_"           # the fragment is consumed
+    res = out["results"]
+    # the cache entry, linked to its row in the cache report's named tab…
+    assert f'href="CacheController/CacheController_report.html#ck-{CK1}"' in res
+    assert 'target="scauto_cache"' in res
+    # …and the message that mentions it, on its conversation's page, under the conversation's name
+    assert 'href="Conversations/pages/k1.html#msg-1.0"' in res and "Chat with Alice" in res
+    assert "<b>2</b> rows match" in out["summary"]
+    # "Open all" is the report filtered to the same search, as a #find= link
+    assert f"CacheController_report.html#find={CK1}" in res
+    assert "No match in Contacts, Conversations." in res
+    assert CK2 not in res and "msg-2.0" not in res
+
+
+@needs_node
+def test_either_term_and_a_report_whose_data_did_not_load(folder):
+    gone = os.path.join(folder, "CacheController", "data", "index.js")
+    out = _search(folder, "alice-test|chat with|" + CK2, after_writing=lambda: os.remove(gone))
+    res = out["results"]
+    assert "ct-u1" in res and "conv-c1" in res                     # either term, in two reports
+    assert "<b>2</b> rows match" in out["summary"]
+    # the cache report's rows never arrived: it is not "no match", it is said to be missing
+    assert "could not be loaded" in res and "No match in Messages." in res
+    assert "Cache controller" not in res.split("No match in")[1]
+
+
+# --------------------------------------------------------------------------------- by date
+
+def _key(text):
+    return report_ui.ts_key(text)
+
+
+@needs_node
+def test_the_core_finds_rows_by_time_alone_or_with_words():
+    rows = [["a", [], "alice", {}, None, {"ts": [_key("2024-03-10 08:30:00")]}],
+            ["b", [], "bob", {}, None, {"ts": [_key("2024-03-11 09:00:00")]}],
+            ["c", [], "alice", {}, None, {}],                                    # no time at all
+            ["d", [], "carol", {}, None, {"ct": [_key("2024-03-10 08:45:00")]}]]
+    win = {"a": _key("2024-03-10 08:00:00"), "b": _key("2024-03-10 09:00:00")}
+    out = _node(global_search.CORE_JS + f"var R={json.dumps(rows)},W={json.dumps(win)};" + r"""
+console.log(JSON.stringify({
+ alone:SCQ.hits(R,[],W,['ts']),
+ both:SCQ.hits(R,['alice'],W,['ts']),
+ conv:SCQ.hits(R,[],W,['ct','mt']),
+ timed:[SCQ.timed(R.slice(2,3),['ts']),SCQ.timed(R,['ts'])],
+ wall:SCQ.wall(W.a)}));""")[0]
+    assert out["alone"] == [0] and out["both"] == [0]        # the row with no time never matches
+    assert out["conv"] == [3]                                 # a conversation's own activity counts
+    assert out["timed"] == [False, True] and out["wall"] == "2024-03-10 08:00:00"
+
+
+@needs_node
+def test_the_page_searches_by_date_and_names_reports_with_no_times(folder):
+    report_ui.write_rows(os.path.join(folder, "Conversations", "pages", "data", "k1"), [
+        _row("msg-1.0", ["", "2024-03-10 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-10 08:30:00")]}]])
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    env = dict(os.environ, SC_ROOT=folder, SC_HASH="")
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + "el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+        "el('gto').value='2024-03-10T09:00';"
+        f"vm.runInThisContext({json.dumps(script)});SCS_run('');"
+        "console.log(JSON.stringify({summary:el('summary').innerHTML,"
+        "results:el('results').innerHTML}));",
+        text=True, encoding="utf-8", capture_output=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert "between 2024-03-10 08:00:00 and 2024-03-10 09:00:00" in out["summary"]
+    assert "msg-1.0" in out["results"] and "time in the window" in out["results"]
+    assert "openall" not in out["results"]                     # a link would carry the words only
+    # the fixture's other reports record no time at all: said so, not "no match"
+    assert "Not searched by date: Contacts, Conversations, Cache controller" in out["results"]
+
+
+@needs_node
+def test_inode_change_times_are_matched_unless_left_out(folder):
+    report_ui.write_rows(os.path.join(folder, "CacheController", "data"), [
+        [f"ck-{CK1}", ["", "Other", CK1], CK1, {}, None,
+         {"ts": [_key("2024-01-01 00:00:00")], "tc": [_key("2024-03-10 08:30:00")]}]])
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    env = dict(os.environ, SC_ROOT=folder, SC_HASH="")
+
+    def run(ticked):
+        proc = subprocess.run(
+            [NODE, "-"], input=_DOM + "el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+            f"el('gto').value='2024-03-10T09:00';el('gctime').checked={str(ticked).lower()};"
+            f"vm.runInThisContext({json.dumps(script)});SCS_run('');"
+            "console.log(JSON.stringify({results:el('results').innerHTML}));",
+            text=True, encoding="utf-8", capture_output=True, env=env)
+        assert proc.returncode == 0, proc.stderr
+        return json.loads(proc.stdout)["results"]
+    assert f"ck-{CK1}" not in run(False)
+    assert f"ck-{CK1}" in run(True)
+    assert 'id="gctime" checked' in doc and "incl. inode changed" in doc   # on by default
+
+
+def _index_href(folder, setup):
+    """The link the index page's form opens, with its controls set by ``setup`` (JS)."""
+    run = os.path.dirname(folder)
+    app.write_index(run, "Reports")
+    doc = open(os.path.join(run, "index.html"), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + "var OPENED=null;document.body={appendChild:function(a){"
+        "a.click=function(){OPENED=a.href;};a.remove=function(){};}};"
+        f"vm.runInThisContext({json.dumps(script)});{setup}"
+        "var form={q:{value:Q},getAttribute:function(){return 'Reports/search.html';}};"
+        "console.log(JSON.stringify({ret:scSearchForm(form),href:OPENED}));",
+        text=True, encoding="utf-8", capture_output=True, env=dict(os.environ, SC_ROOT=folder,
+                                                                    SC_HASH=""))
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _page(folder, fragment, setup=""):
+    doc = open(global_search.write_page(folder), encoding="utf-8").read()
+    script = re.findall(r"<script>(.*?)</script>", doc, re.S)[-1]
+    proc = subprocess.run(
+        [NODE, "-"], input=_DOM + setup + f"vm.runInThisContext({json.dumps(script)});"
+        "console.log(JSON.stringify({summary:el('summary').innerHTML,results:el('results').innerHTML,"
+        "mode:el('gmode').value,from:el('gfrom').value,ctime:el('gctime').checked,q:el('gq').value}));",
+        text=True, encoding="utf-8", capture_output=True,
+        env=dict(os.environ, SC_ROOT=folder, SC_HASH=fragment))
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _timed_message(folder):
+    report_ui.write_rows(os.path.join(folder, "Conversations", "pages", "data", "k1"), [
+        _row("msg-1.0", ["", "2024-03-10 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-10 08:30:00")]}],
+        _row("msg-2.0", ["", "2024-03-11 08:30", "Received", "alice-test", "Text", "hello"], "hello")
+        [:5] + [{"ts": [_key("2024-03-11 08:30:00")]}]])
+
+
+@needs_node
+def test_the_index_page_sends_its_date_window_to_the_search_page(folder):
+    _timed_message(folder)
+    sent = _index_href(folder, "var Q='';el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+                               "el('gto').value='2024-03-10T09:00';el('gctime').checked=false;")
+    assert sent["ret"] is False                                # the form itself does not navigate
+    base, fragment = sent["href"].split("#", 1)
+    assert base == "Reports/search.html"
+    # a window on its own is a search: the page runs it with no words
+    out = _page(folder, "#" + fragment)
+    assert out["mode"] == "range" and out["from"] == "2024-03-10T08:00" and out["ctime"] is False
+    assert "between 2024-03-10 08:00:00 and 2024-03-10 09:00:00" in out["summary"]
+    assert "msg-1.0" in out["results"] and "msg-2.0" not in out["results"]
+    # within ± N of a moment, with the words
+    sent = _index_href(folder, "var Q='hello';el('gmode').value='near';el('gn').value='2';"
+                               "el('gunit').value='h';el('gat').value='2024-03-11T09:00';"
+                               "el('gctime').checked=true;")
+    out = _page(folder, "#" + sent["href"].split("#", 1)[1])
+    assert out["q"] == "hello" and out["ctime"] is True
+    assert "msg-2.0" in out["results"] and "msg-1.0" not in out["results"]
+
+
+@needs_node
+def test_the_index_page_with_nothing_set_opens_the_page_and_any_time_clears_a_window(folder):
+    _timed_message(folder)
+    assert _index_href(folder, "var Q='';")["href"] == "Reports/search.html"
+    words = _index_href(folder, "var Q='hello';")["href"]
+    assert "#q=hello&mode=" in words
+    # the search tab still holds a window from earlier: the index's «any time» takes it off …
+    earlier = ("el('gmode').value='range';el('gfrom').value='2024-03-10T08:00';"
+               "el('gto').value='2024-03-10T09:00';")
+    out = _page(folder, "#" + words.split("#", 1)[1], setup=earlier)
+    assert out["mode"] == "" and "msg-1.0" in out["results"] and "msg-2.0" in out["results"]
+    # … while a report's All reports link, which carries the words only, leaves it as it is
+    out = _page(folder, "#q=hello", setup=earlier)
+    assert out["mode"] == "range" and "msg-1.0" in out["results"] and "msg-2.0" not in out["results"]
+
+
+def test_a_memorys_inode_change_time_is_kept_apart():
+    from scripts import memories_media_report as mr
+    m = {"times": {"ZCREATETIMEUTC": "2024-03-10 08:30:00 UTC"}, "entry_times": {},
+         "media_files": [{"out": "x.mp4", "src_fs": [("p", {"mtime": 1})],
+                          "device_summary": ([("modified", "2024-03-11 09:00:00 UTC", "", ["mtime"]),
+                                              ("inode changed", "2024-03-12 10:00:00 UTC", "",
+                                               ["ctime"]),
+                                              ("accessed / inode changed",
+                                               "2024-03-13 11:00:00 UTC", "", ["atime", "ctime"])],
+                                             [])}]}
+    keys = mr._memory_time_keys(m)
+    assert keys["tc"] == [_key("2024-03-12 10:00:00")]           # an inode change and nothing else
+    assert _key("2024-03-13 11:00:00") in keys["ts"]             # also an access: stays searchable
+    assert _key("2024-03-12 10:00:00") not in keys["ts"]

@@ -225,6 +225,98 @@ def test_the_gui_dialog_and_the_cli_spec_mean_the_same_thing():
     assert policy == {"transitive": True, "legacy_reports": True}
 
 
+def test_a_relation_added_since_the_policy_was_saved_keeps_its_default():
+    """The GUI remembers every relation of the build that saved the policy, and only those. One a
+    later build adds, on by default, must not come back off for an examiner who once pressed Ok —
+    nor one that is off by default come back on — while every choice that was saved still stands."""
+    recommended = partial_report.PRESETS["recommended"]
+    added_on = next(k for k, on in recommended.items() if on and k != "mem_group")
+    added_off = next(k for k, on in recommended.items() if not on)
+    saved = {k: on for k, on in recommended.items() if k not in (added_on, added_off)}
+    saved["mem_group"] = False                                  # a choice the examiner made
+    saved["retired_relation"] = True                            # one this build no longer has
+
+    state = app._saved_relations({"partial": {"relations": saved}})
+
+    assert state[added_on] is True and state[added_off] is False
+    assert state["mem_group"] is False
+    assert set(state) == set(partial_report.RELATION_KEYS)      # a retired key is not carried on
+    # and the run is asked for the new one: the spec names it, so the CLI's parser turns it on
+    spec = app._relations_spec({"relations": state, "transitive": False, "legacy_reports": False})
+    assert partial_report.parse_relations(spec)[added_on] is True
+    # nothing saved, or something that is not a policy: the recommended set
+    assert app._saved_relations({}) == recommended
+    assert app._saved_relations({"partial": {"relations": "msg_cache"}}) == recommended
+
+
+def test_a_policy_saved_before_the_conversation_tie_follows_it_but_not_the_reverse():
+    """A policy saved by a build without the conversation-tie relations: the tie from a cache entry to
+    its conversation (on by default) is followed, the reverse (off by default) is not."""
+    saved = {k: on for k, on in partial_report.PRESETS["recommended"].items()
+             if k not in ("cache_conversation", "conv_cache")}
+    state = app._saved_relations({"partial": {"relations": saved}})
+    assert state["cache_conversation"] is True and state["conv_cache"] is False
+    spec = app._relations_spec({"relations": state, "transitive": False, "legacy_reports": False})
+    parsed = partial_report.parse_relations(spec)
+    assert parsed["cache_conversation"] is True and parsed["conv_cache"] is False
+
+
+#: The relations this build added on the feat/claim-links line: absent from a policy saved before it.
+_ADDED_SINCE = ("conv_cache", "mem_filter_assets", "cache_filter_memories", "cache_conversation")
+
+
+def _saved_by_an_older_build(on):
+    """A policy as a build without the four relations above saved it: every relation it had, all
+    set to *on* — what the dialog's Minimal (False) or Everything (True) writes."""
+    return {k: on for k in partial_report.RELATION_KEYS if k not in _ADDED_SINCE}
+
+
+def test_a_policy_saved_as_minimal_stays_minimal():
+    """Containment only, chosen explicitly: a relation added since must not switch on and widen what
+    the extract discloses — the tie would otherwise bring a conversation's row and page."""
+    cfg = {"partial": {"relations": _saved_by_an_older_build(False)}}
+    state = app._saved_relations(cfg)
+
+    assert set(state) == set(partial_report.RELATION_KEYS)
+    assert not any(state.values())
+    assert app._relations_spec({"relations": state, "transitive": False,
+                                "legacy_reports": False}) == "minimal"
+    # and the dialog is told which relations are new, to mark them
+    assert sorted(app._relations_added_since_saved(cfg)) == sorted(_ADDED_SINCE)
+
+
+def test_a_policy_saved_as_everything_follows_every_relation():
+    """Everything, chosen explicitly: a relation added since is followed too, not quietly left off."""
+    cfg = {"partial": {"relations": _saved_by_an_older_build(True), "transitive": True}}
+    state = app._saved_relations(cfg)
+
+    assert set(state) == set(partial_report.RELATION_KEYS) and all(state.values())
+    spec = app._relations_spec({"relations": state, "transitive": True, "legacy_reports": False})
+    assert all(partial_report.parse_relations(spec).values())
+
+
+def test_a_policy_with_nothing_this_build_knows_starts_at_the_recommended_set():
+    recommended = partial_report.PRESETS["recommended"]
+
+    assert app._saved_relations({"partial": {"relations": {}}}) == recommended
+    assert app._saved_relations({"partial": {"relations": {"retired_relation": True}}}) == recommended
+    # nothing saved: nothing is new to the examiner, so the dialog marks nothing
+    assert app._relations_added_since_saved({}) == []
+    assert app._relations_added_since_saved({"partial": {"relations": {}}}) == []
+    # a policy naming every relation of this build has none new
+    assert app._relations_added_since_saved({"partial": {"relations": dict(recommended)}}) == []
+
+
+def test_which_relations_were_new_is_never_saved():
+    """Once saved, the policy names every relation, so none is new at the next start."""
+    state = {"relations": dict(partial_report.PRESETS["recommended"]), "transitive": False,
+             "legacy_reports": False, "added": ["conv_cache"]}
+    saved = app._policy_to_save(state)
+
+    assert "added" not in saved and saved["relations"] == state["relations"]
+    assert app._relations_added_since_saved({"partial": saved}) == []
+
+
 def test_an_empty_dialog_means_minimal_not_recommended():
     """A dialog with every box cleared must not fall back to the default set."""
     spec = app._relations_spec({"relations": {}, "transitive": False, "legacy_reports": False})

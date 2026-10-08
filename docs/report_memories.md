@@ -273,6 +273,7 @@ value with its source** rather than folding them into one column (`_memory_times
 | Tag | What it is | Clock |
 |---|---|---|
 | `scdb-27 › ZGALLERYSNAP.<col>` / `ZGALLERYENTRY.<col>` | the app's record — every `*TIME*`/`*DATE*` column of the snap row and of the entry/album row it belongs to | Cocoa seconds (since 2001-01-01 UTC), converted to the run's timezone |
+| `scdb-27 › ZGALLERYSNAP.ZMEMDATAIDS › snapMemDataId.creationTimeMs` (and `entryMemDataId`, and `ZGALLERYENTRY.ZMEMDATAID`) | the creation time the app archived with each MemData identifier (below) | Unix milliseconds, converted to the run's timezone |
 | `inside <file>` | written **into** the recovered media by whatever produced it: EXIF `DateTime*`, XMP `CreateDate`, PNG `Creation Time`, an MP4's `mvhd` creation/modification time, a QuickTime `creationdate` (`©day` / `com.apple.quicktime.creationdate`), the EXIF GPS stamp | converted to the run's timezone when the file **states** its zone (EXIF `OffsetTime*`, an ISO 8601 offset); marked *UTC assumed* where only the format defines the field as UTC (`mvhd`, the GPS stamp); otherwise shown *as written* and tagged *no timezone in the file* — a wall clock on the writing device's clock, never guessed into an instant |
 | `extraction archive › <path>` | what the **device's filesystem** recorded about the cache file — created (birth), modified, accessed, inode changed — from a UFED archive's `metadata.msgpack` or the ZIP entry's `UT` field (in a UFED archive, the access time only) via `extraction_manifest.json` (see [snapchat_ios_cache_media.md](snapchat_ios_cache_media.md#the-devices-whole-record-of-the-file)); never the extracted copy's own times, which are when *we* unzipped it | UTC, converted to the run's timezone at the source's precision (nanoseconds from UFED, seconds from `UT`); identical instants on one line, a split file's parts bounded; *accessed* and *inode changed* can be the acquisition's; *not recorded* when the archive carried none |
 
@@ -297,6 +298,76 @@ nothing is known the value is shown as written. `media_meta` records this as the
 Two things are excluded on purpose. A **poster frame** this tool generated is never read: it is ours,
 not evidence, and its encoder's stamps would be this run's. And `gallery.encrypteddb` rows (keys,
 coordinates) carry no time of their own; they are dated only by the snap row they belong to.
+
+### The MemData identifiers (`ZMEMDATAIDS`, `ZMEMDATAID`)
+
+Newer app versions add two blob columns: `ZGALLERYSNAP.ZMEMDATAIDS` and `ZGALLERYENTRY.ZMEMDATAID`. Both
+are NSKeyedArchiver plists of one small record — a `uuid`, a `creationTimeMs` (Unix milliseconds) and an
+`entryType` (an integer, shown as stored). `ZMEMDATAIDS`' root (`SOJUGalleryServletMemDataIds`) holds up to
+two of them, under `snapMemDataId` and `entryMemDataId`; `ZMEMDATAID`'s root *is* one record
+(`SOJUGalleryServletMemDataId`). The uuids are not the snap's `ZSNAPID` or the entry's `ZENTRYID`.
+
+A claim whose `EXTERNAL_KEY` carries one of these uuids locates its cached file for the Memory
+(`collect_media`, through `index_claim_uuids`), and so does a full-media claim (`MEDIA_CONTEXT_TYPE` 19)
+keyed by the Memory's own `ZSNAPID` in a shape that is none of the Memory-scoped ones (`<snapId>~1`) —
+the cache_controller report links both the same way.
+
+`decode_memdata` reads them strictly — the archive's classes must be those records and every uuid must
+parse, as a string or an `NSUUID` — and the value cell then reads
+`snap <uuid> · created <time> · entry type <n>; entry …` instead of `<blob N bytes>`. Anything else keeps
+the size marker. The uuids are searchable, and each creation time is a row of the Memory's timestamps
+(tagged with its column and slot), so the time filter finds it.
+
+### The overlay record (`ZGALLERYSNAPDETAIL.ZOVERLAY`)
+
+scdb-27 keeps at most one `ZGALLERYSNAPDETAIL` row per Memory (`Z_PK`, `Z_ENT`, `Z_OPT`, `ZSNAP`,
+`ZOVERLAY`): `ZSNAP` is the Memory's `ZGALLERYSNAP.Z_PK`, and `ZGALLERYSNAP.ZDETAIL` points back; some
+Memories have none. `ZOVERLAY` is not protobuf but an NSKeyedArchiver binary plist whose root is a
+`SOJUGallerySnapOverlay`. It is in the plain scdb-27 on both storage schemas — `gallery.encrypteddb`
+holds nothing like it — so no keychain is needed. `scripts/data/snap_overlay.py` reads it, through the
+strict keyed-archive resolver (`scripts/data/keyed_archive.py`, which `decode_memdata` uses too), and
+joins each record to its snap **inside each reading** of the database (`read_overlays`), so a record
+only the checkpointed reading holds is joined to that reading's snap row. A record of another layout —
+another root class, other field names — gives nothing, never a guess.
+
+The root's `filters` (`SOJUGalleryFilters`) holds lists of filters, each list beside a field of its own
+that names the selected one: `geoFilters` with `geoFilterSelectedId` / `geoFilterSelectedIds`,
+`visualFilters` with `visualFilterSelectedType`, `infoFilters` with `infoFilterSelectedType`,
+`contextFilters` with `contextFilterSelectedId`, `venueFilter` with `venueFilterSelected`, `streakFilter`
+with `streakFilterSelected`. A geofilter (`SOJUGalleryGeoFilter`) carries an `idValue`, a `type`, an
+`unlockableContentType`, a `carouselGroup` (`groupName`), an `imageUrlParams` dictionary, and four
+fields read for a URL (`snap_overlay.ASSET_FIELDS`):
+
+| Field, in `filters.geoFilters[i]` | Asset |
+|---|---|
+| `imageUrl` | the filter image |
+| `arSegmentation.sky.replacementSkyUrl` | the sky image |
+| `arSegmentation.sky.blimpUrl` | the sky item's blimpUrl — read the same way when it holds a URL; where it has been seen it is present and empty, which gives no asset |
+| `geofilterMarkups[j].displayParameters.font` | the font of the filter's text |
+
+A geofilter whose
+`imageUrlParams` has entries (the Bitmoji filters) gives one shared address as its `imageUrl`, the
+image being in the parameters, so that URL is never an asset.
+
+**A listed filter is not shown to be on the Memory.** A record commonly lists several geofilters and
+names the selected one in a field of its own — often none — so the reports say *listed*, and *selected* only
+where the record names that filter's `idValue`; never *used* or *applied*. Which listed filter, if any,
+is on the Memory's saved overlay the record does not say; `ZGALLERYSNAP.ZHASOVERLAYIMAGE` (in the
+snap's values) says whether the Memory has an overlay image at all. On the newest app versions examined
+the `geoFilters` list was empty, so on a current extraction this may rarely link anything.
+
+When a `cache_controller.db` claim's `EXTERNAL_KEY` is one of those URLs — the whole URL, by
+`snap_overlay.normalise_url` — the Memory's page gets a section after *Media files*: **Cached assets of
+filters listed with this Memory — not its media**. A line per Memory says how many geofilters its record
+lists and which one it names as selected; then a row per cached file: the 🗄 link to its cache entry,
+the asset, where in the record its URL sits, the filter (type · carousel group · idValue), what the
+record says about it being selected, and the claim (context, EXTERNAL_KEY, and *another account's
+claim* where the claim's `USER_ID` is not the Memory's account). On a page several Memories share, a
+Snap column says whose record lists each one. The files are not decrypted, are not the Memory's media,
+and are not in the index row, its search text or the cache keys a selection names the Memory by
+(`_cache_tokens`). The cache_controller report makes the same match from its side
+(`_overlay_links_for`); see [cross_report_linking.md](cross_report_linking.md). The rest of the record —
+the info filters, the venue filter, the captions — is not reported.
 
 ### Embedded metadata — what the file says about itself
 
@@ -359,6 +430,64 @@ archive recorded no mtime it has nothing — is hidden while a window is set: it
 inside one. Its detail says so in place of the timestamps, and clearing the filter brings it back. A
 carved Memory whose media *does* carry an `mvhd` time or whose cache file has a recorded mtime is
 findable by those, with the expansion stating that no database time exists.
+
+The device's **inode-change** times are kept in a row's `tc` rather than its `ts`
+(`_memory_time_keys`; a device line that is also another kind of time — "accessed / inode changed" —
+stays in `ts`). The control's *incl. inode changed* box, ticked by default, matches them; unticking it
+leaves them out, because copying or acquiring a file can set that time and a window around the
+extraction can return Memories for that reason alone.
+
+### Snapchat's servers — what a retrieval would add, and what one did
+
+Every Memory is classed by `cloud_memories.candidate` as *media missing* (no full copy on the device),
+*local copy incomplete* (partially cached, a video with only a still, only the transcoded backup, an
+overlay the row records but the device lacks), *no download address*, or *retrieved*; the index filters
+on it (*Snapchat's servers*), and *📋 Copy snap IDs* copies the ticked Memories' snap ids for the Cloud
+download window. A Memory page with something to gain offers *☁ Get from Snapchat's servers…*, which
+copies its snap id — the page cannot start a retrieval itself. Media retrieved from the servers is
+`m["cloud_files"]`, published under `media/cloud/`, and shown in its own section under a
+*not device evidence* warning with the request it came from, the authority, and every cache file on the
+device byte-identical to it; it never joins `media_files`, so groups, hashes and the media states are
+the device's alone. See [cloud_download.md](cloud_download.md).
+
+### Every cache file a Memory's media came from, and every file linked to it
+
+The file table has one row per distinct content, but a row names **every** cache file those bytes were
+recovered from (`_media_sources`): *SCContent … and caching-media …*, each with its link and its paths.
+It used to describe only the first record, so a thumbnail recovered from SCContent and again from a
+caching-media pack showed no pack at all — while the Library/Caches report linked that pack to the
+Memory. Under the sources, *≡ the same bytes, linked by content* names the cache files that nothing but
+the bytes connects to this Memory: byte-identical to its media as recovered from the device
+(`cloud_memories.find_identical`; rule 5 of [cross_report_linking.md](cross_report_linking.md)).
+
+Below the table, *Library/Caches — files linked to this Memory* lists every row that report links here
+and how — a pack decrypted with this Memory's key, a file keyed by its CDN URL, or one byte-identical
+to its media. That report renders after this one, so the list comes from its
+`CacheMedia/data/memory_links.js`, loaded at view time (`scripts/memory_backlinks.py`).
+
+Between the two, *Cached assets of filters listed with this Memory — not its media* lists the cache
+entries whose claim key is the URL of an asset of a geofilter the Memory's overlay record lists (see
+[the overlay record](#the-overlay-record-zgallerysnapdetailzoverlay)). They are files linked to the
+Memory, not files its media came from, and are kept out of the table above for that reason.
+
+### Possible cached file — the cache_controller report's leads, from this side
+
+A cached media file nothing on the device connects to anything may still be a Memory's media — the snap
+editor's working copy of a snap later saved — and the cache_controller report lists, as *leads*, the
+Memories whose times fall near the file's ([report_cache_controller.md](report_cache_controller.md#possible-memory--leads-never-links)).
+The same leads show here: *≈ possible file* in the Kind column (*≈ possible file (grouped)* on a folded
+group's row, since its members are out of sight), the *Possible cached file* filter (shown only when
+there is one), and on the Memory's page a *Possible cached file — NOT proven* panel after its media
+files: each cached file, its kind, the closest difference and every pair, and where this Memory ranks
+among the file's leads — a Memory that is one of five candidates is a weaker lead than the only one. The
+panel's *📋 Copy snap ID* is for the Cloud download, which proves the lead (the file then links *by
+content*) or rules it out.
+
+None of it is in this report's own files. The cache_controller report decides the leads and renders
+after this one, so it writes `CacheController/data/memory_leads.js` and these pages load it at view time
+(`memory_leads.LOADER_JS` + `MEMORY_JS`; the index adds to its rows through `SCV.annotate`). The badge
+and the panel point at the cache files; nothing becomes a link to this Memory's records, a count, or a
+closure edge.
 
 ### My Eyes Only
 A Memory in Snapchat's private, separately-encrypted album is marked with a red **MEO** badge in the
@@ -479,7 +608,9 @@ the same treatment in the cache_controller report. See
 For each recovered media file whose `CACHE_KEY` is present in `cache_controller.db`
 (`all_cache_keys`), the file's "Source cache" cell shows a 🗄 link to
 `../CacheController/CacheController_report.html#ck-<CACHE_KEY>`. `.pack` files (not indexed there)
-get no such link. See [cross_report_linking.md](cross_report_linking.md).
+get no such link. A cached asset of a filter the Memory's overlay record lists links to its entry the
+same way, from its own section (see [the overlay record](#the-overlay-record-zgallerysnapdetailzoverlay)).
+See [cross_report_linking.md](cross_report_linking.md).
 
 ## Standalone use
 ```

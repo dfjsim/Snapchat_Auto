@@ -359,10 +359,73 @@ def test_the_paired_relations_share_one_edge_in_opposite_directions():
     by_key = {r.key: r for r in pr.RELATIONS}
     for forward, backward in [("mem_cache", "cache_memory"),
                               ("cache_message", "msg_cache"),
-                              ("participants", "contact_conversations")]:
+                              ("participants", "contact_conversations"),
+                              ("mem_filter_assets", "cache_filter_memories"),
+                              ("cache_conversation", "conv_cache")]:
         a, b = by_key[forward], by_key[backward]
         assert a.edge == b.edge, (forward, backward)
         assert (a.src, a.dst) == (b.dst, b.src), (forward, backward)
+
+
+def test_a_tied_cache_entry_brings_its_conversation_but_a_conversation_brings_no_files():
+    """A cache entry whose claim names a message arroyo.db does not hold is tied to the conversation:
+    ticking the entry brings the conversation's row (and, by containment, its page) — not its
+    messages; ticking the conversation for its page does not disclose the files its claims name."""
+    assert pr.parse_relations("recommended")["cache_conversation"] is True
+    assert pr.parse_relations("recommended")["conv_cache"] is False
+    assert pr.parse_relations("all")["conv_cache"] is True
+    indexes = {"conv": Index("conv"), "msg": Index("msg"), "cc": Index("cc")}
+    indexes["conv"].add(f"conv-{CONV_A}", conv=CONV_A)
+    indexes["msg"].add(f"conv-{CONV_A}|msg-1.0", smid=f"{CONV_A}|1.0")
+    indexes["msg"].contains(f"conv-{CONV_A}|msg-1.0", f"conv-{CONV_A}")
+    indexes["conv"].link(pr.EDGE_CONV_MESSAGE, f"conv-{CONV_A}", "msg", f"conv-{CONV_A}|msg-1.0")
+    indexes["cc"].add("ck-Y", key="Y")
+    # recorded by cache_controller, as its index does
+    indexes["cc"].link(pr.EDGE_CONV_CACHE, "ck-Y", "conv", f"conv-{CONV_A}")
+
+    def closure(seed_kind, seed_id, relations):
+        sel = {"schema": 2, "selections": {seed_kind: {seed_id: 1}}}
+        return pr.expand(indexes, pr.resolve(indexes, sel),
+                         {**pr.default_options(), "relations": dict(relations)})
+
+    pulled = closure("cc", "ck-Y", pr.PRESETS["recommended"])
+    assert f"conv-{CONV_A}" in pulled.included["conv"]
+    assert "cache_conversation" in pulled.reasons[("conv", f"conv-{CONV_A}")][0]
+    assert not pulled.included.get("msg")                     # no message comes with it
+    assert "ck-Y" not in closure("conv", f"conv-{CONV_A}",
+                                 pr.PRESETS["recommended"]).included.get("cc", set())
+    assert "ck-Y" in closure("conv", f"conv-{CONV_A}", pr.PRESETS["all"]).included["cc"]
+    assert f"conv-{CONV_A}" not in closure("cc", "ck-Y", {}).included.get("conv", set())
+
+
+def test_both_tie_relations_say_they_are_the_tie_and_not_the_conversation_s_cached_files():
+    """conv_cache follows only the tie (a claim naming a message no row is there for), never the
+    cached files of the conversation's messages, which come through its messages (msg_cache). Its
+    label must say so as its pair's does, or ticking it reads as "this conversation's cached files"."""
+    tie = [r for r in pr.RELATIONS if r.edge == pr.EDGE_CONV_CACHE]
+    assert {r.key for r in tie} == {"cache_conversation", "conv_cache"}
+    for relation in tie:
+        assert "(no message row)" in relation.label, relation.key
+
+
+def test_the_filter_asset_relations_are_off_unless_asked_and_never_the_media_edge():
+    """An asset of a filter a Memory's overlay record lists is not its media, and one asset is listed
+    with many Memories: neither direction is followed by default, and following a Memory to its
+    media does not follow this edge."""
+    for key in ("mem_filter_assets", "cache_filter_memories"):
+        assert pr.parse_relations("recommended")[key] is False
+        assert pr.parse_relations("all")[key] is True
+    indexes = {"mem": Index("mem"), "cc": Index("cc")}
+    indexes["mem"].add("mem-X", snap="X")
+    indexes["cc"].add("ck-Y", key="Y")
+    # recorded by cache_controller, as its index does; found from the Memory's end
+    indexes["cc"].link(pr.EDGE_MEMORY_FILTER_ASSET, "ck-Y", "mem", "mem-X")
+    sel = {"schema": 2, "selections": {"mem": {"mem-X": 1}}}
+    for relations, pulled in ((pr.PRESETS["recommended"], False),
+                              ({**pr.PRESETS["recommended"], "mem_filter_assets": True}, True)):
+        closure = pr.expand(indexes, pr.resolve(indexes, sel),
+                            {**pr.default_options(), "relations": dict(relations)})
+        assert ("ck-Y" in closure.included["cc"]) is pulled
 
 
 def test_an_edge_recorded_either_way_round_is_found_from_both_ends():

@@ -111,8 +111,8 @@ def copy_css(dest_dir):
 EMOJI_FONT_FAMILY = "Snapchat Auto Emoji"
 EMOJI_FONT_STACK = f'"Apple Color Emoji","{EMOJI_FONT_FAMILY}"'   # what ends every report font stack
 EMOJI_FONT_CSS = "emoji_font.css"
-# ©, the sort and link arrows ↔ ↕ ↗, ▶, ⚠, ✔ and the 🗂 🗃 🗄 link icons
-UI_SYMBOLS = "©↔↕↗▶⚠✔🗂🗃🗄"
+# ©, the sort and link arrows ↔ ↕ ↗, ▶, ⚠, ✔, the 🗂 🗃 🗄 link icons and ☁ (server-retrieved media)
+UI_SYMBOLS = "©↔↕↗▶⚠✔🗂🗃🗄☁"
 _EMOJI_FONT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "fonts",
                                 "NotoColorEmoji.woff2")
 
@@ -429,12 +429,39 @@ function scConsumeHash(){
  setTimeout(function(){scGo(h);},80);}
 window.addEventListener('hashchange',scConsumeHash);
 window.addEventListener('pageshow',scConsumeHash);
+// The "All reports" link next to a report's search box: it carries what the box holds to the search
+// page, set at the moment of the click so the link stays a plain <a> with its named tab.
+function scSearchAll(a){
+ var q=document.getElementById('q'),base=a.getAttribute('data-base');
+ if(!base){base=a.getAttribute('href').split('#')[0];a.setAttribute('data-base',base);}
+ var v=q?q.value.trim():'';
+ a.setAttribute('href',base+(v?'#q='+encodeURIComponent(v):''));}
 """
 
 NAV_CSS = """
  .schl{background:#fff6cc !important;box-shadow:inset 3px 0 0 #e0a800}
  [id]{scroll-margin-top:120px}
+ a.srchall{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;font-weight:600;
+   color:#2d2d71;background:#fff;border:1px solid #bcbcd0;border-radius:5px;padding:4px 9px;
+   text-decoration:none;white-space:nowrap}
+ a.srchall:hover{background:#e7e7f4}
 """
+
+#: The page that searches every report of a folder at once (scripts/global_search.py), written next to
+#: ``selection.js`` — one level above every report, so each reaches it as ``../search.html``.
+SEARCH_PAGE = "search.html"
+
+
+def search_all_link(prefix):
+    """The *All reports* link that sits beside a report's search box.
+
+    ``prefix`` leads from the page to the report folder (``../`` from a report, ``../../`` from a
+    conversation's page). The search box's text is added when the link is clicked (``scSearchAll``).
+    """
+    return (f'<a class="srchall" target="scauto_search" href="{prefix}{SEARCH_PAGE}" '
+            'onclick="scSearchAll(this)" title="Search every report in this folder at once for what '
+            'is in this search box — the same search, in every report">&#128270; All reports</a>')
+
 
 # --------------------------------------------------------------------------- row selection
 
@@ -751,6 +778,45 @@ function scSelNote(){
 """
 
 
+# Copying text for the examiner to paste elsewhere — the snap ids a Cloud download is asked for. A page
+# opened from file:// may be refused the asynchronous clipboard, and execCommand is the older route;
+# when both fail the text is shown selected in a box, so the examiner can always copy it by hand.
+CLIPBOARD_JS = """
+function scCopyText(text,done){
+ function show(){
+  var w=document.createElement('div');
+  w.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:99999;'+
+   'display:flex;align-items:center;justify-content:center';
+  w.innerHTML='<div style="background:#fff;border-radius:8px;padding:14px;max-width:640px;'+
+   'width:90%;font:13px system-ui,sans-serif"><div style="margin-bottom:6px"></div>'+
+   '<textarea readonly style="width:100%;height:180px;font:12px ui-monospace,Consolas,monospace">'+
+   '</textarea><div style="text-align:right;margin-top:8px"><button>Close</button></div></div>';
+  w.querySelector('div>div').textContent=done+' (copy it with Ctrl+C)';
+  var t=w.querySelector('textarea');t.value=text;
+  w.querySelector('button').onclick=function(){w.remove();};
+  document.body.appendChild(w);t.focus();t.select();}
+ function legacy(){
+  var t=document.createElement('textarea'),ok=false;
+  t.value=text;t.style.cssText='position:fixed;left:-9999px';document.body.appendChild(t);t.select();
+  try{ok=document.execCommand('copy');}catch(e){}
+  t.remove();
+  if(ok)alert(done);else show();}
+ if(navigator.clipboard&&navigator.clipboard.writeText)
+  navigator.clipboard.writeText(text).then(function(){alert(done);},legacy);
+ else legacy();}
+function scCopySnapIds(ids,what){
+ if(!ids||!ids.length){alert('Nothing to copy: tick the Memories to ask Snapchat\u2019s servers for '+
+  'first.');return;}
+ scCopyText(ids.join('\\n'),ids.length+' snap id(s) copied'+(what?' ('+what+')':'')+'. In '+
+  'Snapchat Auto, open \u201cCloud download for an existing run\u2026\u201d and paste them into '+
+  '\u201cThese snap ids\u201d.');}
+function scCopySelectedMemories(){
+ var ids=SCSel.ids('mem','').filter(function(i){return i.indexOf('mem-')===0;})
+  .map(function(i){return i.slice(4);});
+ scCopySnapIds(ids,'the Memories ticked in this run');}
+"""
+
+
 FEED_DATE_TITLE = ("Not a message time — this conversation holds no message in arroyo.db. Taken "
                    "from the conversation's own row in the app's chat feed; open the conversation "
                    "for which field.")
@@ -814,6 +880,25 @@ def ts_key(text):
     return int(calendar.timegm((year, month, day, hour, minute, second, 0, 0, 0)))
 
 
+#: The device filesystem times a row's ``ts`` carries. The inode-change time goes to ``tc`` instead,
+#: which a control built with ``time_filter(ctime=True)`` matches unless its box is unticked: the
+#: acquisition itself can set that time, and some archives carry a placeholder there.
+FS_TIME_KINDS = ("btime", "mtime", "atime")
+
+
+def fs_times(records, epochfmt, kinds=FS_TIME_KINDS):
+    """The displayed times of device filesystem records (``device_fs``) — by default created,
+    modified and last read — for a row's time keys, so a file is found by when the device touched
+    it. ``kinds=("ctime",)`` gives the inode-change times, for ``tc``."""
+    from scripts.data import device_fs                     # local, as in device_fs_html
+    out = []
+    for rec in records or ():
+        for field in kinds:
+            if rec and rec.get(field) is not None:
+                out.append(device_fs.format_ns(rec[field], epochfmt))
+    return out
+
+
 def ts_keys(*texts):
     """The distinct `ts_key` values of several displayed timestamps, sorted. Empties are dropped.
 
@@ -827,7 +912,7 @@ def ts_keys(*texts):
 _TIME_UNITS = (("m", "minutes"), ("h", "hours"), ("d", "days"))
 
 
-def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
+def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row", ctime=False):
     """The shared date/time window control: *any time*, *between* two points, or *within ± N of* one.
 
     ``prefix`` namespaces the element ids so a page can carry more than one (the Conversations index
@@ -839,6 +924,10 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
     Both inputs are ``datetime-local``, which needs no library and works on ``file://``. What is
     entered is read as a wall clock and compared against `ts_key` values, so it means the time as
     the report displays it, in the run's timezone — see `ts_key`.
+
+    ``ctime`` adds a box for the device's inode-change times (a row's ``tc``). It starts ticked —
+    they are matched, as other tools match them — and unticking it leaves them out, because the
+    acquisition itself can set them.
     """
     scope_html = ""
     if scopes:
@@ -877,13 +966,25 @@ def time_filter(prefix, *, label="Time", scopes=(), hint="", noun="row"):
         f'<span class="tfsep">of</span>'
         f'<input type="datetime-local" id="{prefix}at" step="1" oninput="flt()" '
         f'title="The moment to search around."></span>'
-        + scope_html)
+        + scope_html
+        + (f'<label class="tfc" title="{html.escape(CTIME_HINT)}"><input type="checkbox" '
+           f'id="{prefix}ctime" checked onchange="flt()">incl. inode changed'
+           f'{info_icon(CTIME_HINT)}</label>'
+           if ctime else ""))
+
+
+CTIME_HINT = (
+    "Also match the device's inode-change times (when a file's owner, mode, name or links last "
+    "changed) — on by default. Untick to leave them out: copying or acquiring a file can set that "
+    "time, so a window around the extraction can match files for a reason that has nothing to do "
+    "with what the device's user did, and some archives store a placeholder there.")
 
 
 TIME_CSS = """
  .tfl{white-space:nowrap} .tfg{display:inline-flex;align-items:center;gap:5px}
  .tfg input[type=datetime-local]{font-size:12px} .tfg input[type=number]{width:64px;font-size:12px}
  .tfsep{color:#777;font-size:12px} .tfscope{white-space:nowrap}
+ .tfc{white-space:nowrap;font-weight:400;display:inline-flex;align-items:center;gap:3px}
  /* the member of a folded group whose timestamp matched the window */
  .mhit{background:#fff6d9;box-shadow:0 0 0 2px #e6c983 inset;border-radius:5px}
 """
@@ -914,6 +1015,12 @@ function scTimeWin(p){
  var mult={m:60,h:3600,d:86400}[scFv(p+'unit')||'h']||3600;
  return {a:at-n*mult,b:at+n*mult};}
 
+/* A row's time keys for the window: its `ts`, and its inode-change times (`tc`) while the
+   control's own box is ticked (time_filter(ctime=True); it starts ticked). */
+function scTimeList(p,m){
+ var c=document.getElementById(p+'ctime'),l=(m&&m.ts)||[];
+ return (c&&c.checked&&m&&m.tc)?l.concat(m.tc):l;}
+
 /* A row matches when any of its timestamps is inside the window. No timestamps means no match: a
    row we cannot place in time may not be presented as one that falls in the window asked for. */
 function scTimeHit(win,list){
@@ -936,6 +1043,7 @@ function scTimeReset(p){
  var n=document.getElementById(p+'n');if(n)n.value='1';
  var u=document.getElementById(p+'unit');if(u)u.value='h';
  var s=document.getElementById(p+'scope');if(s)s.selectedIndex=0;
+ var c=document.getElementById(p+'ctime');if(c)c.checked=true;      /* back to its default */
  scTimeMode(p,true);}
 """
 
@@ -1176,6 +1284,17 @@ function setRows(r){rows=r;byId={};loaded=true;
  for(var i=0;i<rows.length;i++)byId[rows[i][0]]=i;
  buildFolds();
  if(C)refilter();}
+
+/* Let the page add to its rows what another report's data file says about them — the Memories index
+   marks the Memories a cached file lists as possible, from the cache_controller report's
+   memory_leads.js, which is written after the Memories report and so cannot be in its rows. `fn`
+   may change a row's cells, search text and filter metadata, but never its id. Returns how many
+   rows it changed (fn returns true for those). */
+function annotate(fn){
+ var n=0;
+ for(var i=0;i<rows.length;i++)if(fn(rows[i]))n++;
+ if(n){dirty=true;if(C)refilter();}
+ return n;}
 
 /* ---------- folded rows ----------
    A row may be *folded* into another: it keeps its place in `rows` — so its anchor, its selection
@@ -1670,7 +1789,7 @@ function clearFilters(){
  page=0;
  refilter();}
 
-return {init:init,setRows:setRows,detail:detail,refilter:refilter,setSort:setSort,
+return {init:init,setRows:setRows,annotate:annotate,detail:detail,refilter:refilter,setSort:setSort,
         expandAll:expandAll,goTo:goTo,hasRow:hasRow,findAll:findAll,selectShown:selectShown,
         remeasure:remeasure,setPage:setPage,setPageSize:setPageSize,clearFilters:clearFilters,
         selId:selId,selKeys:selKeys,

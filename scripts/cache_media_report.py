@@ -49,6 +49,9 @@ from urllib.parse import unquote, urlparse
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
+from scripts import memory_backlinks
+from scripts import progress
+from scripts import parallel
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import sniff
@@ -58,11 +61,12 @@ from scripts.data import tsaf
 from scripts.memories_media_report import (
     manifest_key, load_fs_records,
     find_app_container, index_sccontent, device_path, load_path_manifest, make_time_formatter,
-    guess_media, url_token, _UUID_RE,
+    guess_media, url_token, _UUID_RE, _SC_SPLIT_RE,
 )
 from scripts.cache_controller_report import (
     find_cache_controllers, publish_view, publish_posters, load_chat_links, load_memory_index,
-    load_memory_pages, load_memory_packs, POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
+    load_memory_pages, load_memory_packs, load_memory_content, content_basis, CONTENT_MARKS,
+    POSTER_BASIS, PLAYABLE_EXTS, _fmt_bytes, _esc, _info,
 )
 
 try:
@@ -822,6 +826,24 @@ _TRIPLE_RE = re.compile(r"(?P<type>[^:_]*)[:_](?P<conv>[0-9a-fA-F-]{36})[:_](?P<
                         r"(?P<part>\d+)")
 
 
+def claim_owner(external_key):
+    """The owner username a ``<USERNAME>~<snapId>`` claim key carries, or "".
+
+    The name is the part right before ``~<UUID>`` (``content~<USERNAME>~<UUID>`` too). The same
+    position holds the claim's *type* in other keys — ``thumbnail~<UUID>``, ``profilethumbnail~…``,
+    ``SnapVideoFilterState-…`` — so a part with a lowercase letter in it is not taken for a name: the
+    usernames these keys carry are upper case, the type words are not.
+    """
+    mo = _UUID_RE.search(external_key or "")
+    if not mo or not external_key[:mo.start()].endswith("~"):
+        return ""
+    name = external_key[:mo.start() - 1].rsplit("~", 1)[-1]
+    if not any(ch.isalpha() for ch in name) or any(ch.islower() for ch in name) \
+            or _UUID_RE.match(name):
+        return ""
+    return name
+
+
 def load_claims(app):
     """``(by_uuid, by_triple, cache_keys)`` from every ``cache_controller.db``.
 
@@ -840,10 +862,10 @@ def load_claims(app):
                    "user_id": row.get("USER_ID") or "", "wal": mark}
             # "<USERNAME>~<snapId>" (context 3) or a bare "<snapId>" (context 4): the owner
             # username is recoverable here and nowhere else in the filename
-            owner, _sep, tail = ek.partition("~")
+            _owner, _sep, tail = ek.partition("~")
             mo = _UUID_RE.search(tail or ek)
             if mo:
-                rec["owner"] = owner if _sep and not _UUID_RE.match(owner) else ""
+                rec["owner"] = claim_owner(ek)
                 by_uuid.setdefault(mo.group(0).upper(), []).append(rec)
             mt = _TRIPLE_RE.search(ek)
             if mt:
@@ -880,7 +902,7 @@ def _pack_keys(entry, packs):
 
 
 def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, memory_pages,
-              chat_by_key, chat_by_message, packs=None):
+              chat_by_key, chat_by_message, packs=None, content=None, bundles=None):
     """Attach every exact link this file supports. Each records the method that produced it.
 
     Priority: the claim a UUID in the filename names, then the conversation/message/part triple,
@@ -900,7 +922,7 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
     for item_key, media in _pack_keys(entry, packs or {}):
         for rec in media[:2]:
             links.append({
-                "kind": "memory", "snap_id": rec["snap_id"],
+                "kind": "memory", "snap_id": rec["snap_id"], "how": "pack",
                 "page": memory_pages.get(rec["snap_id"]),
                 "media_path": rec.get("path", ""), "media_ext": rec.get("ext", ""),
                 "media_role": rec.get("role", ""), "media_bytes": rec.get("bytes", 0),
@@ -956,11 +978,14 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
         for path in sc_by_size.get(entry["bytes"], []):
             other = _read(path)
             if hashlib.sha256(other).hexdigest() == entry["sha256"]:
-                key = os.path.basename(path)
+                name = os.path.basename(path)
+                key, part = sccontent_key(name, bundles)
+                of = (f"cache file {name}" if not part else
+                      f"file {name} — {part} of the cache entry whose CACHE_KEY is {key}")
                 links.append({
                     "kind": "cache", "key": key,
                     "basis": (f"The recovered bytes are byte-identical (SHA-256) to the SCContent "
-                              f"cache file {key}. This is how a file at the Caches root attributes: "
+                              f"{of}. This is how a file at the Caches root attributes: "
                               f"its own filename UUID is ephemeral and is referenced nowhere on the "
                               f"device, so content equality is the only exact link. SCContent files "
                               f"are hashed as stored, not only after decryption — a linker that "
@@ -977,13 +1002,35 @@ def attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size, mem_index, me
             if hit:
                 canonical, user_hash, field = hit
                 links.append({
-                    "kind": "memory", "snap_id": canonical,
+                    "kind": "memory", "snap_id": canonical, "how": "url",
                     "page": memory_pages.get(canonical),
                     "basis": (f"This file is keyed by the CDN URL {entry['url']}. SHA-256 of its "
                               f"media token \"{token}\" (first 16 bytes) is {digest}, which equals "
                               f"the cache key of a Memory's {field}."),
                 })
+
+    # 5. byte-identical to a Memory's media: as this run recovered it from the device, else as it
+    #    was retrieved from Snapchat's servers (cloud_memories.write_manifests, device records first)
+    if not any(link["kind"] == "memory" for link in links):
+        for digest in (entry.get("sha256"), entry.get("raw_sha256")):
+            for rec in ((content or {}).get(digest) or [])[:1] if digest else []:
+                links.append({
+                    "kind": "memory", "snap_id": rec["snap_id"],
+                    "page": memory_pages.get(rec["snap_id"]),
+                    "by_content": "device" if rec.get("what") == "device" else "cloud",
+                    "how": "device" if rec.get("what") == "device" else "cloud",
+                    "basis": content_basis(dict(rec, sha256=digest)),
+                })
+            if any(link["kind"] == "memory" for link in links):
+                break
     return links
+
+
+def _tc_of(copies):
+    """``{"tc": [...]}`` — the inode-change times of every copy, when there are any."""
+    keys = report_ui.ts_keys(*[t for c in copies for t in report_ui.fs_times(
+        [c.get("fs")], c.get("_epochfmt") or (lambda seconds: ""), kinds=("ctime",))])
+    return {"tc": keys} if keys else {}
 
 
 def _root_uuid_warning(entry):
@@ -1017,6 +1064,45 @@ def _stream_hashes(path):
     return md5.hexdigest(), sha.hexdigest(), total
 
 
+def _read_cache_file(full, rel, key_info):
+    """Everything :func:`build_entries` learns from one file's bytes — read, hashed, decoded, its
+    embedded metadata — and nothing that depends on any other file. ``None`` when it cannot be read.
+
+    Pure, so :func:`build_entries` runs it on several threads (``parallel.ordered_map``) and merges
+    the results in walk order exactly as it did when it read the files one after another.
+    """
+    try:
+        size = os.path.getsize(full)
+    except OSError:
+        return None
+    name = os.path.basename(rel)
+    if size > MAX_DECODE_BYTES:
+        md5, sha, _total = _stream_hashes(full)
+        raw, payload, steps = b"", None, [f"{_fmt_bytes(size)} — too large to decode here; "
+                                          f"hashed in chunks and left as stored."]
+        kind, ext = sniff_content(_read(full, 16))
+    else:
+        raw = _read(full)
+        md5, sha = _hashes(raw) if raw else ("", "")
+        payload, kind, ext, steps = decode_payload(raw, key_info.get("key"), key_info.get("iv"))
+    if payload is None:
+        content, cmd5, csha = raw, md5, sha
+    elif payload is raw:
+        content, cmd5, csha = payload, md5, sha
+    else:
+        content = payload
+        cmd5, csha = _hashes(payload)
+    # Read from the RECOVERED bytes — a decrypted payload has no file of its own yet — or from the
+    # file on disk when it was too large to read whole (the header is all the reader needs).
+    embedded = None
+    if kind == "media":
+        embedded = (media_meta.extract(full) if size > MAX_DECODE_BYTES
+                    else media_meta.extract_bytes(content, name))
+    return {"size": size, "name": name, "md5": md5, "sha": sha, "steps": steps, "kind": kind,
+            "ext": ext, "content": content, "cmd5": cmd5, "csha": csha, "embedded": embedded,
+            "recovered": payload is not None, "decoded": payload is not None and payload is not raw}
+
+
 def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=None,
                   device_mtimes=None, fs_records=None):
     """One entry per file under Library/Caches, deduplicated by recovered content.
@@ -1030,44 +1116,25 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
     by_content, stats = {}, {"files": 0, "bytes": 0, "decoded": 0, "failed": 0}
     # the file's own timestamps, in the run's timezone — the same formatter the claims go through
     epochfmt = (lambda seconds: ms_fmt(int(seconds) * 1000)) if ms_fmt else (lambda seconds: "")
-    for full, rel in walk_caches(app):
-        try:
-            size = os.path.getsize(full)
-        except OSError:
+    files = list(walk_caches(app))
+    # Read, hash and decode on several threads; merge here, in walk order, as before.
+    read = parallel.ordered_map(lambda fr: _read_cache_file(fr[0], fr[1], key_info), files)
+    for n_file, ((full, rel), got) in enumerate(zip(files, read), 1):
+        progress.step("reading and decoding Library/Caches files", n_file, len(files))
+        if got is None:
             continue
+        size, name = got["size"], got["name"]
+        md5, sha, steps, kind, ext = got["md5"], got["sha"], got["steps"], got["kind"], got["ext"]
+        content, cmd5, csha, embedded = got["content"], got["cmd5"], got["csha"], got["embedded"]
         stats["files"] += 1
         stats["bytes"] += size
-        name = os.path.basename(rel)
-
-        if size > MAX_DECODE_BYTES:
-            md5, sha, _total = _stream_hashes(full)
-            raw, payload, steps = b"", None, [f"{_fmt_bytes(size)} — too large to decode here; "
-                                              f"hashed in chunks and left as stored."]
-            kind, ext = sniff_content(_read(full, 16))
-        else:
-            raw = _read(full)
-            md5, sha = _hashes(raw) if raw else ("", "")
-            payload, kind, ext, steps = decode_payload(raw, key_info.get("key"), key_info.get("iv"))
-
-        if payload is None:
+        if not got["recovered"]:
             stats["failed"] += 1
-            content, cmd5, csha = raw, md5, sha
-        else:
-            content = payload
-            if payload is raw:
-                cmd5, csha = md5, sha
-            else:
-                stats["decoded"] += 1
-                cmd5, csha = _hashes(payload)
+        elif got["decoded"]:
+            stats["decoded"] += 1
 
         category, cat_note = classify(rel, kind, ext)
         url = decode_cache_key_url(name)
-        # Read from the RECOVERED bytes — a decrypted payload has no file of its own yet — or from the
-        # file on disk when it was too large to read whole (the header is all the reader needs).
-        embedded = None
-        if kind == "media":
-            embedded = (media_meta.extract(full) if size > MAX_DECODE_BYTES
-                        else media_meta.extract_bytes(content, name))
         copy = {
             "path": full, "rel": rel, "name": name, "bytes": size,
             "raw_md5": md5, "raw_sha256": sha,
@@ -1091,8 +1158,8 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
                 "cat_note": cat_note, "steps": steps, "copies": [],
                 "name": name, "rel": rel, "url": url,
                 "inner_url": inner_bolt_url(url),
-                "decoded": payload is not None and payload is not raw,
-                "recovered": payload is not None,
+                "decoded": got["decoded"],
+                "recovered": got["recovered"],
                 "embedded": embedded,
                 "embedded_times": report_ui.file_time_rows(embedded, epochfmt),
                 "tsaf": tsaf_fields(content) if kind == "tsaf" else [],
@@ -1105,6 +1172,45 @@ def build_entries(app, key_info, ms_fmt, src_root=None, manifest=None, renamed=N
             entry["url"] = url
             entry["inner_url"] = inner_bolt_url(url)
     return list(by_content.values()), stats
+
+
+_BUNDLE_CHILD_RE = re.compile(r"^([0-9A-Fa-f]{32})_(.+)$")
+
+
+def sccontent_key(name, bundles=None):
+    """``(CACHE_KEY, what the file is of it)`` for an SCContent file name — the cache_controller row
+    the file is shown in.
+
+    A whole file is named after its CACHE_KEY (``(name, "")``). A byte-range part
+    ``<CACHE_KEY>_<start>-<end>`` is a piece of the entry ``<CACHE_KEY>``, which is where that report
+    lists it. A bundle's child ``<CACHE_KEY>_<child>`` is listed under its parent only when
+    cache_controller.db holds a claim on the parent whose CHILDREN name it (``bundles``: ``{parent:
+    {child names}}``, see :func:`load_bundles`); otherwise it is a row of its own, under its own name.
+    """
+    mo = _SC_SPLIT_RE.match(name)
+    if mo:
+        return mo.group(1), "a byte-range part"
+    mo = _BUNDLE_CHILD_RE.match(name)
+    if mo and mo.group(2) in (bundles or {}).get(mo.group(1).lower(), ()):
+        return mo.group(1), f"the bundle child {mo.group(2)}"
+    return name, ""
+
+
+def load_bundles(app):
+    """``{CACHE_KEY: {child names}}`` for every claimed bundle — the children the cache_controller
+    report lists under the bundle's row (``CACHE_FILE_METADATA.CHILDREN``, both readings)."""
+    from scripts.cache_controller_report import parse_children, _is_range_child
+    claimed, out = set(), {}
+    for db in find_cache_controllers(app):
+        claims, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_CLAIM")
+        claimed |= {str(c.get("CACHE_KEY") or "").lower() for c in claims}
+        metas, _marks, _info = sqlite_open.read_all(db, "CACHE_FILE_METADATA")
+        for meta in metas:
+            names = {c["name"] for c in parse_children(meta.get("CHILDREN"))
+                     if isinstance(c.get("name"), str) and not _is_range_child(c["name"])}
+            if names:
+                out.setdefault(str(meta.get("CACHE_KEY") or "").lower(), set()).update(names)
+    return {key: names for key, names in out.items() if key in claimed}
 
 
 def index_sccontent_by_size(app):
@@ -1319,7 +1425,7 @@ def _links_cell(entry, rel_prefix, compact=True, closure=None):
             chips.append(report_ui.xref(
                 f'<a class="chip mem" href="{_esc(href)}" target="scauto_memories" '
                 f'title="open this Memory\'s row in the Memories index">'
-                f'Memory {_esc(sid[:8])}…</a>',
+                f'Memory {_esc(sid[:8])}…{CONTENT_MARKS.get(link.get("by_content"), "")}</a>',
                 [("mem", f"mem-{sid}")], closure=closure, brief=compact) + why(link["basis"]))
             # ...and the Memory's own detail page, as the cache_controller report does: the index
             # row is a summary, the detail page is where that Memory's media and metadata are.
@@ -1533,7 +1639,16 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
              # the same file a different id, and may merge or split rows. The raw bytes' hashes are
              # therefore recorded with a selection, and are what a later run matches on when the
              # anchor no longer exists. Copies are few (one file, its duplicates).
-             "raw": [c["raw_sha256"] for c in e["copies"] if c.get("raw_sha256")]},
+             "raw": [c["raw_sha256"] for c in e["copies"] if c.get("raw_sha256")],
+             # the times the row shows, as displayed — the device's record of every copy and what
+             # the file says about itself where it states its zone — for the search over every report
+             "ts": report_ui.ts_keys(
+                 *[c.get("mtime") for c in e["copies"]],
+                 *[t for c in e["copies"] for t in report_ui.fs_times(
+                     [c.get("fs")], c.get("_epochfmt") or (lambda seconds: ""))],
+                 *[t["shown"] for t in e.get("embedded_times") or () if not t.get("naive")]),
+             # the device's inode-change times, apart: searched only when asked for
+             **_tc_of(e["copies"])},
         ])
     report_ui.write_rows(data_dir, rows)
 
@@ -1628,6 +1743,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 <div class="stickytop">
 <div class="toolbar">
  <input type="search" id="q" placeholder="Search path, filename, hash, URL, snap id…" oninput="flt()">
+ {report_ui.search_all_link("../")}
  <label>Category <select id="cat" onchange="flt()"><option value="">all</option>{cat_opts}</select></label>
  <label>Location <select id="loc" onchange="flt()"><option value="">all</option>{loc_opts}</select></label>
  <label title="{_esc(UNRECOVERED_BASIS)}">Recovered
@@ -1636,6 +1752,7 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
    <option value="y">linked</option><option value="n">not linked</option></select></label>
  <label title="App fonts, lens models and shader caches are hidden unless this is ticked">
    <input type="checkbox" id="assets" onchange="flt()"> show app assets</label>
+ <button id="xallbtn" data-o="0" onclick="xall(this)">Expand all</button>
  {report_ui.clear_filters_button("file")}
  <span id="count" style="color:#555"></span>
 </div>
@@ -1664,6 +1781,13 @@ def generate_report(entries, docs, outdir, tz_label, rel_prefix, key_info, stats
 {report_ui.SELECT_TOOLBAR_JS}
 var flt_t=0;
 function flt(){{clearTimeout(flt_t);flt_t=setTimeout(function(){{SCV.refilter();}},120);}}
+function xall(btn){{
+ var op=btn.dataset.o==='1';
+ if(!SCV.expandAll(!op,500)){{
+  alert('Too many rows on this page to expand at once. Narrow the filters or use a smaller '
+        +'"rows per page" first.');
+  return;}}
+ btn.dataset.o=op?'0':'1';btn.textContent=op?'Expand all':'Collapse all';}}
 SCV.init({{
  mount:'vwrap',win:'vwin',pad:'vpad',header:'#vhdr',missing:'vmiss',empty:'vempty',
  emptyAll:'This extract contains no file from Library/Caches.',
@@ -1813,6 +1937,7 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
                 f"{stats['decoded']} decoded/decrypted")
 
     claims_by_uuid, claims_by_triple, _keys = load_claims(app)
+    bundles = load_bundles(app)
     sc_by_size = index_sccontent_by_size(app)
     mem_index = load_memory_index(app)
     # `links_dir` is where the manifests the earlier reports write are read from; see the same
@@ -1820,11 +1945,13 @@ def index(app_or_root, outdir=None, tz="local", src_root=None, report_dir=None, 
     ldir = links_dir or rdir
     memory_pages = load_memory_pages(ldir)
     memory_packs = load_memory_packs(ldir)
+    memory_content = (load_memory_content(ldir) or {}).get("by_sha256") or {}
     chat_by_key, chat_by_message = load_chat_links(ldir)
-    for entry in entries:
+    for n_entry, entry in enumerate(entries, 1):
+        progress.step("linking files to the other reports", n_entry, len(entries))
         entry["links"] = attribute(entry, claims_by_uuid, claims_by_triple, sc_by_size,
                                    mem_index, memory_pages, chat_by_key, chat_by_message,
-                                   packs=memory_packs)
+                                   packs=memory_packs, content=memory_content, bundles=bundles)
 
     # The closure's view. Rows keep their build order, which `render` preserves: the sort below
     # happens after publishing today, and poster extraction runs under a budget, so re-ordering the
@@ -1879,6 +2006,11 @@ def render(stage, closure=None, prov=None):
                                    device_path(app, stage["src_root"], stage["manifest"]),
                                    report_ui.run_id(rdir), closure=closure, prov=prov)
     _write_manifest(entries, outdir)
+    # what this report linked to each Memory, for the Memory's own page (scripts/memory_backlinks.py);
+    # a partial extract's names only the Memories it holds
+    memory_backlinks.write_script(os.path.join(outdir, "data"), entries, report_ui.run_id(rdir),
+                                  keep=None if closure is None else
+                                  (lambda sid: closure.has("mem", f"mem-{sid}")))
     logger.info(f"Cached media report: {os.path.abspath(report)}")
     if closure is not None:
         logger.info(f"  {len(entries)} of {len(stage.model)} distinct file(s) in this extract")

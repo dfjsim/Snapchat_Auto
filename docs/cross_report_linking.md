@@ -101,6 +101,8 @@ happened to name. Built with `report_ui.find_fragment`; see
 | cache_controller | Cached media | the entry's `CACHE_KEY` | it matches ≥ 2 `Library/Caches` files |
 | Cached media | cache_controller | every linked `CACHE_KEY` | the file matches ≥ 2 cache entries |
 | Memories (detail) | Cached media | the pack's item hash | always — a pack is many chunk files |
+| cache_controller | Memories | every listing Memory's snap id | the file is an asset of a filter ≥ 2 Memories' overlay records list |
+| cache_controller | cache_controller (the same page) | the conversation id a claim key names | the key names a message no row is there for, in a conversation no report lists (a conversation tie, below) |
 
 A single-target link stays a plain `#anchor`, which highlights the row it lands on.
 
@@ -119,6 +121,81 @@ Tried in priority order; the first that matches wins, and the icon records which
    snap-scoped key.
 3. **ZMEDIAID (fallback).** A UUID inside an `EXTERNAL_KEY` matches the Memory's `ZMEDIAID`
    (used only when it is *not* also a `ZSNAPID`).
+   **ZSNAPID in a full-media key of another shape (fallback).** A full-media claim
+   (`MEDIA_CONTEXT_TYPE` 19) whose `EXTERNAL_KEY` is none of the Memory-scoped shapes carries the Memory's
+   `ZSNAPID` — `<snapId>~1`. An exact identifier, so it links, in both reports: the Memories report
+   locates the same file (`collect_media`, through `index_claim_uuids`) and decrypts it with the Memory's
+   key, so the Memory's page shows what the cache_controller report says belongs to it. A `<UUID>~<n>`
+   whose UUID is no snap id (the snap editor's, context 34) links to nothing.
+4. **A MemData identifier (fallback).** A UUID inside an `EXTERNAL_KEY` is one the Memory records
+   about itself in `ZGALLERYSNAP.ZMEMDATAIDS` (`snapMemDataId` / `entryMemDataId`) or in its entry's
+   `ZGALLERYENTRY.ZMEMDATAID` (newer app versions; `memories_media_report.decode_memdata`). An entry's
+   id is shared by every snap of the entry, so an id that more than one Memory records links to none
+   of them. Like rule 3, a recorded identifier — never a time or content match. The key shapes this
+   applies to (e.g. `<UUID>~1`) name no Memory by themselves, so they stay out of the shape list
+   below.
+5. **Proven by content (last).** The file is byte-identical (SHA-256) to a Memory's media — first as
+   this run **recovered it from the device** (decrypted with the Memory's own key, or stored plain), then
+   as it was **retrieved from Snapchat's servers** ([cloud_download.md](cloud_download.md)), decrypted or
+   as received. `cloud_memories.find_identical` makes the comparison (sizes first, then SHA-256) and
+   never compares the device's copies with a file some Memory's media was recovered from: identifiers
+   link that one already. `Memories/media_by_content.json` carries the matches (`by_cache_key` for this
+   report, `by_sha256` for the Library/Caches one); the chip gains ≡ (the device's copy) or ☁ (a server
+   copy), and the row's detail says which copy and where it came from — for a server copy, the
+   retrieval and its authority. The only link here that no identifier on the device supports, so any of
+   rules 1-4 wins over it. The snap editor's working copy of a snap later saved to Memories is the case
+   it was built for: on a test device the working copies that are a Memory's media link this way
+   without any retrieval.
+
+### cache_controller → Memory: an asset of a filter its overlay record lists
+
+Not one of the rules above, and never the Memory's media. A Memory's overlay record —
+`ZGALLERYSNAPDETAIL.ZOVERLAY`, the row whose `ZSNAP` is the Memory's `Z_PK`, an NSKeyedArchiver archive
+of `SOJUGallerySnapOverlay` (see
+[report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) — lists the
+snap's geofilters, and four fields of a geofilter are read for a URL: `imageUrl`,
+`arSegmentation.sky.replacementSkyUrl`, `arSegmentation.sky.blimpUrl` (empty wherever it has been seen)
+and `geofilterMarkups[j].displayParameters.font` (`snap_overlay.ASSET_FIELDS`). A claim whose
+`EXTERNAL_KEY` is one of those URLs is a cached asset of a listed filter
+(`cache_controller_report._overlay_links_for`, reading `scripts/data/snap_overlay.py`):
+
+* **The whole URL, by one rule** (`snap_overlay.normalise_url`): an http(s) URL, its scheme lower-cased,
+  one empty trailing `?` or `#` dropped — some claim keys are the record's URL with an empty query added
+  — and nothing else changed: nothing unquoted (both sides store base64 padding as `%3D`), no case
+  change of host, path or query. An id inside the URL is not enough: the same last path segment recurs
+  under other hosts and paths, and one `mo=` / `bo=` value under other ids. A re-fetch of the same
+  asset under another `uc=` is therefore a missed link, never a wrong one.
+* **Not the shared address.** A geofilter whose `imageUrlParams` dictionary has entries (the Bitmoji
+  filters) gives one shared address as its `imageUrl`, the image being in the parameters: that URL is
+  never an asset. The rule lives in `snap_overlay.filter_assets`, not in a caller.
+* **Listed, not shown to be used.** The record commonly lists several geofilters and names the selected
+  one separately (`filters.geoFilterSelectedId` / `geoFilterSelectedIds`, often none), so a listed
+  filter is not shown to be on the Memory. The chip says *filter listed* — *filter selected* only when
+  the record names that filter's `idValue` — and the "?" says what the record names, and states the
+  Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE`, to compare with the Memory's own overlay entry.
+* **Any account.** Neither the claim's context nor its account is restricted: on a device with two
+  accounts, one account's claim can be an asset the other account's Memories list. The link is made,
+  and its "?" and the detail's claim cell say the claim is another account's.
+* **A relation of its own.** It is `entry["filter_memories"]`, never `entry["memory"]`: not counted as
+  linked to a Memory, never a lead, never decrypted with the Memory's key, its own `Filter` value of the
+  Linked filter, its own partial-report edge (`EDGE_MEMORY_FILTER_ASSET`; relations `mem_filter_assets`
+  and `cache_filter_memories`, both off by default). An entry linked to a Memory as its media is not
+  linked to the same Memory again this way. One asset is commonly listed for many Memories, so several
+  are one dashed `#find=` chip, and the detail lists each Memory with its own "?" — up to
+  `FILTER_DETAIL_ROWS` of them, then a line saying how many more; the chip and the search carry all.
+
+Both reports read the record through the same module and match by the same rule, so the Memory's page
+lists the same files (see below) without a manifest passing between them.
+
+### Not a link: a creative-tools item that names a cached file
+
+An item of an account's creative-tools store (`primary.docobjects` › `ctp__item_5`, read by
+`scripts/data/ctp_items.py`) can name a cached file — the claim key is one of the item's asset URLs, or
+names the item by its id — and the cache_controller report says so on the entry, as an explanation of
+what the file is (*Creative tools asset*). It is not a cross-report link: the store has no report, so
+there is no target and no anchor, it goes through neither `report_ui.xref` nor a partial-report edge, and
+nothing points back at the entry. The rule and the store's layout are in
+[report_cache_controller.md](report_cache_controller.md#creative-tools-items--primarydocobjects--ctp__item_5).
 
 ### Which `EXTERNAL_KEY` shapes name a Memory
 
@@ -161,9 +238,17 @@ either `SHA-256(url token)[:16]` or the `cache_controller` `EXTERNAL_KEY` target
 Claims are looked up by the Memory's `ZSNAPID` **and** by the media-object ids its row references
 (`m["media_refs"]` — `ZMEDIAID`, `ZDUPLICATEDFROMSNAPID`), which is the mirror of fallback 3 above:
 a claim can name the media object rather than the snap, and a Memory moved into My Eyes Only is
-exactly that case. Both are used, not one instead of the other — a Memory has several cached files
+exactly that case. The Memory's MemData identifiers are looked up the same way (`index_claim_uuids`), the
+mirror of rule 4, under the same rule: an id another Memory records too is not used. Both are used, not one instead of the other — a Memory has several cached files
 and only some of the claims name it by `ZSNAPID`. Every hit is still confirmed by the file
 decrypting, so the id match selects candidates rather than asserting the association.
+
+A Memory's page also lists the cached assets of the filters its overlay record lists — found by
+`collect_media` through `index_claim_urls`, with the whole-URL rule above — in a section of its own
+after Media files, *Cached assets of filters listed with this Memory — not its media*, each linking to
+`#ck-<CACHE_KEY>`. They are not media files of the Memory, nothing is decrypted for them, and they are
+not among the cache keys a selection names the Memory by (`_cache_tokens`). On a page several Memories
+share, each asset is given under the Memory whose record lists it.
 
 Note that this list also feeds `carve_deleted_memories`: a claimed UUID with **no** `ZGALLERYSNAP`
 row is a candidate deleted Memory. Indexing a shape that is not a Memory claim therefore does not
@@ -185,8 +270,49 @@ The Conversations report writes version 3:
  "by_key":     {"<CACHE_KEY>": [{"conversation_id": …, "server_message_id": "12.0",
                                  "anchor": "msg-12.0", "title": "…",
                                  "href": "Conversations/pages/<key>.html#msg-12.0"}]},
- "by_message": {"<conversation id>|<server message id>": [ …the same records… ]}}
+ "by_message": {"<conversation id>|<server message id>": [ …the same records… ]},
+ "messages":   {"<conversation id>": {"title": "…", "href": "Conversations/pages/<key>.html",
+                                      "anchors": {"12.0": "msg-12.0", "13.0": "msg-13.0"}}},
+ "by_content_id": {"<id>": [{"conversation_id": …, "server_message_id": "12.0",
+                             "rule": "media|share|sticker|sticker-name"}]},
+ "conversations": {"<conversation id>": {"title": "…", "href": "Conversations/pages/<key>.html",
+                                         "anchor": "conv-<conversation id>", "messages": 0,
+                                         "in_arroyo": true}},
+ "arroyo":     {"read": true, "conversations_read": true, "account": "<USERID>",
+                "held": {"<conversation id, lower case>": [1, 2, 5]}}}
 ```
+
+`by_key` and `by_message` cover the messages that have an attachment. `messages` lists **every**
+message, compactly (one title and page per conversation, an anchor per message): a claim's key can
+name a message whose file the chat join did not attach — a kind it does not display, or a file it did
+not choose — and `load_chat_links` turns these into the same records. `by_content_id` holds the ids
+each message names its media by (`arroyo_content.content_ids`, read from arroyo.db by
+`conversations_report.load_arroyo_messages`): the media id of its `local_message_references` (`media`), a
+shared item's id at `4.4.5.5.1` (`share`), a sticker's id at `4.4.14.2.6` in base64 (`sticker`) or its
+name at `4.4.4.1.2` (`sticker-name`).
+
+The last two sections are for a claim whose key names a message no row is there for (route 4 below).
+`conversations` lists **every** conversation the report lists — one with no message too, which
+`messages` leaves out — with its page, the `conv-<id>` anchor of the page's header, how many messages
+it lists, and `in_arroyo`: whether arroyo.db itself holds the conversation (a `conversation`,
+`feed_entry` or `user_conversation` row, or a message it holds). `arroyo` says what the arroyo.db the
+run read holds: its own account (`required_values` `USERID`, lower-cased; `""` when not known) and the
+message numbers of each conversation — by `server_message_id`, or by `client_message_id` for a
+message the server never numbered — read from arroyo.db directly in both readings
+(`conversations_report.load_arroyo_messages`, the same read as `by_content_id`), **not** inferred from
+`messages`: the chat join lists rows arroyo.db never held (cache-only rows), and a read that failed
+lists none. A message is held by its two ids alone: a reading that predates a column its content ids
+are read from still says which messages it holds. When a reading of `conversation_message` will not
+read, or the checkpointed copy will not open at all (a -wal beside a file whose own header will not
+read — that copy is the only reading of a message the -wal has since deleted), `read` is false — a
+table that will not read is not one that holds nothing. `conversations_read` is the same for the
+`conversation`, `feed_entry` and `user_conversation` tables, read by `client_conversation_id` alone
+(`load_arroyo_conversations`): a missing table is read, one that will not read is not, and only when
+they were does a "?" say that none of them names a conversation. Both sections are additive, so the
+version stays 3
+(`load_chat_links` reads only versions 2 and 3 as indexed manifests; anything else would be taken
+for a bare version-1 map). A partial extract's manifest has `conversations` (its own conversations)
+but no `arroyo`: it would carry the message numbers of every conversation, and nothing reads it back.
 
 `href` (relative to the reports root) is the addition: with one page per conversation the anchor
 alone no longer says *which document* to open. The legacy Communications report still writes its
@@ -204,9 +330,55 @@ The cache_controller report links an entry to a chat message by, in order:
    **every** cache entry of a message — full media (`1:…`), thumbnail (`thumbnail~1:…`) and raw
    content claim (`content~1:…`) — and not just the one file the chat report happened to display.
    A message with two attachments (e.g. a thumbnail and a video) therefore links back from both.
+   When no row of that part is listed, the claim links to the message by its **number**
+   (`ChatIdIndex.message`): the report lists message 12 as `12.0` unless a claim of another part was
+   joined onto it, and a part of message 12 is still message 12 (e.g. `animationmedia~1:…:12:2:0`).
    The "?" spells out that such a link points at the *message*, not at that exact file.
+3. **`by_content_id`.** A claim whose `EXTERNAL_KEY` contains one of the ids a message names its media
+   by — the whole id, a UUID-based one in any letter case, base64 exactly — links to that message
+   (`ChatIdIndex.content_links`): `content~<MEDIA_ID>`, `thumbnail~<MEDIA_ID>`,
+   `SnapVideoFilterState-<MEDIA_ID>` and the like are other cached files of the media the message's
+   `local_message_references` names; a shared item's or a sticker's other claims, likewise. The "?"
+   names the id and the field it was read from.
 
-Chips are deduplicated per (conversation, message).
+4. **Conversation tie** (`_conversation_links_for`, after the three above, which it leaves
+   unchanged). A key of the chat shape whose message none of them reaches still names its
+   conversation. When no chat link of the entry reaches that message and the report lists no message
+   of that number, the entry is tied to the **conversation** — never to a message:
+
+   * the arroyo.db the run read **holds** the message (`arroyo.held`): no tie. The report not
+     listing it is a missing rule, which [`--survey-claim-links`](claim_link_survey.md) is for;
+   * the conversation is in `conversations`: a dashed 💬 chip to its page, at the header
+     (`Conversations/pages/<key>.html#conv-<id>`, the target window and fragment the Contacts report
+     uses), built from the id as the manifest spells it and emitted through `xref`
+     (`("conv", "conv-<id>")`); a partial run records `EDGE_CONV_CACHE` for it;
+   * it is in no report: a stated fact, not a link — and only when arroyo.db's messages were read, so
+     the absence is from both readings of the database, not merely from the report. Its dashed chip
+     is `#find=<conversation id>` on the same page (no `xref`: the target is this report), which
+     gathers every entry whose claim names that conversation. No edge;
+   * no `arroyo` section in the manifest (an older build, or the legacy report's): nothing is tied.
+
+   One tie per (conversation, message); further parts of the same message, and every claim's key and
+   account, are listed on it. The "?" says which of four it is — the conversation listed and held by
+   arroyo.db (a message of it, or a conversation / feed row), listed but held by no row of arroyo.db
+   (the friends / groups lists or cached chat files list it), listed by no report (when arroyo.db holds
+   other messages of it, the "?" says that instead), or listed while arroyo.db's messages were not
+   read (then the absence is "not known", never stated). That no conversation table names the
+   conversation is said only when `arroyo.conversations_read`; otherwise the "?" says it is not
+   known. Every absence is said of **the arroyo.db this run read** — "holds no message <n> of this
+   conversation, in either reading (with and without its -wal)" — never of the extraction, since a
+   run reads one arroyo.db; and **never "no longer"**: nothing in either reading shows the message was
+   ever there. Whose claim it is matters as much: a phone with two accounts keeps one cache beside the
+   first account's chat database, and the second account's claims name conversations and messages
+   that database need never have held. So each claim's `USER_ID` is compared with arroyo.db's
+   `required_values` `USERID` — "this claim was made by account X; the arroyo.db this run read
+   belongs to account Y" only when both are known and differ, "made by the account that arroyo.db
+   belongs to" when they match, nothing when either is unknown; a message claimed by more than one
+   account says which key each made, and the own account's claim decides the conclusion. A tie is not
+   a chat link: it is not counted as one, has a Linked filter option of its own (`Conversation`, *no
+   message row*), and an entry with one is never a "possible Memory" lead.
+
+Chips are deduplicated per (conversation, message), ties too.
 
 ### the chat report → cache_controller
 Each cached attachment links back to `#ck-<CACHE_KEY>` — the `cclink` in `path_to_image_html`
@@ -255,8 +427,10 @@ Contacts → Memories → CacheMedia → cache_controller**. That matters:
 * the **Contacts** report takes the conversation summary the Conversations report returns, which is
   how a contact row links to a conversation page and shows its message count;
 * the **cache_controller** report reads the chat manifest (`Conversations/cache_links.json`, else
-  the legacy one) and the two manifests the Memories report just wrote (`memory_pages.json`,
-  `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index.
+  the legacy one; the conversation ties read only the Conversations one) and the two manifests the
+  Memories report just wrote (`memory_pages.json`,
+  `media_by_cache_key.json`), and reads each `scdb-27.sqlite3` directly for the Memory index (its
+  overlay records included).
 
 * the **CacheMedia** report (everything under `Library/Caches` that `cache_controller.db` does
   *not* index) runs before cache_controller and writes `CacheMedia/by_cache_key.json`, which

@@ -1,8 +1,6 @@
 import sqlite3
 from scripts.data import sqlite_open
 import pandas as pd
-#from parse3 import *
-from scripts.data.parse3 import *
 import os
 import numpy as np
 import filetype

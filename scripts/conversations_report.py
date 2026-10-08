@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 from scripts import report_ui
 from scripts import app_version
 from scripts import partial_report
+from scripts import progress
 from scripts.data import sqlite_open, media_meta, arroyo_content
 from scripts.contacts_report import (normalize_contacts, normalize_groups, apply_identifiers,
                                      load_identifiers, contact_link_index, contact_anchor,
@@ -373,7 +374,8 @@ def build_messages(msg_df, cachefiles_dir, media_dir, timefmt, cache_key_for=Non
         logger.warning(f"Conversations: the message frame has no '{COL_CONV}' column "
                        f"({columns}) — no conversation can be built from it")
         return by_conv, {"dropped": 0, "skipped_conv": len(msg_df)}
-    for _index, row in msg_df.iterrows():
+    for n_row, (_index, row) in enumerate(msg_df.iterrows(), 1):
+        progress.step("building messages", n_row, len(msg_df))
         conv_id = cell(row.get(COL_CONV))
         if not _UUID_RE.match(conv_id):
             # The legacy report drops these too: without a conversation id of the expected shape
@@ -499,8 +501,18 @@ def _merge_rows(rows):
             continue
         folded += 1
         for att in row["atts"]:
-            if att and all(att["name"] != have["name"] for have in first["atts"]):
+            if not att or any(att["name"] == have["name"] for have in _all_files(first["atts"])):
+                continue
+            same = next((i for i, have in enumerate(first["atts"])
+                         if att.get("sha256") and have.get("sha256") == att["sha256"]), None)
+            if same is None:
                 first["atts"].append(att)
+            else:
+                # The same bytes under another name — the copy saved in the chat and the cached
+                # file, say. Shown once, with the other copy listed (and linked) beside it. A copy
+                # of the dict: the published-file cache hands the same one to every message.
+                have = first["atts"][same]
+                first["atts"][same] = dict(have, same_as=list(have.get("same_as") or ()) + [att])
         for ctype in row["types"]:
             if ctype not in first["types"]:
                 first["types"].append(ctype)
@@ -557,8 +569,117 @@ def _arroyo_blank():
             "in_arroyo": False}
 
 
-def load_arroyo_conversations(arroyo, msg_df=None):
+def load_content_ids(arroyo):
+    """The ``content_ids`` half of :func:`load_arroyo_messages`."""
+    return load_arroyo_messages(arroyo)[0]
+
+
+def _arroyo_rows(views, table, wanted, optional=()):
+    """``(rows, whole)``: the ``wanted`` and ``optional`` columns of arroyo.db's ``table`` in both
+    readings (``NULL`` for an optional column a reading lacks), each row once, the -wal reading's
+    first; ``rows`` is ``None`` when no reading has the table and its ``wanted`` columns.
+
+    ``whole`` is false when a reading was not read in full: one that has them and would not read
+    them — a damaged page, in the checkpointed copy above all, which is the only reading of a row the
+    -wal has since deleted — or a checkpointed copy that would not open at all (a file with a -wal
+    whose own header will not read). The rows of the other reading are still returned (what a
+    message names its media by is not lost with it); what is lost is the right to say a row is
+    absent. A reading without the table or a ``wanted`` column adds nothing and is not a failure: a
+    table created since the last checkpoint is not in the checkpointed reading at all. One without an
+    ``optional`` column adds its rows with ``NULL`` there: a column added since the last checkpoint
+    does not hide the rows the checkpointed reading holds. The rule ``--survey-claim-links`` reads
+    arroyo.db by (``claim_link_survey._rows``).
+    """
+    readings = [views.merged]
+    if views.main_only is not None and views.main_only is not views.merged:
+        readings.append(views.main_only)
+    # with no -wal the two readings are one; with one, a checkpointed copy that would not open is a
+    # reading not read — unless the file is empty, when there is nothing checkpointed to read
+    whole = views.merged is not None and not (views.main_only is None and views.info.get("db_bytes"))
+    rows, seen, found = [], set(), False
+    for conn in readings:
+        if conn is None:
+            continue
+        try:
+            # PRAGMA table_info answers a missing table with no rows and a schema that will not
+            # read with an error, so the two are never confused
+            columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+            if not set(wanted) <= columns:
+                continue
+            found = True
+            picked = ", ".join(f'"{c}"' if c in columns else "NULL" for c in wanted + optional)
+            fetched = conn.execute(f'SELECT {picked} FROM "{table}"').fetchall()
+        except sqlite3.DatabaseError as error:
+            whole = False
+            logger.debug(f"Conversations: a reading of arroyo.db {table} would not read ({error})")
+            continue
+        for row in fetched:
+            ident = tuple(sqlite_open._hashable(v) for v in row)
+            if ident not in seen:
+                seen.add(ident)
+                rows.append(row)
+    return (rows if found else None), whole
+
+
+def load_arroyo_messages(arroyo):
+    """``(content_ids, held)`` from one read of ``arroyo.db``'s ``conversation_message``, both
+    readings, so a message the write-ahead log has since dropped still counts.
+
+    * ``content_ids`` — ``{(conversation id, message key): [(id, rule)]}``, the key being
+      ``arroyo_content.message_key``: the message number, or ``c<client message id>`` for a message
+      the server never numbered. The ids a message names its media by (``arroyo_content.content_ids``):
+      the media id of its ``local_message_references``, a shared item's id, a sticker's id. The
+      cache_controller report links every claim whose key carries one of them to the message, not
+      only the one file the chat join attached.
+    * ``held`` — ``{conversation id (lower case): {message number}}``: every message arroyo.db holds,
+      by its server message id, or by its ``client_message_id`` when the server never numbered it
+      (``message_key``'s rule), so a key naming an unsent message is never said to name one the
+      database lacks. It is what the cache_controller report says a message is **absent** from, so it
+      is ``None`` — not read, never empty — when the table is missing, a reading of it would not
+      read, or the checkpointed copy would not open (:func:`_arroyo_rows`): that copy is the only
+      reading of a message the -wal has since deleted.
+
+    A message is held by its two ids alone; the columns its content ids are read from are optional,
+    so a reading that predates one of them still says which messages it holds.
+    """
+    content, held = {}, None
+    if not (arroyo and os.path.isfile(arroyo)):
+        return content, held
+    wanted = ("client_conversation_id", "server_message_id")
+    optional = ("content_type", "message_content", "local_message_references", "client_message_id")
+    views = sqlite_open.open_views(arroyo)
+    try:
+        rows, whole = _arroyo_rows(views, "conversation_message", wanted, optional)
+    finally:
+        views.close()
+    if rows is None:
+        logger.debug("Conversations: arroyo.db conversation_message not read (no reading has the "
+                     "table and its message ids)")
+        return content, held
+    numbers = {}
+    for conv, smid, ctype, body, ref, cmid in rows:
+        key = arroyo_content.message_key(smid, cmid)
+        if not (isinstance(conv, str) and key):
+            continue
+        numbers.setdefault(conv.lower(), set()).add(key[1:] if key.startswith("c") else key)
+        ids = arroyo_content.content_ids(ctype, body, ref)
+        if ids:
+            bucket = content.setdefault((conv.lower(), key), [])
+            bucket.extend(i for i in ids if i not in bucket)
+    return content, (numbers if whole else None)
+
+
+def load_arroyo_conversations(arroyo, msg_df=None, facts=None):
     """Conversation-level facts from ``arroyo.db``, keyed by client conversation id.
+
+    ``facts``, when given, also receives the database's own account: ``facts["account"]`` is its
+    ``required_values`` ``USERID``, lower-cased, or "" when that is not known — no such table, no such
+    row, or more than one value across the two readings. "" is never compared with anything: the
+    cache_controller report says whose account made a claim only against an account it knows. And
+    ``facts["conversations_read"]``: whether the three tables below were read in full, in both
+    readings, for the conversation ids they hold (:func:`_arroyo_rows`) — a missing table is read,
+    one that will not read is not. The cache_controller report says no table names a conversation
+    only when they were.
 
     Three tables, all optional, because the schema moves between app versions:
 
@@ -576,6 +697,8 @@ def load_arroyo_conversations(arroyo, msg_df=None):
     they were.
     """
     out = {}
+    if facts is not None:
+        facts.update(account="", conversations_read=False)
     if msg_df is not None and COL_SCONV in getattr(msg_df, "columns", []):
         for conv_id, server_id in zip(msg_df[COL_CONV], msg_df[COL_SCONV]):
             key, value = cell(conv_id), _id_str(server_id)
@@ -642,6 +765,27 @@ def load_arroyo_conversations(arroyo, msg_df=None):
         except sqlite3.DatabaseError as error:
             logger.info(f"Conversations: feed_entry is not available ({error}) — conversations "
                         f"with no message will carry no date")
+
+        # which conversations those tables hold a row of, read by the id alone: the queries above
+        # select more (query_both answers a column this schema lacks, or a page that will not read,
+        # with no rows), and the cache_controller report says a conversation is named by none of
+        # them only when every reading of each was read (facts["conversations_read"])
+        whole = True
+        for table in ("conversation", "feed_entry", "user_conversation"):
+            rows, read = _arroyo_rows(views, table, ("client_conversation_id",))
+            whole = whole and read
+            for (conv_id,) in rows or ():
+                if conv_id:
+                    rec(conv_id)["in_arroyo"] = True
+
+        if facts is not None:
+            facts["conversations_read"] = whole
+            # whose chat database this is (query_both answers a missing table with no rows)
+            accounts = list(dict.fromkeys(
+                str(value).strip().lower()
+                for key, value in both("select key, value from required_values")
+                if str(key).upper() == "USERID" and str(value or "").strip()))
+            facts["account"] = accounts[0] if len(accounts) == 1 else ""
     finally:
         views.close()
     return out
@@ -761,7 +905,8 @@ def _activity(times, info, timefmt):
     return out
 
 
-def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=None, timefmt=None):
+def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=None, timefmt=None,
+                        held=None):
     """Assemble one record per conversation, from the messages **and** the contact/group lists.
 
     A conversation is listed even when it has no messages: a friend or group whose conversation id
@@ -773,6 +918,9 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
     the app shows in its chat list, so the conversation is listed with that range.
 
     Every derived value records where it came from (``*_src``), which is what the "?" icons show.
+    ``in_arroyo`` says whether arroyo.db itself holds the conversation: a ``conversation``,
+    ``feed_entry`` or ``user_conversation`` row of it, or a message ``held`` (``load_arroyo_messages``)
+    — never inferred from the message rows here, some of which the chat join makes from cached files.
     """
     by_contact = {c["conv_id"]: c for c in contacts if c["conv_id"]}
     by_group = {g["conv_id"]: g for g in groups}
@@ -882,6 +1030,7 @@ def build_conversations(by_conv, contacts, groups, arroyo_info, contact_links=No
             "last_sort": activity["last_sort"],
             "activity": activity,
             "page": f"pages/{_page_key(conv_id)}.html",
+            "in_arroyo": conv_id in in_arroyo or str(conv_id).lower() in (held or {}),
         })
     # busiest first: that is the order an examiner wants to triage in
     conversations.sort(key=lambda c: (-c["n_messages"], -c["last_sort"], c["id"]))
@@ -1124,6 +1273,21 @@ _CREATED_HINT = ("arroyo.db conversation_message.creation_timestamp (Unix millis
                  "cache claim and carries no message timestamp.")
 
 
+def _all_files(atts):
+    """Every file of a message's attachments: each one, and the copies folded into it because they
+    hold the same bytes (``same_as``) — each is still published, searchable and a cache link."""
+    for att in atts or ():
+        if att:
+            yield att
+            yield from att.get("same_as") or ()
+
+
+SAME_BYTES_BASIS = (
+    "The message's files include this one more than once, under different names — identical SHA-256 "
+    "— e.g. the copy saved in the chat (Library/Caches/SCPersistentMedia) and the cached file. The "
+    "bytes are shown once; each name is listed, and each copy is published next to this report.")
+
+
 def _attachment_detail(att, prefix, index=None, total=1, closure=None):
     """One attachment's block inside an expanded message: the file, its hashes and its cache link."""
     parts = []
@@ -1160,7 +1324,14 @@ def _attachment_detail(att, prefix, index=None, total=1, closure=None):
         ("MD5", _esc(att["md5"]), "hex"),
         ("SHA-256", _esc(att["sha256"]), "hex"),
         ("published as", _esc(att["rel"] or "") + report_ui.info_icon(att["how"]), "mono"),
-    ]))
+    ] + [("same bytes as", (f'<a href="{_esc(prefix + other["rel"])}" target="_blank">'
+                            f'{_esc(other["name"])}</a>' if other.get("rel")
+                            else _esc(other["name"]))
+          + report_ui.info_icon(SAME_BYTES_BASIS
+                                + (f" Its cache_controller entry: {other['cache_key']}. "
+                                   + (other.get("cache_key_how") or "")
+                                   if other.get("cache_key") else "")), "mono")
+         for other in att.get("same_as") or ()]))
     if att["cache_key"]:
         parts.append(
             '<div class="chips">'
@@ -1363,7 +1534,7 @@ def _message_rows(conv, chunk_of):
         searchable = [msg["sender"], types, msg["smid"], msg["cmid"], msg["created_utc"],
                       msg["read_utc"], msg["created"], text, msg["raw_text"], body,
                       msg.get("body") or "", msg.get("sender_uid") or ""]   # names AND ids
-        for att in atts:
+        for att in _all_files(atts):
             searchable += [att["name"], att["ext"], att["md5"], att["sha256"],
                            att["cache_key"] or ""]
             # the Snapchat app's tag and an edit's source file names only, not every embedded
@@ -1539,7 +1710,7 @@ def render_conversation_page(conv, outdir, tz_label, run_id, index_name="Convers
         + (report_ui.missing_data_banner("this page") if has_messages else "") +
         '<div class="stickytop"><div class="toolbar">'
         '<input type="search" id="q" placeholder="Search this conversation — text, sender, id, '
-        'hash…" oninput="flt()">'
+        'hash…" oninput="flt()">' + report_ui.search_all_link("../../") +
         '<label>Direction <select id="dir" onchange="flt()"><option value="">any</option>'
         '<option value="Sent">sent</option><option value="Received">received</option>'
         '</select></label>'
@@ -1814,7 +1985,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
         + (report_ui.missing_data_banner("Conversations_report.html") if conversations else "") +
         '<div class="stickytop"><div class="toolbar">'
         '<input type="search" id="q" placeholder="Search conversation, participant, id, sender…" '
-        'oninput="flt()">'
+        'oninput="flt()">' + report_ui.search_all_link("../") +
         '<label>Type <select id="kind" onchange="flt()"><option value="">all</option>'
         '<option value="Private">private</option><option value="Group">group</option>'
         '<option value="Unknown">unknown</option></select></label>'
@@ -1891,7 +2062,7 @@ def generate_index(conversations, outdir, tz_label, run_id, stats, closure=None,
 
 # --------------------------------------------------------------------------- manifests
 
-def write_cache_links(conversations, outdir):
+def write_cache_links(conversations, outdir, arroyo=None):
     """Write ``cache_links.json`` (version 3) — how the cache_controller report links back here.
 
     Same two indexes as the manifest the legacy Communications report writes, plus an ``href`` that
@@ -1899,32 +2070,88 @@ def write_cache_links(conversations, outdir):
     with per-conversation pages the target is no longer one document:
 
     * ``by_key``     : CACHE_KEY -> [{conversation_id, server_message_id, anchor, href, title}]
-    * ``by_message`` : "<conversation id>|<server message id>" -> the same records
+    * ``by_message`` : "<conversation id>|<server message id>" -> the same records, for the
+      messages that have an attachment
+
+    and two more, which link a cache entry to a message this report attached no file to:
+
+    * ``messages``      : conversation id -> {title, href (the page), anchors: {server message id:
+      anchor}} — every message, compactly: a claim's key can name a message whose file the chat
+      join did not attach (a kind it does not display, a file it did not choose);
+    * ``by_content_id`` : id -> [{conversation_id, server_message_id, rule}] — the ids each message
+      names its media by (``arroyo_content.content_ids``), for every claim whose key carries one.
 
     ``by_message`` is what lets a cache entry link back even when it is not the exact file this
     report displayed — a chat video is typically a full-media claim, a thumbnail claim and a raw
     content claim, and only one of them is shown.
+
+    And two which tie a cache entry to a conversation when its claim's key names a message of it that
+    no row is there for:
+
+    * ``conversations`` : conversation id -> {title, href (the page), anchor (``conv-<id>``, the page's
+      header), messages (how many it lists), in_arroyo (arroyo.db holds a row of it)} — every
+      conversation listed, with a message or without;
+    * ``arroyo``        : {read, conversations_read, account, held: {conversation id (lower case):
+      [message number]}} — what the arroyo.db this run read holds, read from it directly in both
+      readings (:func:`load_arroyo_messages`), not from ``messages``: the chat join lists rows
+      arroyo.db never held, and a read that failed lists none. ``conversations_read`` says whether its
+      conversation, feed_entry and user_conversation tables were read in full, which is what saying no
+      row of them names a conversation rests on (:func:`load_arroyo_conversations`). Written only when
+      ``arroyo`` is given, which a partial extract does not do: it would carry the message numbers of
+      every conversation.
+
+    Both are additive, so the version stays 3 (``cache_controller_report.load_chat_links``).
     """
-    manifest = {"version": 3, "report": "Conversations", "by_key": {}, "by_message": {}}
+    manifest = {"version": 3, "report": "Conversations", "by_key": {}, "by_message": {},
+                "messages": {}, "by_content_id": {}, "conversations": {}}
     for conv in conversations:
         # the title travels as plain text: it is a value for another report to escape, not markup
         # (the parser encodes emoji as &#NNNN; character references)
         title = html.unescape(conv["title"])
+        anchors, numbered = {}, set()
         for msg in conv["messages"]:
-            # Only messages that actually have a recovered attachment are listed — as in the legacy
-            # manifest. A message with no cached file can never be what a cache entry points at, and
-            # indexing every message would make this file grow with the whole chat history.
+            # a message the server never numbered is listed by its client id, as it is anchored
+            ident = msg["smid"] or (f'c{msg["cmid"]}' if msg.get("cmid") else "")
+            if ident:
+                anchors.setdefault(ident, msg["anchor"])
+            # the rows of one message (one per part) carry the same ids: one record per message
+            key = arroyo_content.message_key(msg["smid"], msg.get("cmid"))
+            if msg.get("content_ids") and ident and key not in numbered:
+                numbered.add(key)
+                for cid, rule in msg["content_ids"]:
+                    manifest["by_content_id"].setdefault(cid, []).append(
+                        {"conversation_id": conv["id"], "server_message_id": ident,
+                         "rule": rule})
             if not msg["atts"]:
                 continue
             record = {"conversation_id": conv["id"], "server_message_id": msg["smid"],
                       "anchor": msg["anchor"], "title": title,
                       "href": f'Conversations/{conv["page"]}#{msg["anchor"]}'}
             manifest["by_message"].setdefault(f'{conv["id"]}|{msg["smid"]}', []).append(record)
-            # one message can hold several cached files; each is a way into the same message
-            for att in msg["atts"]:
+            # one message can hold several cached files; each is a way into the same message —
+            # once per key, though two of its files (the same bytes) can name the same entry
+            keys = []
+            for att in _all_files(msg["atts"]):
                 key = att.get("cache_key")
-                if key:
+                if key and key not in keys:
+                    keys.append(key)
                     manifest["by_key"].setdefault(key, []).append(record)
+        if anchors:
+            manifest["messages"][conv["id"]] = {"title": title,
+                                                "href": f'Conversations/{conv["page"]}',
+                                                "anchors": anchors}
+        manifest["conversations"][conv["id"]] = {"title": title,
+                                                 "href": f'Conversations/{conv["page"]}',
+                                                 "anchor": f'conv-{conv["id"]}',
+                                                 "messages": conv.get("n_messages", 0),
+                                                 "in_arroyo": bool(conv.get("in_arroyo"))}
+    if arroyo is not None:
+        manifest["arroyo"] = {
+            "read": bool(arroyo.get("read")),
+            "conversations_read": bool(arroyo.get("conversations_read")),
+            "account": arroyo.get("account") or "",
+            "held": {conv: sorted(int(n) for n in numbers)
+                     for conv, numbers in sorted((arroyo.get("held") or {}).items())}}
     try:
         with open(os.path.join(outdir, "cache_links.json"), "w", encoding="utf-8") as fh:
             json.dump(manifest, fh)
@@ -2015,9 +2242,19 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
     # rendered rows actually point at.
     by_conv, drop_stats = build_messages(msg_df, cachefiles_dir, os.path.join(outdir, "media"),
                                          timefmt, cache_key_for, owner_user_id, owner_names)
-    conversations = build_conversations(by_conv, contacts, groups,
-                                        load_arroyo_conversations(arroyo, msg_df), contact_links,
-                                        timefmt)
+    # what arroyo.db holds, read from it directly: the cache_controller report ties a claim naming a
+    # message it does not hold to the conversation (write_cache_links' `arroyo`)
+    facts = {}
+    arroyo_info = load_arroyo_conversations(arroyo, msg_df, facts)
+    content_ids, held = load_arroyo_messages(arroyo)
+    conversations = build_conversations(by_conv, contacts, groups, arroyo_info, contact_links,
+                                        timefmt, held=held)
+    for conv in conversations:
+        for msg in conv.get("messages") or ():
+            ids = content_ids.get((conv["id"].lower(),
+                                   arroyo_content.message_key(msg.get("smid"), msg.get("cmid"))))
+            if ids:
+                msg["content_ids"] = ids
 
     # The closure's view: two kinds, because a conversation and the messages inside it are separately
     # selectable. A message's *store* id is qualified with its conversation — a message number
@@ -2068,15 +2305,20 @@ def index(msg_df, friends_df, group_df, outdir, cachefiles_dir, arroyo=None, tz=
             sender_ct = (contact_links.get(str(msg.get("sender_uid") or "").lower()) or {}).get("anchor")
             if sender_ct:
                 sel_msg.link(partial_report.EDGE_MESSAGE_SENDER, msg_row, "ct", sender_ct)
-            for att in msg.get("atts") or ():
-                if att and att.get("cache_key"):
+            for att in _all_files(msg.get("atts")):
+                if att.get("cache_key"):
                     sel_msg.link(partial_report.EDGE_MESSAGE_CACHE, msg_row, "cc",
                                  f'ck-{att["cache_key"]}')
 
     return partial_report.Stage("conv", conversations, sel_conv,
                                 indexes={"conv": sel_conv, "msg": sel_msg},
                                 outdir=outdir, tz_label=tz_label, run_id=run_id,
-                                contact_links=contact_links, drop_stats=drop_stats)
+                                contact_links=contact_links, drop_stats=drop_stats,
+                                arroyo={"read": held is not None,
+                                        "conversations_read": facts.get("conversations_read",
+                                                                        False),
+                                        "account": facts.get("account", ""),
+                                        "held": held or {}})
 
 
 def _prune_media(outdir, conversations):
@@ -2096,7 +2338,7 @@ def _prune_media(outdir, conversations):
         return 0
     keep = {os.path.basename(att["rel"])
             for conv in conversations for msg in conv.get("messages") or ()
-            for att in msg.get("atts") or () if att and att.get("rel")}
+            for att in _all_files(msg.get("atts")) if att.get("rel")}
     removed = 0
     for name in os.listdir(media_dir):
         if name in keep:
@@ -2165,7 +2407,11 @@ def render(stage, closure=None, prov=None):
     report = generate_index(conversations, outdir, tz_label, run_id, stats, closure=closure,
                             prov=prov)
     write_page_manifest(conversations, outdir)
-    write_cache_links(conversations, outdir)
+    # what arroyo.db holds goes into a full report's manifest only: an extract's would list the
+    # message numbers of every conversation, and nothing reads it back (a partial run takes its links
+    # from the full report folder)
+    write_cache_links(conversations, outdir,
+                      arroyo=stage.get("arroyo") if closure is None else None)
 
     logger.info(f"Conversations report: {os.path.abspath(report)}")
     if closure is None:

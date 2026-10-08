@@ -1,4 +1,21 @@
+# nuitka-project: --noinclude-pydoc-mode=allow
+# FreeSimpleGUI imports pydoc at module scope, for an SDK help browser this app never opens, and Nuitka's
+# anti-bloat plugin warns about it on every build. "allow" keeps pydoc in the build — leaving it out
+# breaks "import FreeSimpleGUI" — and only stops the warning. Nuitka reads the line above from this
+# file, so the portable EXE (build_nuitka.cmd) and the MSI (uv run build) both get it.
+# nuitka-project: --user-plugin={MAIN_DIRECTORY}/build_tools/nuitka_tcl_zipfs.py
+# The Python install manager's CPython keeps the Tcl/Tk 9 script libraries inside its Tcl DLLs, where
+# Nuitka's tk-inter plugin does not look ("Could not find Tcl"); the plugin above extracts them for it.
 import sys
+
+# Re-entry as a thumbnail worker (scripts/data/poster_worker.py): a packaged build has no interpreter
+# to run it with, so the program starts itself with this flag — once per worker, and again after every
+# video that hangs the decoder. It needs none of the imports below, and importing the GUI and the
+# parsers made every one of those restarts seconds slower. main() still handles the flag as well.
+if len(sys.argv) > 1 and sys.argv[1].lstrip("-/").lower() in ("poster-worker", "posterworker"):
+    from scripts.data import poster_worker as _poster_worker
+    sys.exit(_poster_worker.main(sys.argv[2:]))
+
 import FreeSimpleGUI as sg
 from scripts import ParseSnapchat_iOS
 from scripts import ParseSnapchat_Android
@@ -9,7 +26,11 @@ from scripts import app_version
 from scripts import selection_file
 from scripts import source_fingerprint
 from scripts import partial_report
+from scripts import global_search
+from scripts import report_ui
+from scripts import cloud_refresh
 from scripts import hidpi
+from scripts import progress
 import os
 import json
 import logging
@@ -441,6 +462,12 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
                          f'<div class="d">{desc}</div></li>')
     if not items:
         return
+    # One search over every report of this folder (scripts/global_search.py), rewritten with the index
+    # so it always lists the reports the folder holds.
+    search = global_search.write_page(os.path.join(root_dir, reports_subdir), closure=closure,
+                                      prov=prov, platform=platform)
+    # The words and the date/time window, sent to the search page in its fragment.
+    search_form = global_search.index_form(f"{reports_subdir}/{global_search.PAGE}") if search else ""
     generated = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # What the run read, and its hashes, on the face of the report rather than only in sources.json —
     # a partial report built later re-checks them and says whether they still match.
@@ -506,23 +533,44 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
                '<span class="ab none">(none provided)</span>')
         return f'<div class="arow"><span class="an">{label}</span>{val}</div>'
 
+    cloud_row, cloud_banner = "", ""
+    try:
+        with open(os.path.join(root_dir, reports_subdir, "Memories", "cloud_media.json"),
+                  encoding="utf-8") as fh:
+            cloud = (json.load(fh) or {}).get("provenance") or {}
+    except (OSError, ValueError):
+        cloud = {}
+    if cloud:
+        notes = "; ".join(_esc(x.get("note") or "") for x in cloud.get("sessions") or [])
+        cloud_row = (f'<div class="arow"><span class="an">Retrieved from Snapchat&#39;s servers</span>'
+                     f'<span class="ab">{cloud.get("files", 0)} file(s) for '
+                     f'{cloud.get("memories", 0)} Memory/Memories, {_esc(cloud.get("first_utc"))} '
+                     f'&hellip; {_esc(cloud.get("last_utc"))} UTC, under: {notes}. Not device '
+                     f'evidence: every request is recorded in CloudDownloads/cloud_manifest.jsonl.'
+                     f'</span></div>')
+        cloud_banner = (f'<div style="background:#e3f1fb;border:1px dashed #5b9bc8;color:#0d4a75;'
+                        f'padding:10px 26px;font-size:13px">&#9729; These reports include media '
+                        f'retrieved from Snapchat&#39;s servers at the examiner&#39;s request &mdash; '
+                        f'not device evidence &mdash; under: {notes}</div>')
     sources = (f'<details class="sources"><summary class="stitle">Sources &mdash; what this run read, '
                f'and its hashes</summary><div class="sbody">'
                f'{_src_row("Extraction", zip_path)}'
                f'{_src_row("Keychain / keystore", keychain_path)}'
-               f'{artifact_rows}</div></details>')
+               f'{cloud_row}{artifact_rows}</div></details>')
     partial_css, banner, _figures = partial_report.page_chrome(closure, None, prov)
     provenance = (partial_report.provenance_html(closure, prov, open_by_default=True)
                   if closure is not None else "")
     html = f"""<!doctype html><html><head><meta charset="utf-8"><title>Snapchat Auto v{get_version()} report</title>
-<style>
- body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f4f4f8;color:#1b1b1f;margin:0}}
+{report_ui.emoji_font_link(reports_subdir + "/")}<style>
+ body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif,{report_ui.EMOJI_FONT_STACK};background:#f4f4f8;
+   color:#1b1b1f;margin:0}}
  header{{background:#2d2d71;color:#fff;padding:18px 26px}} header h1{{margin:0;font-size:20px}}
  header .sub{{opacity:.85;font-size:13px;margin-top:4px}}
  ul{{list-style:none;padding:18px 26px 8px;max-width:920px;margin:0}}
  li{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px 18px;margin-bottom:10px}}
  li a{{font-size:16px;font-weight:600;color:#2d2d71;text-decoration:none}} li a:hover{{text-decoration:underline}}
  .d{{color:#666;font-size:13px;margin-top:3px}}
+{global_search.INDEX_CSS if search else ""}
  /* The sources block sits BELOW the report links and starts closed. It is provenance, not
     navigation: spelled out it ran to a screen and a half of hashes and pushed the links -- the
     reason anyone opens this page -- out of sight. */
@@ -545,7 +593,8 @@ def write_index(root_dir, reports_subdir="Reports", zip_path=None, keychain_path
 {partial_css}
 </style></head><body>
 <header><h1>Snapchat Auto v{get_version()} &mdash; Report index{" (Android)" if platform == "android" else ""}</h1><div class="sub">Generated {generated}</div></header>
-{banner}{provenance}
+{banner}{cloud_banner}{provenance}
+{search_form}
 <ul>{''.join(items)}</ul>
 {sources}
 </body></html>"""
@@ -566,7 +615,7 @@ def _map_timezone(tzval):
 
 def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="local",
         tile_server="", run_name=None, pause=False, hash_zip=False, partial=None,
-        legacy_reports=False):
+        legacy_reports=False, cloud=None):
     """Do one extraction + report run. Shared by the GUI and the command line.
 
     Everything for the run lives under a single ``Snapchat_Auto-<timestamp>`` folder inside
@@ -577,12 +626,18 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     ``pause`` waits for a keypress at the end — the GUI wants that so the console does not vanish;
     a scripted run must not, or it hangs forever with nobody there to press a key.
 
+    ``cloud`` (a :class:`cloud_memories.CloudRequest`) retrieves Memories media from Snapchat's
+    servers during the run, under the legal authority it records — never together with ``partial``,
+    and iOS only. See docs/cloud_download.md.
+
     ``partial`` (a :class:`partial_report.Request`) makes this a **partial** run: the same pipeline,
     rendering only the rows the examiner's selection names plus the related items they asked for, into
     ``Reports_partial_<stamp>/`` — never over the reports the selection was made in. The extraction
     itself is unchanged, and ``ExtractedData/`` from the full run is reused as it always is, so a
     partial run into the same run folder skips unzipping entirely.
     """
+    if cloud is not None and (partial is not None or os_mode != "ios"):
+        raise LookupError("a retrieval from Snapchat's servers is part of a full iOS run only")
     started = os.getcwd()
     # The keychain read is cached for the length of a run (the legacy and current Memories
     # reports both ask for it). Drop it here so a second run in the same process — the GUI stays
@@ -599,13 +654,20 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
     run_folder = os.path.abspath(".")
     add_log_file(".")
     logger.info(f"Run folder: {run_folder}")
+    # stages, a "still working" line into every long silence, and the timing summary at the end
+    progress.start_run()
+    # frames cut from cached video, kept by the video's hash so no run in this folder cuts one twice
+    from scripts.data import poster_worker
+    poster_worker.set_cache_dir(os.path.join(run_folder, ".thumbnail_cache"))
 
     try:
         if os_mode == "ios":
             logger.info("You chose iOS")
-            extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
+            with progress.stage("Extraction"):
+                extracted_files_dir = extract_zip.extract(zip_path, 'ios', dest="ExtractedData")
             if not os.path.exists("SnapFixedVideos"):
-                parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
+                with progress.stage("SnapFixedVideos"):
+                    parseSnapvideos_PREFETCH.main(extracted_files_dir[0])
             else:
                 logger.info("Found SnapFixedVideos folder, skipping that step")
             # A partial extract gets its own folder. Overwriting the reports the examiner ticked rows
@@ -619,27 +681,37 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                     partial.links_dir = os.path.abspath("Reports")
                 logger.info(f"Partial report: {os.path.abspath(reports_subdir)}")
                 partial_report.check_links_dir(partial.links_dir)
+            if partial is None:
+                # how this run was made, so a later retrieval can refresh it the same way
+                cloud_refresh.write_settings(
+                    run_folder, os="ios", padding=padding, tz=tz, tile_server=tile_server,
+                    legacy_reports=legacy_reports,
+                    zip=os.path.abspath(zip_path) if zip_path else "",
+                    keychain=os.path.abspath(keychain) if keychain else "")
             ParseSnapchat_iOS.main(extracted_files_dir[0], extracted_files_dir[1], keychain,
                                    padding=padding, tz=tz, report_dir="./" + reports_subdir,
                                    tile_server=tile_server,
                                    zip_path=os.path.abspath(zip_path) if zip_path else "",
                                    hash_zip=hash_zip, partial=partial,
-                                   legacy_reports=legacy_reports)
+                                   legacy_reports=legacy_reports, cloud=cloud)
             if partial is not None and partial.dry_run:
                 logger.info("--dry-run: no report was written")
                 return run_folder
             # Write the report index BEFORE the pause, so index.html exists when the "press any
             # key" prompt appears (previously the pause lived inside the parser and blocked this).
-            if partial is None:
-                write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
-                index_path = "index.html"
-            else:
-                # inside the extract, not beside it: the folder is the deliverable, so it carries its
-                # own index, its own provenance and its own manifest and can be handed over as it is
-                write_index(reports_subdir, ".", zip_path=zip_path, keychain_path=keychain,
-                            closure=partial.closure, prov=partial.prov)
-                index_path = os.path.join(reports_subdir, "index.html")
+            with progress.stage("Index and search page"):
+                if partial is None:
+                    write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain)
+                    index_path = "index.html"
+                else:
+                    # inside the extract, not beside it: the folder is the deliverable, so it carries
+                    # its own index, its own provenance and its own manifest and can be handed over as
+                    # it is
+                    write_index(reports_subdir, ".", zip_path=zip_path, keychain_path=keychain,
+                                closure=partial.closure, prov=partial.prov)
+                    index_path = os.path.join(reports_subdir, "index.html")
             logger.info(f"Report index: {os.path.abspath(index_path)}")
+            progress.finish_run()
             if pause:
                 os.system("pause")
         else:
@@ -648,16 +720,21 @@ def run(zip_path, keychain="", workdir=".", os_mode="ios", padding="both", tz="l
                 # the selection machinery is built on the iOS report set; refusing is honest, an
                 # extract that quietly ignored the selection would not be
                 raise LookupError("partial reports (--selection) are not available for Android yet")
-            extracted_root = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
+            with progress.stage("Extraction"):
+                extracted_root = extract_zip.extract(zip_path, 'android', dest="ExtractedData")
             ParseSnapchat_Android.main(extracted_root, keychain, padding=padding, tz=tz,
                                        report_dir="./Reports", tile_server=tile_server,
                                        zip_path=os.path.abspath(zip_path) if zip_path else "",
                                        hash_zip=hash_zip, legacy_reports=legacy_reports)
-            write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain, platform="android")
+            with progress.stage("Index and search page"):
+                write_index(".", "Reports", zip_path=zip_path, keychain_path=keychain,
+                            platform="android")
             logger.info(f"Report index: {os.path.abspath('index.html')}")
+            progress.finish_run()
             if pause:
                 os.system("pause")
     finally:
+        progress.finish_run()               # a run that stopped early still says where its time went
         os.chdir(started)
     return run_folder
 
@@ -680,6 +757,121 @@ def diag_keychain(path):
     return 0 if res["status"] == "ok" else 1
 
 
+def run_cloud_download(args):
+    """`--cloud-download <run folder> …`: retrieve from Snapchat's servers for a run folder that
+    already exists, and refresh its reports — targeted (Memories, Library/Caches, cache_controller)
+    when this build wrote them, else the whole pipeline again. Nothing is unzipped again, and the
+    examiner's saved selections are kept. Same options as a run's --cloud ones."""
+    if len(args) < 2 or not os.path.isdir(args[1]):
+        print("--cloud-download requires a run folder: Snapchat_Auto.exe --cloud-download <run "
+              "folder> --cloud missing --attest yes --authority \"…\"")
+        return 2
+    run_folder = os.path.abspath(args[1])
+    values, error = _parse_options(args[2:], _CLOUD_OPTIONS)
+    if error:
+        print(f"Snapchat Auto: {error}")
+        return 2
+    settings = cloud_refresh.load_settings(run_folder)
+    if settings and settings.get("os", "ios") != "ios":
+        print("Snapchat Auto: a retrieval from Snapchat's servers is iOS only.")
+        return 2
+    if not values.get("cloud") and not values.get("cloud-selection") and not values.get("cloud-snaps"):
+        print("Snapchat Auto: say what to retrieve with --cloud missing,incomplete (or "
+              "--cloud-selection / --cloud-snaps). Nothing was contacted.")
+        return 2
+    request, error = _cloud_request(values, "post-run", settings.get("tz") or "local")
+    if error:
+        print(f"Snapchat Auto: {error}")
+        return 2
+    add_log_file(run_folder)
+    return cloud_download_existing(run_folder, request, values.get("keychain") or "",
+                                   (values.get("refresh") or "targeted").lower())
+
+
+def cloud_download_existing(run_folder, request, keychain="", refresh="targeted"):
+    """Retrieve for an existing run folder and refresh its reports. The GUI and the CLI both end
+    here, so the two cannot refresh differently. Returns an exit code."""
+    settings = cloud_refresh.load_settings(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — retrieval from Snapchat's servers for {run_folder}")
+    keychain = keychain or settings.get("keychain") or ""
+    mode, why = cloud_refresh.refresh_mode(settings, refresh)
+    logger.info(f"Refresh: {mode} ({why})")
+    try:
+        if mode == "targeted":
+            cloud_refresh.targeted(run_folder, request, settings, keychain=keychain)
+            write_index(run_folder, "Reports", zip_path=settings.get("zip"), keychain_path=keychain)
+        else:
+            zip_path = settings.get("zip") or ""
+            if not os.path.isdir(os.path.join(run_folder, "ExtractedData")) or not zip_path:
+                print("Snapchat Auto: this run folder cannot be re-rendered: it records no extraction "
+                      "ZIP. Run it again with this version first (the extraction is reused).")
+                return 2
+            run(zip_path=zip_path, keychain=keychain, workdir=os.path.dirname(run_folder),
+                run_name=os.path.basename(run_folder), padding=settings.get("padding") or "both",
+                tz=settings.get("tz") or "local", tile_server=settings.get("tile_server") or "",
+                legacy_reports=bool(settings.get("legacy_reports")), cloud=request)
+    except Exception as error:                                     # noqa: BLE001
+        logger.error(f"Retrieval failed: {error}")
+        return 1
+    logger.info(f"Done: {run_folder}")
+    return 0
+
+
+def run_trace_ids(args):
+    """`--trace-ids <run folder> <id> [<id>…]`: where each identifier occurs in a run's extracted
+    files — text, binary and base64 forms, row by row in every database, both -wal readings and
+    superseded frames. Run on the machine that holds the case: it reports locations, never content,
+    so what comes back can be discussed without the data. See scripts/trace_ids.py."""
+    from scripts import trace_ids
+    if len(args) < 3 or not os.path.isdir(args[1]):
+        print("--trace-ids requires a run folder and at least one identifier:\n"
+              "  Snapchat_Auto.exe --trace-ids <run folder> <id> [<id> ...]   (or @ids.txt)")
+        return trace_ids.EXIT_USAGE
+    run_folder = args[1]
+    try:
+        identifiers = trace_ids.read_identifiers(args[2:])
+    except OSError as error:
+        print(f"--trace-ids: {error}")
+        return trace_ids.EXIT_USAGE
+    if not identifiers:
+        print("--trace-ids: no identifier given")
+        return trace_ids.EXIT_USAGE
+    add_log_file(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — --trace-ids over {trace_ids.extracted_root(run_folder)}")
+    payload = trace_ids.trace(run_folder, identifiers)
+    for line in trace_ids.describe(payload):
+        logger.info(line)
+    out = trace_ids.write_report(run_folder, payload)
+    logger.info(f"{len(payload['hits'])} location(s) in {payload['files_scanned']} files "
+                f"({payload['elapsed_s']} s). Written to {out} — locations only, no content.")
+    return trace_ids.EXIT_FOUND if payload["hits"] else trace_ids.EXIT_NONE
+
+
+def run_survey_claim_links(args):
+    """`--survey-claim-links <run folder>`: for every cache claim, whether the reports tie it to a
+    chat message, and where in arroyo.db the ids its key carries occur — grouped by key shape. Run
+    on the machine that holds the case: shapes, counts and field paths, never an id or a value.
+    See scripts/claim_link_survey.py."""
+    from scripts import claim_link_survey
+    if len(args) != 2 or not os.path.isdir(args[1]):
+        print("--survey-claim-links requires a run folder:\n"
+              "  Snapchat_Auto.exe --survey-claim-links <run folder>")
+        return claim_link_survey.EXIT_USAGE
+    run_folder = args[1]
+    add_log_file(run_folder)
+    logger.info(f"Snapchat Auto v{get_version()} — --survey-claim-links over {run_folder}")
+    payload = claim_link_survey.survey(run_folder)
+    for line in claim_link_survey.describe(payload):
+        logger.info(line)
+    if not payload["claims"] or not payload["sources"]["arroyo"]:
+        logger.info("Nothing to survey: the run holds no cache_controller.db claims or no arroyo.db")
+        return claim_link_survey.EXIT_NOTHING
+    out = claim_link_survey.write_report(run_folder, payload)
+    logger.info(f"Written to {out} ({payload['elapsed_s']} s) — key shapes, counts and field paths; "
+                f"no id, key or value.")
+    return claim_link_survey.EXIT_OK
+
+
 def print_usage():
     print(f"Snapchat Auto v{get_version()}\n\n"
           "usage: Snapchat_Auto.exe [options]\n\n"
@@ -697,6 +889,9 @@ def print_usage():
           "  --hash-zip yes          Also record the extraction ZIP's MD5 and SHA-256. Off by\n"
           "                          default: tens of GB is a long read, and it is the database\n"
           "                          hashes that bind what the reports contain.\n"
+          "  --thumbnail-minutes <n> Stop each pass that cuts thumbnails out of cached video\n"
+          "                          after n minutes (videos not reached are listed without one,\n"
+          "                          as not attempted). No limit by default.\n"
           "  --legacy-reports yes    Also produce the two superseded reports (the single-page\n"
           "                          Communications report and the legacy Memories / My Eyes Only\n"
           "                          report). Off by default: the Conversations, Contacts and\n"
@@ -764,6 +959,27 @@ def print_usage():
           "  --make-selection <out.json> --items <items.json> [--relations <spec>] [--note <text>]\n"
           "                          Build a selection from identifiers, without importing anything:\n"
           "                          items.json is a list of {\"kind\": ..., <identifiers>} objects.\n\n"
+          "Retrieve Memories media from Snapchat's servers (off unless asked; iOS full runs and\n"
+          "--cloud-download only). It requests only the addresses the device recorded for each\n"
+          "Memory, decrypts with the Memory's own key, keeps what comes back in CloudDownloads/ apart\n"
+          "from the evidence and records every request. See docs/cloud_download.md:\n"
+          "  --cloud <scopes>        missing, incomplete, selection, snaps (comma separated).\n"
+          "  --attest yes            You hold the legal authority to retrieve this data from\n"
+          "                          Snapchat's servers. Required.\n"
+          "  --authority <text>      What that authority is (warrant and number, consent and who\n"
+          "                          gave it, ...). Required; stated wherever the media is shown.\n"
+          "  --cloud-selection <file>   The Memories in a saved selection file.\n"
+          "  --cloud-snaps <ids|@file>  Snap ids, comma/space/line separated.\n"
+          "  --cloud-dates <rules|@file>  '<timestamp[,timestamp...]|*>|<from>|<to>|include' rules,\n"
+          "                          ';' separated, dates in the run's timezone (YYYY-MM-DD[ HH:MM]),\n"
+          "                          either end may be empty. A Memory is retrieved when an include\n"
+          "                          rule matches (or there is none) and no exclude rule does.\n"
+          "                          Timestamps: ZCAPTURETIMEUTC, ZCREATETIMEUTC, ZGALLERYENTRY.\n"
+          "                          ZCREATETIMEUTC, ..., MEMDATA, or * for every one.\n"
+          "  --cloud-delay <s> --cloud-jitter <s> --cloud-max-per-min <n> --cloud-max-failures <n>\n"
+          "  --cloud-timeout <s>     Pace (defaults 4, 2, 10, 5, 60).\n"
+          "  --cloud-overlays yes|no --cloud-redownload yes|no --cloud-allow-host <host>\n"
+          "  --refresh targeted|full (--cloud-download only) Which reports to rebuild after.\n\n"
           "Display scaling (Windows). Add these to any of the above, or use them alone with the\n"
           "GUI. The first two are also read from the environment (SNAPCHAT_AUTO_DPI_AWARENESS,\n"
           "SNAPCHAT_AUTO_DPI_SCALE) and from \"dpi_awareness\" / \"dpi_scale\" in\n"
@@ -784,6 +1000,26 @@ def print_usage():
           "  --diag-keychain <file>  Check a keychain file and report what it holds, without\n"
           "                          running an extraction. Exit code 0 if egocipher was\n"
           "                          recovered, 1 otherwise.\n"
+          "  --cloud-download <run folder> [options]\n"
+          "                          Retrieve Memories media from Snapchat's servers for a run that\n"
+          "                          already exists, and refresh its reports (see below).\n"
+          "  --trace-ids <run folder> <id> [<id> ...]\n"
+          "                          Search every file the run extracted for each identifier (a\n"
+          "                          snap id, a CACHE_KEY, a claim key, ... or @file, one per line)\n"
+          "                          as text, UTF-16, hex, raw and little-endian UUID bytes and\n"
+          "                          base64; databases row by row, with and without the -wal, and\n"
+          "                          superseded -wal frames. Lists where each occurs - file, table,\n"
+          "                          column, row, offset - never the content, in the log and in\n"
+          "                          trace_ids_<stamp>.json in the run folder. Exit code 0 if\n"
+          "                          anything was found, 1 if nothing, 2 for bad arguments.\n"
+          "  --survey-claim-links <run folder>\n"
+          "                          For every cache_controller.db claim: whether the reports tie\n"
+          "                          it to a chat message, and where in arroyo.db the ids its key\n"
+          "                          carries occur (table, column, protobuf field, content_type),\n"
+          "                          grouped by key shape. Shapes, counts and field paths only -\n"
+          "                          no id or value - in the log and claim_link_survey_<stamp>.json\n"
+          "                          in the run folder. Exit code 0 when surveyed, 1 if the run\n"
+          "                          has no claims or no arroyo.db, 2 for bad arguments.\n"
           "  --help, -h              Show this message.\n\n"
           "A headless run never pauses for a keypress, so it is safe to call from a script.")
 
@@ -792,6 +1028,7 @@ def print_usage():
 # idiom requires — hence `--dry-run yes` rather than a bare `--dry-run`.
 _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz": True,
                 "padding": True, "tile-server": True, "run-name": True, "hash-zip": True,
+                "thumbnail-minutes": True,
                 # a partial run: the same pipeline, rendering only the rows a selection names
                 "selection": True, "relations": True, "case-ref": True, "unresolved": True,
                 "sources-mismatch": True, "version-mismatch": True, "no-reuse": True,
@@ -799,7 +1036,96 @@ _CLI_OPTIONS = {"zip": True, "keychain": True, "workdir": True, "os": True, "tz"
                 # expand the selection and write it back out for checking, instead of building
                 "expand-selection": True,
                 # the two superseded reports, off unless asked for on either path
-                "legacy-reports": True}
+                "legacy-reports": True,
+                # retrieval from Snapchat's servers (docs/cloud_download.md) — needs the next two
+                **{name: True for name in ("cloud", "authority", "attest", "cloud-selection",
+                                           "cloud-snaps", "cloud-dates", "cloud-delay",
+                                           "cloud-jitter", "cloud-max-per-min",
+                                           "cloud-max-failures", "cloud-timeout",
+                                           "cloud-overlays", "cloud-redownload",
+                                           "cloud-allow-host")}}
+
+# `--cloud-download <run folder>`: the same retrieval options, for a run folder that already exists.
+_CLOUD_OPTIONS = {name: True for name in ("keychain", "refresh", "cloud", "authority", "attest",
+                                          "cloud-selection", "cloud-snaps", "cloud-dates",
+                                          "cloud-delay", "cloud-jitter", "cloud-max-per-min",
+                                          "cloud-max-failures", "cloud-timeout", "cloud-overlays",
+                                          "cloud-redownload", "cloud-allow-host")}
+
+
+def _cloud_request(values, entry_point, tz="local"):
+    """Build the :class:`cloud_memories.CloudRequest` both front ends hand to a run.
+
+    Returns ``(request, error)``. Every refusal happens here, before anything is contacted: no
+    attestation or no note of the legal authority, a scope that names nothing, a date rule that does
+    not read, a pace that makes no sense.
+    """
+    from scripts import cloud_download, cloud_memories
+    scopes = {x.strip().lower() for x in (values.get("cloud") or "").split(",") if x.strip()}
+    unknown = scopes - set(cloud_memories.SCOPES)
+    if unknown:
+        return None, (f"--cloud takes {', '.join(cloud_memories.SCOPES)} (comma separated), not "
+                      f"{', '.join(sorted(unknown))}")
+    authority = cloud_download.Authority(
+        (values.get("authority") or "").strip(), _yes(values.get("attest")),
+        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    pace = cloud_download.Pace()
+    try:
+        for option, name, cast in (("cloud-delay", "delay_s", float),
+                                   ("cloud-jitter", "jitter_s", float),
+                                   ("cloud-max-per-min", "max_per_min", int),
+                                   ("cloud-max-failures", "max_failures", int),
+                                   ("cloud-timeout", "timeout_s", float)):
+            if values.get(option) not in (None, ""):
+                setattr(pace, name, cast(values[option]))
+    except ValueError as error:
+        return None, f"a --cloud-* pace option is not a number ({error})"
+    request = cloud_memories.CloudRequest(
+        authority, scopes=scopes, pace=pace, entry_point=entry_point, tz=tz,
+        overlays=not str(values.get("cloud-overlays") or "yes").lower().startswith("n"),
+        redownload=_yes(values.get("cloud-redownload")),
+        allow_hosts=tuple(h.strip() for h in (values.get("cloud-allow-host") or "").split(",")
+                          if h.strip()))
+    if values.get("cloud-selection"):
+        path = values["cloud-selection"]
+        try:
+            request.selection_ids = cloud_memories.snap_ids_from_selection(path)
+        except Exception as error:                              # noqa: BLE001
+            return None, f"--cloud-selection could not be read: {error}"
+        request.selection_path = os.path.abspath(path)
+        request.scopes.add("selection")
+    if values.get("cloud-snaps"):
+        text = values["cloud-snaps"]
+        if text.startswith("@"):
+            try:
+                with open(text[1:], encoding="utf-8-sig") as fh:
+                    text = fh.read()
+            except OSError as error:
+                return None, f"--cloud-snaps: {error}"
+        ids, rejected = cloud_memories.snap_ids_from_text(text)
+        if rejected:
+            return None, f"--cloud-snaps: not a snap id: {', '.join(rejected[:5])}"
+        request.snap_ids = set(ids)
+        request.scopes.add("snaps")
+    spec = values.get("cloud-dates") or ""
+    if spec.startswith("@"):
+        try:
+            with open(spec[1:], encoding="utf-8-sig") as fh:
+                spec = ";".join(line.strip() for line in fh if line.strip()
+                                and not line.lstrip().startswith("#"))
+        except OSError as error:
+            return None, f"--cloud-dates: {error}"
+    if spec:
+        try:
+            request.date_rules = cloud_memories.rules_from_spec(spec, tz)
+        except ValueError as error:
+            return None, f"--cloud-dates: {error}"
+        request.date_spec = spec
+    problems = request.problems()
+    if problems:
+        return None, ("Nothing was contacted: " + "; ".join(problems) + ". A retrieval from "
+                      "Snapchat's servers needs --attest yes and --authority \"<what authorises it>\".")
+    return request, None
 
 
 def _yes(value):
@@ -961,7 +1287,31 @@ def run_cli(args):
         if error:
             print(f"Snapchat Auto: {error}")
             return 2
+    cloud = None
+    if any(name.startswith("cloud") or name in ("authority", "attest") for name in values):
+        if partial is not None or os_mode != "ios":
+            print("Snapchat Auto: a retrieval from Snapchat's servers is part of a full iOS run only "
+                  "(not with --selection, not on Android). Nothing was contacted.")
+            return 2
+        if not values.get("cloud") and not values.get("cloud-selection") \
+                and not values.get("cloud-snaps"):
+            print("Snapchat Auto: say what to retrieve with --cloud missing,incomplete (or "
+                  "--cloud-selection / --cloud-snaps). Nothing was contacted.")
+            return 2
+        cloud, error = _cloud_request(values, "run", _map_timezone(values.get("tz", "local")))
+        if error:
+            print(f"Snapchat Auto: {error}")
+            return 2
 
+    if values.get("thumbnail-minutes"):
+        # a headless run has no Skip button: a limit on each thumbnail pass is how it keeps one short
+        try:
+            minutes = float(values["thumbnail-minutes"])
+        except ValueError:
+            print("Snapchat Auto: --thumbnail-minutes takes a number of minutes")
+            return 2
+        from scripts.data import poster_worker
+        poster_worker.set_budget(minutes * 60 if minutes > 0 else None)
     try:
         folder = run(zip_path=zip_path, keychain=keychain,
                      workdir=values.get("workdir", "."), os_mode=os_mode, padding=padding,
@@ -970,7 +1320,8 @@ def run_cli(args):
                      run_name=values.get("run-name"), pause=False,
                      hash_zip=(values.get("hash-zip") or "").lower()
                               in ("yes", "y", "true", "1"),
-                     partial=partial, legacy_reports=_yes(values.get("legacy-reports")))
+                     partial=partial, legacy_reports=_yes(values.get("legacy-reports")),
+                     cloud=cloud)
     except partial_report.EvidenceMismatch as error:
         # Its own exit code: a script driving several extractions needs to tell "this is the wrong
         # evidence for that selection" apart from "the run broke".
@@ -1252,6 +1603,56 @@ def _handle_help(event):
     return True
 
 
+def _saved_policy(cfg):
+    """The saved relation choices this build still has a relation for, or {} when none were saved."""
+    saved = cfg.get("partial", {}).get("relations")
+    return ({key: bool(on) for key, on in saved.items() if key in partial_report.RELATION_KEYS}
+            if isinstance(saved, dict) else {})
+
+
+def _saved_relations(cfg):
+    """The relation policy the settings window starts with: the saved one, and an answer for each
+    relation it lacks.
+
+    A saved policy names every relation of the build that saved it, and nothing else — the dialog's Ok
+    writes all of them, and so does the main window — so a relation it lacks is one a later build
+    added. The dialog reads an absent box as off, and the run spec (``_relations_spec``) turns off
+    whatever it does not name, so without an answer a new relation that is on by default would stay
+    off for every examiner who had ever pressed Ok. Which answer depends on what was saved: a policy
+    that is all off or all on is *Minimal* or *Everything* — pressed or ticked by hand, the same
+    choice — and a new relation takes that same answer, so a containment-only extract stays
+    containment-only; a hand-mixed policy starts it at the build's default. Every saved choice stands.
+    A key no relation of this build carries any more is dropped, so a renamed relation cannot make the
+    run refuse its own spec.
+    """
+    saved = _saved_policy(cfg)
+    if not saved:                        # nothing saved, or nothing this build knows
+        return dict(partial_report.PRESETS["recommended"])
+    answers = set(saved.values())
+    if len(answers) == 1:                # Minimal (all off) or Everything (all on)
+        fill = answers.pop()
+        base = {key: fill for key in partial_report.RELATION_KEYS}
+    else:                                # hand-mixed: a new relation starts at its default
+        base = partial_report.PRESETS["recommended"]
+    return {key: saved.get(key, base[key]) for key in partial_report.RELATION_KEYS}
+
+
+def _relations_added_since_saved(cfg):
+    """The relations this build has that the saved policy does not name — added since it was saved.
+
+    Empty when no policy was saved: then every relation starts at its default and none is new to
+    the examiner. The dialog marks these, so the answer each was given is seen before a run.
+    """
+    saved = _saved_policy(cfg)
+    return [key for key in partial_report.RELATION_KEYS if key not in saved] if saved else []
+
+
+def _policy_to_save(state):
+    """The relation state as the settings file keeps it: what was chosen, not which relations were
+    new when this session started — once saved, the policy names them all and none is new."""
+    return {key: value for key, value in state.items() if key != "added"}
+
+
 def _relations_spec(state):
     """The dialog's checkboxes as a ``--relations`` spec, so both front ends speak one vocabulary."""
     tokens = [key for key, on in state["relations"].items() if on]
@@ -1347,6 +1748,45 @@ def _describe_selection(window, path, values):
     note.update(" · ".join(bits), text_color="#eef3fa")
 
 
+def _cloud_ui():
+    """What scripts/cloud_gui.py needs from this window's toolkit setup, in one object."""
+    import types
+    return types.SimpleNamespace(sg=sg, HINT_FONT=HINT_FONT, SECTION_FONT=SECTION_FONT,
+                                 hint_color=hint_color, help=_help, handle_help=_handle_help,
+                                 hidpi=hidpi, build_request=_cloud_request)
+
+
+def _cloud_note(request, active=True):
+    """The one line under the main window's Snapchat's-servers checkbox."""
+    if request is None:
+        return "Not configured — nothing is contacted."
+    if not active:
+        return "Configured, but not ticked — nothing will be contacted."
+    what = ", ".join(sorted(request.scopes)) or "nothing"
+    dates = f", {len(request.date_rules)} date rule(s)" if request.date_rules else ""
+    return f"Will retrieve: {what}{dates} · authority recorded ✓"
+
+
+def _last_run_folder(workdir):
+    """The newest Snapchat_Auto run folder under ``workdir``, or ""."""
+    try:
+        runs = [os.path.join(workdir, d) for d in os.listdir(workdir)
+                if os.path.isdir(os.path.join(workdir, d, "ExtractedData"))]
+    except OSError:
+        return ""
+    return max(runs, key=os.path.getmtime) if runs else ""
+
+
+#: The relations dialog, in 100% pixels: the size it opens at, its floor, and the height its scrolling
+#: list *requests* — kept at or below the floor less the button row (about 50), or a shrunk window
+#: loses its buttons (see _relations_dialog).
+_RELATIONS_WINDOW = (844, 640)
+_RELATIONS_MIN = (700, 420)
+_RELATIONS_LIST_REQUEST = (820, 340)
+#: After the label of a relation the saved policy does not name (_relations_added_since_saved).
+NEW_RELATION_MARK = "  [new]"
+
+
 def _relations_dialog(state):
     """Which related items to bring in with the ticked rows. Edits *state* in place.
 
@@ -1361,15 +1801,23 @@ def _relations_dialog(state):
              "cc": "From a selected cache_controller entry",
              "cm": "From a selected Library/Caches file"}
 
+    # relations this build added since the saved policy was saved: marked, so the answer each was
+    # given (_saved_relations) is seen before a run rather than taken on trust
+    added = set(state.get("added") or ())
     rows = [[sg.Text("Always included, and not optional:")]]
     for line in partial_report.CONTAINMENT:
         rows.append([sg.Text(f"   • {line}", font=("", 9))])
+    if added:
+        rows.append([sg.Text(f"{NEW_RELATION_MARK.strip()}: added since your relation policy was saved"
+                             " — each starts as shown", font=HINT_FONT, text_color=hint_color(),
+                             pad=((0, 0), (10, 0)))])
     for src, relations in by_src.items():
         rows.append([sg.Text(label.get(src, src), font=("", 10, "bold"), pad=((0, 0), (10, 0)))])
         for relation in relations:
-            # The basis is on the "?" rather than under the checkbox: eleven relations with a
-            # paragraph each turned the choice everyone comes here to make into a wall of prose.
-            rows.append([sg.Checkbox(relation.label, default=bool(state["relations"].get(relation.key)),
+            # The basis is on the "?" rather than under the checkbox: a paragraph under every
+            # relation turned the choice everyone comes here to make into a wall of prose.
+            text = relation.label + (NEW_RELATION_MARK if relation.key in added else "")
+            rows.append([sg.Checkbox(text, default=bool(state["relations"].get(relation.key)),
                                      key=f"rel_{relation.key}"),
                          _help(relation.basis, title=relation.label)])
     # The last two are not relations — they set the scope of the whole extract — so they sit under
@@ -1394,14 +1842,24 @@ def _relations_dialog(state):
                        'It is one question about the run rather than a relation between rows, so it '
                        'is asked once, on the main window, and applies to a full report and to an '
                        'extract alike.', title="The legacy reports")])
-    rows.append([sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
-                 sg.Button("Ok"), sg.Button("Cancel")])
+    # Outside the scrolling list, as on the settings window: Ok scrolled off the bottom is the same as
+    # no Ok at all, and the list is taller than the window it opens in.
+    buttons = [sg.Push(), sg.Button("Minimal"), sg.Button("Recommended"), sg.Button("Everything"),
+               sg.Button("Ok"), sg.Button("Cancel")]
 
+    # The Column's size is what it *requests* — a floor, not the size it opens at. Tk's packer takes
+    # space from the last-packed row first, so a Column requesting more than the window's minimum
+    # height less the button row would push the buttons out of a shrunk window, beyond the reach of
+    # the scrollbar too. It stays small; the window opens at the size wanted and expand_y gives the
+    # list the rest. Do not put 580 back on the Column.
     window = sg.Window("Related items to include",
-                       [[sg.Column(rows, scrollable=True, vertical_scroll_only=True,
-                                   expand_x=True, expand_y=True, size=hidpi.px2((820, 580)))]],
-                       modal=True, keep_on_top=True, resizable=True, finalize=True)
-    window.set_min_size(hidpi.px2((700, 420)))
+                       [[sg.Column(rows, key="relations_form", scrollable=True,
+                                   vertical_scroll_only=True, expand_x=True, expand_y=True,
+                                   size=hidpi.px2(_RELATIONS_LIST_REQUEST))],
+                        buttons],
+                       size=hidpi.px2(_RELATIONS_WINDOW), modal=True, keep_on_top=True,
+                       resizable=True, finalize=True)
+    window.set_min_size(hidpi.px2(_RELATIONS_MIN))
     try:
         while True:
             event, values = window.read()
@@ -1421,6 +1879,7 @@ def _relations_dialog(state):
                 state["relations"] = {r.key: bool(values[f"rel_{r.key}"])
                                      for r in partial_report.RELATIONS}
                 state["transitive"] = bool(values["transitive"])
+                state.pop("added", None)        # answered now: none is new to the examiner any more
                 # legacy_reports is deliberately not read here: it belongs to the main window, and
                 # this dialog only reports what it is set to.
                 return
@@ -1429,7 +1888,9 @@ def _relations_dialog(state):
 
 
 #: How much of the screen the form's viewport may take, and the floor below which it scrolls anyway.
-_VIEW_MAX = (1000, 880)
+#: The height grew with the Snapchat's-servers section (1.9) so the whole form still opens unscrolled
+#: on a screen with the room; a smaller one scrolls, as it already did.
+_VIEW_MAX = (1000, 960)
 _VIEW_MIN = (720, 420)
 #: Room for the title bar, the Ok/Cancel row and the taskbar.
 _VIEW_MARGIN = (200, 220)
@@ -1471,11 +1932,12 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
     has_zip, has_kc = bool(cfg.get("zip")), bool(cfg.get("keychain"))
     # The relation policy for a partial run, remembered between runs (the selection file and the case
     # reference are not — see the hints below the fields).
-    relation_state = {"relations": dict(cfg.get("partial", {}).get("relations")
-                                        or partial_report.PRESETS["recommended"]),
+    relation_state = {"relations": _saved_relations(cfg),
                       "transitive": bool(cfg.get("partial", {}).get("transitive")),
                       # one setting, on the main window (the dialog only states it)
-                      "legacy_reports": bool(cfg.get("legacy_reports"))}
+                      "legacy_reports": bool(cfg.get("legacy_reports")),
+                      # marked in the dialog; never saved (_policy_to_save)
+                      "added": _relations_added_since_saved(cfg)}
     layout = [
         [sg.Text("Snapchat Auto", font=(BASE_FONT[0], BASE_FONT[1] + 2, "bold")), sg.Push(),
          sg.Text("Text size"),
@@ -1572,6 +2034,28 @@ def build_settings_window(cfg, prefill=None, relations=None, update_note=""):
         [sg.Text('', key="selection_note", font=HINT_FONT, text_color=hint_color())],
         [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
 
+        [sg.Text("Snapchat's servers (optional, iOS)", font=SECTION_FONT),
+         _help("Retrieve Memories media from Snapchat's servers: the copies the device itself "
+               "recorded the addresses of, decrypted with the key the device holds for each Memory. "
+               "For Memories whose media the extraction does not hold, or holds only in part — and "
+               "to prove that a cached file nothing on the device connects to its Memory is that "
+               "Memory's media.\n\n"
+               "Nothing is contacted unless you ask, and only after you confirm holding the legal "
+               "authority and record what it is — for every retrieval, since an authority belongs "
+               "to a case. What comes back is not device evidence: it is kept apart, marked ☁ "
+               "wherever it is shown, and the authority is stated beside it.\n\n"
+               "During this run, or later on a run folder that already exists (no unzipping "
+               "again). See docs/cloud_download.md.", title="Snapchat's servers")],
+        # Two rows, deliberately: the form is sized to open without scrolling (test_gui_window).
+        [sg.Checkbox("Retrieve during this run", key="cloud_run", enable_events=True),
+         sg.Button("Configure…", key="cloud_configure"),
+         sg.Text("Not configured — nothing is contacted.", key="cloud_note", font=HINT_FONT,
+                 text_color=hint_color(), expand_x=True),
+         sg.Button("For an existing run…", key="cloud_existing",
+                   tooltip="Retrieve for a run folder that already exists, and refresh its reports "
+                           "(nothing is unzipped again)")],
+        [sg.HorizontalSeparator(pad=((0, 0), (12, 8)))],
+
         [sg.Text('Updates', font=SECTION_FONT)],
         [sg.Text('Folder with newer builds (optional)'),
          _help('A folder where your organization publishes new builds of this tool (e.g. a '
@@ -1655,6 +2139,12 @@ def main(args):
         sys.exit(0)
     if flag in ("diag-keychain", "diagkeychain"):
         sys.exit(diag_keychain(args[1] if len(args) > 1 else ""))
+    if flag in ("trace-ids", "traceids"):
+        sys.exit(run_trace_ids(args))
+    if flag in ("survey-claim-links", "surveyclaimlinks"):
+        sys.exit(run_survey_claim_links(args))
+    if flag in ("cloud-download", "clouddownload"):
+        sys.exit(run_cloud_download(args))
     if flag in ("install-selection", "installselection"):
         sys.exit(run_install_selection(args))
     if flag in ("describe-selection-api", "describeselectionapi"):
@@ -1693,6 +2183,9 @@ def main(args):
         return "."
 
     window, real, relation_state = build_settings_window(cfg, update_note=update_note)
+    # The retrieval configured for this run. Held here only: the authority it carries belongs to a
+    # case, so it is never written to the settings file and does not outlive this window.
+    cloud_request = None
     while True:
         event, values = window.read()
         values = reconcile_paths(values, real)
@@ -1781,6 +2274,33 @@ def main(args):
                                                                      update_note=update_note)
         elif event == "relations_edit":
             _relations_dialog(relation_state)
+        elif event in ("cloud_configure", "cloud_run"):
+            if event == "cloud_run" and not values.get("cloud_run"):
+                window["cloud_note"].update(_cloud_note(cloud_request, active=False))
+                continue
+            from scripts import cloud_gui
+            request, _extras = cloud_gui.run_cloud_window(
+                _cloud_ui(), mode="run", tz=_map_timezone(values.get("timezone")))
+            if request is not None:
+                cloud_request = request
+            window["cloud_run"].update(cloud_request is not None)
+            window["cloud_note"].update(_cloud_note(cloud_request, active=cloud_request is not None))
+        elif event == "cloud_existing":
+            from scripts import cloud_gui
+            ui = _cloud_ui()
+            last = _last_run_folder(values.get("workdir") or "")
+            request, extras = cloud_gui.run_cloud_window(
+                ui, mode="existing", run_folder=last,
+                tz=cloud_refresh.load_settings(last).get("tz", "local") if last else "local")
+            if request is not None:
+                request.runner = cloud_gui.progress_runner(ui, request)
+                add_log_file(extras["run_folder"])
+                code = cloud_download_existing(extras["run_folder"], request, extras["keychain"],
+                                               extras["refresh"])
+                (sg.popup if code == 0 else sg.popup_error)(
+                    "The reports of this run folder have been refreshed — open index.html." if code == 0
+                    else "The retrieval did not complete — see the log in the run folder.",
+                    title="Snapchat's servers", keep_on_top=True)
         elif event == "Ok":
             if not values["zip"] or not os.path.isfile(values["zip"]):
                 sg.popup_error("Please select a valid extraction ZIP file.")
@@ -1805,6 +2325,17 @@ def main(args):
                     continue
                 if not _confirm_selection(values["selection"].strip(), values["workdir"]):
                     continue
+            if values.get("cloud_run"):
+                why = ("it is configured" if cloud_request is not None else None)
+                if values["selection"].strip() or values.get("os_android"):
+                    sg.popup_error("A retrieval from Snapchat's servers is part of a full iOS run "
+                                   "only — not with a selection file, not on Android.",
+                                   keep_on_top=True)
+                    continue
+                if why is None:
+                    sg.popup_error("Configure the retrieval from Snapchat's servers first (legal "
+                                   "authority, what to retrieve) — or untick it.", keep_on_top=True)
+                    continue
             break
     window.close()
 
@@ -1815,7 +2346,7 @@ def main(args):
                 "tile_server": values.get("tile_server", "").strip(),
                 # The relation policy is a working preference and is remembered. The selection file and
                 # the case reference deliberately are not: both belong to one case.
-                "partial": relation_state,
+                "partial": _policy_to_save(relation_state),
                 "legacy_reports": bool(values.get("legacy_reports")),
                 # Never committed and never bundled: this repository is public, so an internal
                 # share path may only live in this examiner's own settings file.
@@ -1849,27 +2380,39 @@ def main(args):
             sg.popup_error(error, keep_on_top=True)
             return
 
-    try:
-        run(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
-            os_mode="ios" if values["os_ios"] else "android",
-            padding=PADDING_MAP.get(values.get("padding"), "both"),
-            tz=_map_timezone(values.get("timezone")),
-            tile_server=values.get("tile_server", "").strip(),
-            pause=True, partial=partial,
-            legacy_reports=bool(values.get("legacy_reports")))
-    except (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection, LookupError) as error:
+    cloud = None
+    if values.get("cloud_run") and cloud_request is not None:
+        cloud = cloud_request
+    # The run happens behind the run window (scripts/run_window.py): its stages, the count inside
+    # the current one, the log, and — during a retrieval — the servers' progress and controls, which
+    # the window drives itself rather than opening a window of its own.
+    from scripts import run_window
+    _folder, error = run_window.run_in_window(
+        _cloud_ui(), run,
+        dict(zip_path=values["zip"], keychain=values["keychain"], workdir=values["workdir"],
+             os_mode="ios" if values["os_ios"] else "android",
+             padding=PADDING_MAP.get(values.get("padding"), "both"),
+             tz=_map_timezone(values.get("timezone")),
+             tile_server=values.get("tile_server", "").strip(),
+             pause=False, partial=partial,
+             legacy_reports=bool(values.get("legacy_reports")), cloud=cloud),
+        title=f"Snapchat Auto v{get_version()} — processing", formatter=formatter)
+    if isinstance(error, (partial_report.EvidenceMismatch, partial_report.AmbiguousSelection,
+                          LookupError)):
         # A refused partial run reaches here. Without this it left a traceback on the console and
         # **nothing in the log**, so the examiner saw a run that simply stopped: the reason has to be
         # in the log next to the run it belongs to, and in front of the person who asked for it.
         logger.error(str(error))
         sg.popup_error(f"The partial report was not built.\n\n{error}",
                        title="Partial report refused", keep_on_top=True)
-        os.system("pause")
-    except extract_zip.SnapchatNotFound as error:
+    elif isinstance(error, extract_zip.SnapchatNotFound):
         # the same reasoning: an extraction without the app is an answer, and it belongs in the log
         logger.error(str(error))
         sg.popup_error(str(error), title="Snapchat not found", keep_on_top=True)
-        os.system("pause")
+    elif isinstance(error, SystemExit):
+        logger.error(f"The run ended itself (exit code {error.code}) — see the log above")
+    elif error is not None:
+        logger.error("The run failed", exc_info=error)
 
 
 if __name__ == '__main__':

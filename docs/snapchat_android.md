@@ -115,7 +115,12 @@ records (`mtimes`, `fs`), the renamed files, and the duplicate / symlink / hash 
 ## The reports
 
 The Android run (`scripts/ParseSnapchat_Android.py`) builds the Conversations, Contacts, Memories and
-cache_controller reports into the same folders, with the same cross-report links, as the iOS run.
+cache_controller reports into the same folders as the iOS run, with the same cross-report links except
+those whose source the Android app folder was not examined for: the link from a cached filter asset to
+the Memories whose overlay record lists it (`ZGALLERYSNAPDETAIL.ZOVERLAY`) and the creative-tools items
+(`primary.docobjects`) are read on iOS only, and so are the MemData-id link and the *Possible Memory*
+leads, the Android Memories index having neither — see
+[report_cache_controller.md](report_cache_controller.md#android).
 There is no Library/Caches report — Android has no such folder, and the app's own
 `files/file_manager` caches are not yet listed as a whole anywhere (the Memories report finds a
 snap's files in them, the legacy report its chat snaps) — and no partial reports yet (`--selection`
@@ -139,9 +144,8 @@ is given a file it cannot be tied to. Everything the run publishes has been show
 
 The shared join takes a claim's file only when a **whole** file named after the `CACHE_KEY` is media.
 The same cache also stores media as byte-range shards and as bundles (a small descriptor named after
-the key, the content in `<key>_<child>` files); on iOS a chat video stored that way reaches the report
-through `SCPersistentMedia`, which Android does not have. So the Android run rebuilds them first
-(`materialize_chat_media`): shards are concatenated in offset order, a bundle gives its largest media
+the key, the content in `<key>_<child>` files). So the run rebuilds them first
+(`scripts/chat_media.py` → `materialize_chat_media`, shared with the iOS run since 1.9): shards are concatenated in offset order, a bundle gives its largest media
 child, and — for a file that is encrypted at rest — decrypted with a key / IV pair carried in the
 message's own protobuf (`message_key_pairs`: every 32-byte value beside every 16-byte value, at any
 depth, tried against the file). **Only bytes that decode to media by their magic bytes are ever
@@ -230,7 +234,11 @@ columns (`memories_snap._id`, `memories_snap.media_id`) in its explanation.
 
 The iOS report unchanged apart from where it looks (`cache_controller_paths`, `index_sccontent`,
 `find_app_container` all recognise an Android app folder) and the words a few explanations use
-(`PLATFORM_WORDS`). Device paths are shown as `/data/data/com.snapchat.android/…`.
+(`PLATFORM_WORDS`). Device paths are shown as `/data/data/com.snapchat.android/…`. The overlay-record
+filter link and the *Creative tools asset* items are iOS-only (their Android counterparts were not
+examined), so an Android report has none of their chips, category, sections or header lines. The tie of
+a claim naming an absent message to its conversation works on both, because `arroyo.db` and its
+`required_values` `USERID` are the same. See [report_cache_controller.md](report_cache_controller.md#android).
 
 ### Communications (legacy)
 

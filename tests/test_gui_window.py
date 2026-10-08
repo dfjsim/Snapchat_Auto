@@ -21,7 +21,11 @@ pytest.importorskip("FreeSimpleGUI")
 LONG_DIR = r"C:\Temp\Snapchat_Auto\runs\HOM-2026-0042\exhibit B\phone 1\working and reports"
 SAVED_ZIP = r"D:\cases\HOM-2026-0042\exhibit B\phone 1\EXTRACTION_FFS.zip"
 CFG = {"zip": SAVED_ZIP, "keychain": SAVED_ZIP, "workdir": LONG_DIR,
-       "installer_dir": r"C:\builds", "tile_server": "", "appearance": "dark"}
+       "installer_dir": r"C:\builds", "tile_server": "", "appearance": "dark",
+       # a policy saved by a build that did not have msg_cache yet
+       "partial": {"relations": {k: on for k, on
+                                 in app.partial_report.PRESETS["recommended"].items()
+                                 if k != "msg_cache"}}}
 # What a rebuild hands back to the new window: the fields as the examiner had left them. The two
 # browse entries are in here because window.read() really does put them in `values` — a FolderBrowse
 # is a Button, and it reports an empty string.
@@ -121,6 +125,8 @@ def test_the_relation_policy_starts_at_the_recommended_set(window):
     assert relations["relations"]["mem_group"] is True
     assert relations["relations"]["conv_messages"] is False
     assert relations["transitive"] is False
+    # a relation the saved policy predates starts at its default, not off
+    assert relations["relations"]["msg_cache"] is True
 
 
 def test_the_form_carries_no_walls_of_prose(window):

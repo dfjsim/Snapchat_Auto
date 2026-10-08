@@ -256,7 +256,7 @@ Library/Caches reports so a file reads the same way in all three:
 ### Bundles: the child files are the content
 For a bundle (`TYPE = 3`) the file named after the `CACHE_KEY` is **only the CHILDREN descriptor**
 (a few dozen bytes), and the content sits in one file per child, named
-`<CACHE_KEY>_<child name>` (e.g. `4bfc4bba…_z2a132f1f…`). `child_ondisk_paths` resolves those (the
+`<CACHE_KEY>_<child name>` (e.g. `<CACHE_KEY>_z<child id>`). `child_ondisk_paths` resolves those (the
 child's own cache key is also tried, for other layouts), and each child is hashed and typed
 **separately** and published with its own extension. The row's file button shows the bundle's
 largest recognizable child.
@@ -301,8 +301,280 @@ many have no key at all; a filter selects each group.
 `classify_external_key` buckets each claim from its `EXTERNAL_KEY` (and `MEDIA_CONTEXT_TYPE` as a
 tie-breaker): *Memory media / overlay / thumbnail* (`snap-*`/`g-media-`), *Chat media* (context
 2/3), *Lens*, *Preview*, *App install*, *Video / Discover* (`topvideo~`/`firstframe`/`video~`),
-*CDN media* (a bare `http(s)` URL), else *Other*. The row's category is the most meaningful across
-its claims (Memory beats Other).
+*CDN media* (a bare `http(s)` URL), *Snap editor* (context 34 with a `<UUID>~<position>` key — below),
+else *Other*. The row's category is the most meaningful across its claims (Memory beats Other). A file
+that is an asset of a filter a Memory's overlay record lists keeps the category it would have without
+that link — *CDN media* for its URL-keyed claim, or *Creative tools asset* when a creative-tools item
+names the file (next paragraph) — because that link is a relation of its own, not a statement of what
+the file is (see [below](#assets-of-a-filter-listed-with-a-memory--not-its-media)).
+
+One category comes from another database: *Creative tools asset*, a file an item of an account's
+creative-tools store names ([below](#creative-tools-items--primarydocobjects--ctp__item_5)). It takes
+the place of *CDN media*, *Other* or *Chat media* only — never of a category the key's shape gives
+(*Lens*, *Snap editor*, a Memory's) — and only when no chat message, no conversation tie and no Memory
+links to the file: those say what the file is (a tie, whose conversation's file it is). A filter
+listing does not hold it back, being a relation and not what the file is. The claims table keeps each
+claim's own category and context label (`2 (Chat media)`, a reading of the number): the contexts
+labelled *Chat media* claim creative-tools assets — custom stickers among them — as well as chat media,
+and on such a row a "?" beside the context says so (never beside a key of a chat message's shape,
+which names a conversation and a message itself). The
+category is applied after the key's (`build_entries`), not in `classify_external_key`, so the key-based
+categories are what they were.
+
+### Context 34 — the snap editor's working copy
+
+Claims with `MEDIA_CONTEXT_TYPE` 34 are keyed `<UUID>~<position>` and claim the files of a snap being
+edited — usually plaintext media written at capture, so the report plays them. The name rests on the
+device's own record, not on the number: `Documents/user_scoped/<hash>/userPreferences/pref.docobjects`
+(SQLite, `docprefitem(rowid, p BLOB, key STRING UNIQUE)`) keeps the editor's current snap under the key
+`SnapEditor-SnapSessionContext`. Its `p` cell is a TSAF container (root type `SESnapSessionContext`)
+whose `GPBData` key is followed by two little-endian 32-bit words, the second the length of a protobuf
+that follows:
+
+| field | value |
+|---|---|
+| `1` | when the record was saved — Unix seconds |
+| `2.2.4` (one per media item) | `.6` the item's position (1, 2, …), `.10` its **CACHE_KEY** |
+| `2.2.17.7` | when the snap was edited — Unix milliseconds |
+| `2.5.1`, `2.5.2` | the UUID and context of the claims on those files: `<UUID>~<position>`, 34 |
+
+Verified on a test device (iOS 18.3, app 13.4x) against `cache_controller.db` and the files. Only the
+latest session is a live row (an ended session is often emptied); earlier ones survive in `-wal` frames
+a later write superseded. `scripts/data/snap_session.py` reads both readings and carves those frames,
+keeping a carved record **only** when a claim corroborates it (same CACHE_KEY, claim key and context).
+A record found for a row's file is shown under its claims: saved, edited, claim key, context, store and
+how it was read.
+
+The record dates an editing session and ties it to the file; it does not say what became of the snap.
+A working copy saved to Memories is byte-identical to that Memory's media once decrypted (seen on a test
+device), but nothing recorded on that device connects the two. The bytes do: when the Memory's media is
+on the device too, the file links to it *by content* (≡, rule 5 in
+[cross_report_linking.md](cross_report_linking.md)); when it is not, the retrieval from Snapchat's
+servers can supply the reference (☁), and until then the file is a lead.
+
+### Creative-tools items — primary.docobjects › ctp__item_5
+
+Each account keeps a store at `Documents/user_scoped/<userHash>/DocObjects/primary.docobjects` (SQLite;
+`userHash` is SHA-256 of the account's user id — the contacts' store too). Beside the contacts it holds
+the items of the feeds the camera's creative tools are filled from — captions, filters, stickers — in
+`ctp__item_5(rowid, p BLOB, item_id STRING UNIQUE)`, one row per item. `scripts/data/ctp_items.py` reads
+it, every account's store, both readings, staged in a temporary folder (never beside the report: it would
+put the contacts' store into the report folder). `p` is a FlatBuffers document; its root table:
+
+| slot | value |
+|---|---|
+| 0 | the row's `item_id` again — the self-check: a document whose slot 0 is not its item_id is not read |
+| 1 | a rank text, equal to `index_ctp__item_5rank_id.rank_id` of the row — not read |
+| 2 | a `[ubyte]` vector holding a protobuf message: the item's **payload** |
+| 3 | the item's own id: standard padded base64 of payload field 6 |
+| 4 | a sub-table whose slot 0 is the item's feed, `feed:<TYPE>-<CONTEXT>-<n>` |
+| 5–9 | small integers, a digit text and a short base64 value many items share — not read |
+
+On the stores examined the `item_id` is `<own id>-<feed>-<n>`; it is read from its column, never rebuilt.
+The payload parses as a protobuf to its last byte. Its field 2 holds exactly one field, whose number is
+the item's **kind** as stored — `2.11` on the captions feed's items, `2.16` on the filters feed's, `2.7`
+and `2.15` on two feeds of other contexts — field 6 is the own id as bytes (8 bytes on most items, 13 on
+one kind), field 4 the same id as an integer when it is 8 bytes. Its texts are style and font names,
+colours, a JSON text and the URLs of the item's assets: a font file and a caption asset under `2.11`, a
+filter image (`2.16.2.1.1`), its CDN copy (`2.16.2.1.2`), a filter font (`2.16.7.1.5.1`) and a geofilter
+PNG (`2.16.15.3.3`) under `2.16`, CDN assets under `2.7.10.1` / `2.7.11.1` and `2.15.1.3.4.1` / `.2`. They
+are shown as stored, under their field numbers, which are numbers and not names. A field 2 that is not a
+message of one field (a number, a text) gives no kind, and the payload's texts are still read. No item in
+this layout carries a date, and none names a snap (verified on the stores examined); a document of another
+layout is not read, so what it holds is not known.
+
+The feed is named from the store's **feed tree**, `ctp__feedtree(rowid, p BLOB, context INTEGER UNIQUE)`:
+per context a FlatBuffers document whose slot 2 is an NSKeyedArchiver archive (`keyed_archive`) of a
+`CTPFeed` — `FEED_ID` (`TYPE`, `CONTEXT`), `NAME`, `SOURCE.COMPUTE_ENDPOINT` (the
+`/snapchat.creativetools.<service>.ComputeFeedService/ComputeFeed` it is fetched from) and `CHILD_FEEDS`
+(slot 0 is the context, slot 1 a Cocoa time). A feed's short name is the word after `.creativetools.` in
+its endpoint (`captions`, `filters`, `custom-stickers`, …), else its `NAME`. Only context 2 has a tree on
+the devices examined, so items of `feed:19-1-0` or `feed:16-6-0` read *not in ctp__feedtree* — their
+numbers are never read as a name. Both readings of the tree are read: the current one names a feed, and a
+feed only the checkpointed version lists is named as prior state — *(prior state)* beside the name, and
+the "?" says the `-wal`'s tree does not list it. A tree document that does not hold a `CTPFeed` archive is
+not read; a feed missing from the trees that were read then reads *ctp__feedtree not decoded*, never *not
+in ctp__feedtree*, since whether the unread tree lists it is not known — and the run log counts such
+documents per store.
+
+**The match** (`ctp_items.match`) is an exact identity of whole texts, in this order, the first rule that
+finds an item deciding:
+
+1. **the whole key** is a text the item holds — a URL in the form `snap_overlay.normalise_url` gives it,
+   the one URL rule the reports share (so a key with an empty trailing `?` is the item's URL), anything
+   else as it is; the item_id and the own id are texts the item holds too;
+2. **the key after a word and `:` or `~`** (`music:<url>`, `customSticker:<id>`, `customSticker~<id>`;
+   never `://`, which is a URL) is such a text — a payload text, the item_id or the own id;
+3. failing those, that part of the key **read as base64 is the same bytes** as the item's own id —
+   payload field 6, or the item_id or slot 3 read as base64 — in either alphabet, padded or not, when
+   that part reads as base64 by the rule `--trace-ids` reads ids by (`base64_text.base64_bytes`: padded
+   with `=`, or using `+` or `/`, or mixing upper case, lower case and digits). An unpadded id with none
+   of these is not read as base64 and matches by its text only.
+
+Never matched: a URL's query values on their own (`bo=`, `mo=`, `uc=` — a `bo=` value decodes to a
+protobuf of fetch options with no id in it, and one value is shared by many cached files whose `/d/` id
+no item holds), a path segment alone, a part of a text, a text shorter than 8 characters or of digits
+only. A text several rows of one store hold is attributed by whose own id it is
+(`ctp_items._attributable`): rows with one own id are **one item listed in several feeds** — a custom
+sticker is listed in each sticker-picker feed that shows it — and each is shown, the explanation saying
+so; else the rows whose own id (or whole `item_id`) the text is, when they are one item, are the match,
+and another item holding the same text in its payload only refers to it — it is counted in the
+explanation, not shown; else (different items each hold it, as a shared endpoint URL) it is attributed
+to none, and not matched in that store by a later rule either: the first rule that finds the text in a
+store decides for it, so the bytes rule never picks one of the items whose text was ambiguous. The same
+asset URL in two accounts' stores is listed twice, each saying whose store holds it. A document of
+another layout is still an item: its `item_id` column is indexed whatever the document holds — and so
+is the part before `-feed:`, which on every decoded item is its own id — so a key naming the item by
+either matches, and the detail says *document not decoded (layout differs)* rather than reading it on a
+guess; the run log counts such documents per store. A document whose reading fails is one of those, and
+a store that cannot be read at all loses its items, never the report.
+
+Both readings are read. The `-wal` rewrites these rows: an item can have one version in each reading,
+and the two readings then do not agree on its row. The version shown is the one that holds the matched
+text — the one both readings hold, else the `-wal`'s, else the checkpointed file's — and its *(read from)*
+cell is that version's own reading. A text the `-wal`'s version holds is badged *-wal only*, and when the
+checkpointed version holds it too, the explanation adds that the row was rewritten and that the older
+version's other texts are not shown; a text only the checkpointed version holds is badged *no -wal only* —
+prior state, not the store's current content. The header's store line says whether the two readings
+differ of the two tables read, `ctp__item_5` and `ctp__feedtree`, never of the whole store: its other
+tables, the contacts among them, are not compared.
+
+Verified on the two test devices where an item names a cached file: every changed entry's item is the one
+a byte search (`instr(p, <key>)`) of a read-only copy of the store returns, in the reading its badge
+names. On the device whose caption items hold `bo=` values of cached files, those files are not matched:
+no item holds their key. On the third device whose store holds items, no claim's key occurs in any item,
+and no entry changes.
+
+What an item this report reads does **not** say: when the account had it, whether it put it in a snap,
+or which. It says that the app keeps, in that account's store, an item whose asset or id the cached file
+is named by. A document of another layout is not read, so what it holds is not known.
+
+## Possible Memory — leads, never links
+
+Some cached media is a Memory's media with nothing on the device to say so: the snap editor's working
+copy of a snap later saved to Memories is byte-identical to that Memory's media once decrypted (seen on
+a test device), and no claim, id or record connects them. What the device does record is time. So for an
+on-disk media file that no identifier, chat or byte comparison links — in the categories *Snap editor*,
+*Not in the index* and *Memory media* (a Memory-shaped claim whose row is gone), or *Other* when the app
+claimed it as Memories media (context 19) — `scripts/memory_leads.py` lists the Memories of the same kind
+(video or image, from `ZMEDIATYPE` and the file's magic bytes) with a time within ±10 minutes of one of
+the file's: each claim's `CREATION_TIMESTAMP_MILLIS`, and the device's birth, modified and access times
+of the file, against the Memory's `ZGALLERYSNAP.ZCREATETIMEUTC`, `ZCAPTURETIMEUTC` and its entry's
+`ZCREATETIMEUTC`. At most five, ranked by the closest pair, each with every difference, and the panel
+says how many Memories fell inside the window. `ZDURATION` is not used: it has been seen to differ from
+the media's real length. A file a creative-tools item names is never a lead, whatever its category: the
+item explains it. Nor is one whose claim names a chat conversation (a conversation tie, below).
+
+It is a lead, not a link: shown in its own *Possible Memory — NOT proven* panel with a dashed chip,
+never as the 🧠 link, never counted as linked, never followed by a partial report (no closure edge).
+The *Linked* filter has its own option for it. The panel's *📋 Copy snap IDs* copies the leads' snap ids
+for the Cloud download window: retrieving a lead from Snapchat's servers either proves it — the file
+then links *by content* — or rules it out. On the test device every working copy that was a Memory's
+media had that Memory as its first lead.
+
+The same leads are shown **from the Memory's side** too, so an examiner working through Memories does not
+miss them: a *≈ possible file* badge in the Memories index's Kind column (and *≈ possible file (grouped)*
+on a folded group's row when one of its Memories has one), a *Possible cached file* filter, and a
+*Possible cached file — NOT proven* panel on the Memory's page listing each file with every difference
+and where this Memory ranks among that file's leads. They are not worked out twice: only this report
+knows which files nothing else accounts for, and it renders after the Memories report, so it writes them
+as `data/memory_leads.js` (`memory_leads.write_script`, keyed by snap id, carrying this run's id) and the
+Memories pages load that file with `<script src>` like their own data — `memory_leads.MEMORY_JS` draws
+the badge, the filter and the panel. A page whose folder has no such file, or one from another run, shows
+no lead. A partial extract's file names only the Memories the extract holds.
+
+## Assets of a filter listed with a Memory — not its media
+
+A Memory's overlay record (`scdb-27` `ZGALLERYSNAPDETAIL.ZOVERLAY`, read by `scripts/data/snap_overlay.py`;
+see [report_memories.md](report_memories.md#the-overlay-record-zgallerysnapdetailzoverlay)) lists the
+snap's geofilters with the URLs of their image, sky image and font (and a sky item's `blimpUrl`, read
+the same way when it holds one). `load_memory_index(app, overlays=True)` keeps those URLs
+(`overlay_urls`, iOS only; asked for by this report's `index` and the survey, not by the Library/Caches
+report, which reads the same index for its URL keys alone and would pay for decoding every record for
+nothing), and an entry whose claim `EXTERNAL_KEY` is exactly one of them — the whole URL,
+by `snap_overlay.normalise_url` — gets `entry["filter_memories"]`: one link per listing Memory
+(`_overlay_links_for`; the rule in full is in [cross_report_linking.md](cross_report_linking.md)). On the
+corpus these are context-25 claims on WebP filter images, PNG sky images and TrueType fonts.
+
+* **The chip** is dashed and says *🧠 Memory … · filter listed* (*· filter selected* only when the record
+  names that filter as selected), or, when several Memories list the asset — common: the same asset URL
+  is listed in many Memories' records, sometimes under different filters — one *🧠 N Memories · filter
+  listed* chip that opens the Memories report filtered to all of them (its `#find=` is the listing
+  Memories' snap ids, not the entry's CACHE_KEY), narrowed in a partial extract to the Memories it holds.
+  When one record lists the asset under several filters, the link takes the selected filter's field if
+  the record names one, so the chip and the detail say what the Memory's own page says.
+* **The detail** has a section *Listed with a Memory's filters — not its media*: per Memory, the asset,
+  where in the record its URL sits (`filters.geoFilters[i]…`, and any other place the same record lists
+  it), the filter (type · carousel group · idValue), what the record says about it being selected (*yes*
+  / *no — the record names another filter* / *not recorded*), and the claim — flagged *another account's
+  claim* when its `USER_ID` is not the Memory's account. Each Memory's "?" quotes the record's field,
+  what it says of the selected filter and the Memory's `ZGALLERYSNAP.ZHASOVERLAYIMAGE` — only what is
+  that Memory's own (`_filter_row_basis`): the method is the section's "?", once. One asset can be
+  listed by a large share of a gallery's Memories, so the section shows at most `FILTER_DETAIL_ROWS`
+  (200) — those whose record names the filter as selected first, then, in a partial report, those the
+  extract holds, then by snap id, shown in snap-id order — and a line saying how many more there are.
+  The chip and the search are not capped: they carry every listing Memory.
+* **The Linked filter** gains *filter listed with a Memory (not its media)* (link value `Filter`), the
+  header a count line with its "?", the page a dashed-chip style — each written only when some entry has
+  such a link, so a report with none is byte for byte what it was. The run log gives the count on a line
+  of its own; it is not part of *linked to Memories*.
+* **Search** finds the entry by each listing Memory's snap id.
+
+None of it is the Memory link: `entry["memory"]` and the Memory rules 1–5 are untouched, the file is
+never decrypted with the Memory's key, and an entry with such a link is never a *Possible Memory* lead —
+the record accounts for the file. The partial-report edge is its own (`EDGE_MEMORY_FILTER_ASSET`, never
+`EDGE_MEMORY_CACHE`), followed only by the relations `mem_filter_assets` / `cache_filter_memories`, both
+off by default ([report_partial.md](report_partial.md)).
+
+## Tied to a conversation — a message no row is there for
+
+A chat claim's key, `<type>:<conversation>:<message>:<part>[:…]`, names a conversation as well as a
+message. When none of the three chat routes reaches the message — the arroyo.db the run read holds no
+message of that number in that conversation, in either reading, and the Conversations report lists
+none — the key still names the conversation, and `_conversation_links_for` ties the entry to it
+(`entry["conv_links"]`; the rule in full is route 4 in
+[cross_report_linking.md](cross_report_linking.md#cache_controller--the-chat-report)). What arroyo.db
+holds comes from the Conversations manifest's `arroyo` section, read from the database itself, never
+from the messages the report lists. A message arroyo.db holds makes no tie: that is a missing rule for
+[`--survey-claim-links`](claim_link_survey.md).
+
+* **A conversation the Conversations report lists** gets a dashed 💬 chip — *💬 \<title\> · msg N — not
+  in arroyo.db* — that opens its page at the header, never a message: there is no message row to point
+  at. Its "?" says what that arroyo.db holds of the conversation (a message of it or a conversation /
+  feed row; or none, when the friends / groups lists or cached chat files are why the report lists it —
+  that no conversation, feed_entry or user_conversation row names it is said only when those tables
+  read in full, the manifest's `arroyo.conversations_read`). When arroyo.db's messages were not read,
+  the chip says *not listed* and the "?" that whether arroyo.db holds the message is not known.
+* **A conversation no report lists** has nothing to open. Its dashed chip — *💬 conversation
+  \<id\>… — in no report* — filters this report to every entry whose claim names that conversation
+  (`#find=<conversation id>`), and its "?" states the absence: the arroyo.db this run read holds no
+  message of it in either reading, and neither its conversation tables nor the friends / groups lists
+  name it — or, when those tables would not read in full, that whether they name it is not known. When
+  that arroyo.db holds other messages of the conversation and no report lists it, the "?" says so
+  instead, and never that the database may never have held the conversation. Made only when
+  arroyo.db's messages were read.
+* **Whose claim.** Every "?" compares each claim's `USER_ID` with the account arroyo.db belongs to (its
+  `required_values` `USERID`) when both are known: *made by the account that arroyo.db belongs to*, or
+  *made by account X; the arroyo.db this run read belongs to account Y* — then the message, or the
+  conversation, may never have been in that database. A message claimed by two accounts names each
+  claim's account, and a claim of arroyo.db's own account, the stronger evidence, is the one the
+  conclusion follows. On a phone with two accounts one cache sits beside the first account's chat
+  database, and the second account's claims can name conversations and messages that database need
+  never have held. No wording says "no longer": neither reading shows the message was there.
+* **Counted apart** from *linked to a chat*: the header gains *N tied only to a conversation* (an entry
+  with a tie and no chat link) with its "?", and the Linked filter *chat conversation only (no message
+  row)* (link value `Conversation`) — words true of every tie it selects, one whose arroyo.db messages
+  were not read too — both written only when some entry is tied only to a conversation; the page gains
+  the dashed-chip style whenever some entry has a tie, one beside a chat link too. A report with no tie
+  is byte for byte what it was. The run log gives the count on a line of its own. **Search** finds the
+  entry by the conversation id.
+
+The category stays the key's (*Chat media* for contexts 2 and 3), a creative-tools item that names the
+file notwithstanding: the item's section is still in the detail. An entry with a tie is never a
+*Possible Memory* lead: the claim says whose file it is. In a partial run a tie to a listed conversation
+is the edge `EDGE_CONV_CACHE`, followed by `cache_conversation` (on by default: ticking the entry brings
+the conversation's row and page, not its messages) and `conv_cache` (off by default); a tie to a
+conversation no report lists has no row to reach and no edge ([report_partial.md](report_partial.md)).
 
 ## Locating the bytes on disk
 
@@ -339,6 +611,20 @@ case**, filtered with **Selected only** and saved with **💾 Save selections** 
 Memories report through `Reports/selection.js`. See [report_ui.md](report_ui.md). Keep the `data/`
 and `files/` folders next to the HTML file.
 
+A file a creative-tools item names (`entry["ctp_items"]`) has a detail section *Named by a
+creative-tools item — primary.docobjects › ctp__item_5*, after the snap editor's session record: per
+item, whose store it is (the account, *the claiming account's own store* or *another account's store*,
+and the store's device path), its item_id and own id, its feed as the tree names it, its kind (*payload
+field 2.k*), which part of the key names it and where in the item (*the whole key* / *the key after
+music:* … with the field path, and a "?" spelling out the match) and the reading; then the item's texts
+as stored, URLs first, at most 40. The row's search text gains the item_id, the own id, the feed, its
+short name and endpoint, the kind and those texts — not the category's name, which a file that kept its
+category is not filed under. The header gains a count line naming the store(s) read and their `-wal`
+state (whether the readings differ is said of the two tables read, not of the store), and the Category
+filter the *Creative tools asset* value — each only when
+some entry has an item, so a report with none is byte for byte what it was; the run log gives the
+count on a line of its own. There is no chip: it is not a link.
+
 ## Coverage caveats (does every SCContent file have a claim?)
 
 **No.** `cache_controller.db` does not index every physical file in the
@@ -373,9 +659,21 @@ Implications for the report / examiner:
 ## Cross-report links
 See [cross_report_linking.md](cross_report_linking.md). In short: **→ Memory** by snap UUID in the
 `EXTERNAL_KEY` (primary), then `SHA-256(url token)[:16] == CACHE_KEY` (fallback), then `ZMEDIAID`
-(fallback); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
+(fallback), then a `ZSNAPID` inside a key of another shape (fallback), then a MemData identifier the Memory records about itself (`ZMEMDATAIDS` / `ZMEMDATAID`,
+fallback), then byte-identity with a copy retrieved from Snapchat's servers (last; ☁ on the chip — see
+[cloud_download.md](cloud_download.md)); **→ chat** via the chat report's `cache_links.json` manifest, by `CACHE_KEY`
 and — so that every cache entry of a message links back, not only the file the chat report showed —
-by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`.
+by the `<conversation>:<message>:<part>` triple inside the claim's `EXTERNAL_KEY`, or by an id the
+message names its media by; and when that triple names a message no row is there for, **→ the
+conversation** (route 4, [above](#tied-to-a-conversation--a-message-no-row-is-there-for)) — a link to
+its page when the Conversations report lists it, a stated fact and a same-page filter when it does not,
+never a link to a message and never counted as one. Apart from all of
+these, **→ Memory, filter listed**: a claim key that is the URL of an asset of a geofilter a Memory's
+overlay record lists links to that Memory under a relation of its own, never as its media (see
+[above](#assets-of-a-filter-listed-with-a-memory--not-its-media)). A creative-tools item that names a file
+is **information on the entry, not a link**: the item store has no report of its own, so there is no
+target, no anchor, no `report_ui.xref` and no partial-report edge — the section belongs to the entry and
+travels with it into a partial extract, and no copy of the store is staged into the report folder.
 
 ## Android
 
@@ -387,7 +685,16 @@ Android app folder (`android_layout.is_app_dir`: a `databases/` folder and no `D
 it for both (`android_layout.scan`), `load_memory_index` reads the Memories from `memories.db`
 (`memories_android_report.memory_index`), and the few explanations that name a platform's columns take
 their words from `PLATFORM_WORDS` — `memories_snap._id` rather than `ZSNAPID`. Device paths are shown
-as `/data/data/com.snapchat.android/…`. See [snapchat_android.md](snapchat_android.md).
+as `/data/data/com.snapchat.android/…`. The overlay record a filter-asset link is made from is read on
+iOS only — its Android counterpart, if `memories.db` has one, was not examined — so the Android index has
+no `overlay_urls` and its report none of that link's chips, filter option or header line. The same goes
+for the creative-tools items: `ctp_items.find_stores` looks in the iOS layout
+(`Documents/user_scoped/*/DocObjects/`), its Android counterpart was not examined, and on an Android app
+folder it finds no store — no item, no category, no section or header line. The MemData-id link and the
+*Possible Memory* leads are iOS-only too: they need what the Android Memories index does not carry
+(`memdata_ids`, `points`). The conversation tie works
+on both: Android's `arroyo.db` is the same database, with the same `required_values` `USERID`, and the
+Conversations report writes the same manifest from it. See [snapchat_android.md](snapchat_android.md).
 
 ## Standalone use
 ```

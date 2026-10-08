@@ -1,18 +1,20 @@
 import os
 import glob
+import html
 import json
 import sqlite3
 import pandas as pd
 import plistlib
 import re
 import shutil
-from scripts.data.parse3 import *
+import sys
 import datetime
 import ntpath
 import filetype
 from scripts.data import ccl_bplist
 from scripts.data import sqlite_open
 from scripts.data import arroyo_content
+from scripts.data import protobuf_wire
 from scripts.data import flatbuffers_doc
 from scripts.data import tsaf
 from pathlib import Path
@@ -25,6 +27,8 @@ from scripts import report_ui
 from scripts import source_fingerprint
 from scripts import partial_report
 from scripts import selection_file
+from scripts import progress
+from scripts import chat_media
 import math
 import logging
 import numpy as np
@@ -43,18 +47,11 @@ platform = system()
 
 
 def proto_to_msg(bin_file):
-    try:
-        messages_found = []
-        messages = ParseProto(bin_file)
-
-        res = find_string_in_dict(messages)
-    except:
+    # Every text value in the protobuf, wherever it sits (protobuf_wire.strings); "" when the blob is
+    # not a protobuf at all.
+    messages_found = protobuf_wire.strings(bin_file)
+    if messages_found is None:
         return ""
-        
-    for k, v in res:
-        if "string" in k:
-            messages_found.append(v)
-            
     if messages_found == [] or len(messages_found) >= 2:
         try:
             message,typedef = blackboxprotobuf.decode_message(bin_file)
@@ -70,15 +67,6 @@ def proto_to_msg(bin_file):
     return messages_found
 
 
-def find_string_in_dict(data):
-    for k, v in data.items():
-        if isinstance(v, dict):
-            yield k, v
-            yield from find_string_in_dict(v)
-        else:
-            yield k, v
-            
-            
 def getHtml(final_df, friends_df, group_df):
 
     report_ui.copy_css(outputDir)
@@ -302,11 +290,12 @@ def path_to_image_html(filename):
                     result = ('<a href="' + (relpath) + '"><img src="' + (
                         relpath) + '" width="150" ><br>' + basename + '</a>')
                 # Stable anchor the cache_controller report can jump to, plus the link back to that
-                # report's row for this file — via the CACHE_KEY, which for a saved-media copy is
-                # not the filename (see cacheControllerKey).
-                cache_key, how = cacheControllerKey(basename)
+                # report's row for this file — via the CACHE_KEY, which for a saved-media copy or a
+                # rebuilt file is not simply the filename (see chat_media.chat_cache_key).
+                cache_key, how = chat_media.chat_cache_key(basename)
                 if cache_key:
-                    cc_link = ('<br><a class="cclink" target="scauto_cache" title="' + how + '" '
+                    cc_link = ('<br><a class="cclink" target="scauto_cache" title="'
+                               + html.escape(how, quote=True) + '" '
                                'href="../CacheController/CacheController_report.html#ck-'
                                + cache_key + '">&#128451; cache_controller entry</a>')
                 else:
@@ -931,18 +920,30 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
                 array2.append(lista)
         except:
             pass
-        for index, row in df_messages.iterrows():
-            sender = row["sender_id"]
-            found = False
-            for item in array:
-                if sender == item[0]:
-                    df_messages.loc[index, "sender_id"] = item[1]
-                    #logger.info(item)
-                    found = True
-            if not found:
-                for i in array2:
-                    if sender in i:
-                        df_messages.loc[index, "sender_id"] = i[1]
+        # One lookup per sender instead of every message against every friend. A user id the
+        # friends list gives under more than one name is shown under all of them, in the order the
+        # list holds them: it used to be shown under whichever row happened to come last, and the
+        # others were simply lost. The friends list wins over the Snapchatters the app cached.
+        friend_names, cached_names = _names_by_id(array), _names_by_id(array2)
+        several = 0
+        names_for_messages = []
+        for sender in df_messages["sender_id"].tolist():
+            got = friend_names.get(_id_key(sender)) or cached_names.get(_id_key(sender))
+            if not got:
+                names_for_messages.append(sender)
+                continue
+            several += len(got) > 1
+            names_for_messages.append(got[0] if len(got) == 1
+                                      else " / ".join(str(name) for name in got))
+        try:                                           # the column keeps the dtype it had
+            df_messages["sender_id"] = pd.Series(names_for_messages, index=df_messages.index,
+                                                 dtype=df_messages["sender_id"].dtype)
+        except (TypeError, ValueError):
+            df_messages["sender_id"] = pd.Series(names_for_messages, index=df_messages.index,
+                                                 dtype=object)
+        if several:
+            logger.warning(f"{several} message(s) were sent by a user id the friends data gives "
+                           f"more than one name for; they show every name, separated by « / »")
         # The people an app event names ("X deleted a chat message", "X was added to the group")
         # are user ids in its description. `message_body` keeps them as they are — the id is the
         # one identifier that never changes, and the Conversations report names each one from the
@@ -969,6 +970,47 @@ def fixSenders(df_messages, df_friends, df_snapchatter):
     return df_messages
 
 
+def _id_key(value):
+    """A user id as a lookup key: the same value ``==`` matched before, never a NaN."""
+    try:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        hash(value)
+        return value
+    except TypeError:
+        return None
+
+
+def _names_by_id(pairs):
+    """``{user id: [name, …]}`` from ``[[user id, name], …]``, each name once, in the order given."""
+    out = {}
+    for uid, name in pairs:
+        key = _id_key(uid)
+        if key is None:
+            continue
+        names = out.setdefault(key, [])
+        if name not in names:
+            names.append(name)
+    return out
+
+
+#: A shared item's cache claims, in preference order when one message matches several: the media
+#: itself before its thumbnail; then the order cache_controller.db lists them in.
+def _share_claim_order(claims):
+    return sorted(claims, key=lambda claim: "thumbnail" in claim[0].lower())
+
+
+def _sticker_key_text(blob):
+    """What a Sticker message (content_type 5) names its sticker by, as a claim's key holds it.
+
+    A sticker from a pack is named by text at 4.4.4.1.2. A sticker carried as a creative tool item
+    (body 4.4.14) is named by the bytes at 4.4.14.2.6, and the ``customSticker…`` claim on its cached
+    file holds those bytes in base64 within its EXTERNAL_KEY. None when the message has neither.
+    Read by ``arroyo_content.sticker_id``, which the cache_controller report's links share.
+    """
+    return arroyo_content.sticker_id(blob)[0]
+
+
 def getCacheArroyo(arroyo, cache_df):
     cache_df = cache_df.reset_index()
     logger.info("Getting cache files from " + ntpath.basename(arroyo))
@@ -984,56 +1026,59 @@ def getCacheArroyo(arroyo, cache_df):
             """
 
     df_arroyo, _wal_info = sqlite_open.read_sql(arroyo, messagesQuery)
+    extra_media = []
 
+    # Each claim once, in cache_controller.db's order: the first claim of an exact EXTERNAL_KEY (what
+    # a local message reference names), and every claim for the substring match a share needs.
+    claims = [(str(ek), ck) for ek, ck in zip(cache_df["EXTERNAL_KEY"], cache_df["CACHE_KEY"])]
+    first_by_key = {}
+    for ek, ck in claims:
+        first_by_key.setdefault(ek, ck)
+    several = 0
     for index, row in df_arroyo.iterrows():
-        
+
         if row["local_message_references"] != None:
             data = row['local_message_references']
-            if isinstance(data, bytes):
-                with open("temp.plist", 'wb') as temp:
-                    temp.write(data[8:])
-            else:
+            if not isinstance(data, bytes):
                 continue
-            try:
-                with open('temp.plist', 'rb') as data:
-                    plist = ccl_bplist.load(data)
-                    data1 = ccl_bplist.deserialise_NsKeyedArchiver(plist)
-                data = re.search(".*[A-F0-9-]{36}", data1['MEDIA_ID'])
+            # one record per photo or video of the message: the first file found is the message's,
+            # each further one a row of its own that the reports fold into the same message
+            files = [first_by_key[media] for media in arroyo_content.media_references(data)
+                     if media in first_by_key]
+            if files:
+                df_arroyo.loc[index, 'message_content'] = files[0]
+                for cache_key in dict.fromkeys(files[1:]):
+                    if cache_key != files[0]:
+                        extra_media.append(dict(row.to_dict(), message_content=cache_key,
+                                                extra_media=True))
 
+        elif row["content_type"] in (3, 5):
+            # a Sticker (5) or Shared content (3): the media id inside it, within a claim's key
+            if row["content_type"] == 5:
+                found = _sticker_key_text(row["message_content"])
+                if not found:
+                    continue
+            else:
                 try:
-                    index1 = cache_df.index[cache_df['EXTERNAL_KEY'] == data.group()].values[0]
-                    index1 = int(index1)
-                    cache_key = cache_df.iloc[index1]['CACHE_KEY']
-                    df_arroyo.loc[index, 'message_content'] = cache_key
-                except Exception as Error:
-                    pass
-
-            except Exception as error:
-                #logger.error(error, index)
-                pass
-                
-        elif row["content_type"] == 5:
-            try:
-                data = row["message_content"]
-                message,typedef = blackboxprotobuf.decode_message(data)
-                message_found = (message['4']['4']['4']['1']['2'])
-                message_found = message_found.decode()
-                for cache_index, cache_row in cache_df.iterrows():
-                    if message_found in cache_row["EXTERNAL_KEY"]:
-                        df_arroyo.loc[index, 'message_content'] = cache_row["CACHE_KEY"]
-            except:
-                pass
-        elif row["content_type"] == 3:
-            try:
-                data = row["message_content"]
-                message,typedef = blackboxprotobuf.decode_message(data)
-                message_found = (message['4']['4']['5']['5']['1'])
-                message_found = message_found.decode()
-                for cache_index, cache_row in cache_df.iterrows():
-                    if message_found in cache_row["EXTERNAL_KEY"]:
-                        df_arroyo.loc[index, 'message_content'] = cache_row["CACHE_KEY"]
-            except:
-                pass
+                    message, _typedef = blackboxprotobuf.decode_message(row["message_content"])
+                    found = message['4']['4']['5']['5']['1'].decode()
+                except Exception:
+                    continue
+            matches = _share_claim_order([(ek, ck) for ek, ck in claims if found in ek])
+            if not matches:
+                continue
+            # One file is the message's attachment: the media before its thumbnail, then the
+            # database's order — it used to be whichever claim came last.
+            df_arroyo.loc[index, 'message_content'] = matches[0][1]
+            several += len(matches) > 1
+    if several:
+        logger.info(f"{several} shared item(s) or sticker(s) match more than one cached file: the "
+                    f"media is shown with the message (rather than its thumbnail); every one of the "
+                    f"files is in the cache_controller report")
+    if extra_media:
+        logger.info(f"{len(extra_media)} more cached file(s) attached to messages sent with several "
+                    f"photos or videos (one local_message_references record each)")
+        df_arroyo = pd.concat([df_arroyo, pd.DataFrame(extra_media)], ignore_index=True)
     
     if os.path.exists("temp.plist"):
         os.remove("temp.plist")
@@ -1569,26 +1614,61 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     # row — which is why the Conversations report still screens it.
     if 'message_content' in chats_df.columns and 'message_text' not in chats_df.columns:
         chats_df['message_text'] = chats_df['message_content']
-    for index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
-        for index_chat, row_chat in chats_df.iterrows():
-            if row_chat['client_conversation_id'] == row_arroyo['client_conversation_id'] and \
-                    row_chat['server_message_id'] == row_arroyo['server_message_id']:
-                if not isinstance(row_arroyo['message_content'], float) and not isinstance(row_arroyo['message_content'], bytes):
-                    chats_df.loc[index_chat, 'message_content'] = row_arroyo['message_content']
-                    if row_arroyo["content_type"] not in [3,5]:
-                        chats_df.loc[index_chat, 'content_type'] = 'local_message_reference'
-                else:
-                    continue
+    # Each message's rows looked up by (conversation, message) instead of scanning every chat row
+    # for every arroyo row. Applied in arroyo's order, so a message arroyo lists twice (its -wal and
+    # its checkpointed reading) takes the later row, as it did.
+    chat_rows = {}
+    for index_chat, conv, smid in zip(chats_df.index, chats_df['client_conversation_id'],
+                                      chats_df['server_message_id']):
+        key = (_id_key(conv), _id_key(smid))
+        if None not in key:
+            chat_rows.setdefault(key, []).append(index_chat)
+    more_files = []
+    for _index_arroyo, row_arroyo in cache_arroyo_df.iterrows():
+        content = row_arroyo['message_content']
+        if isinstance(content, (float, bytes)):
+            continue
+        key = (_id_key(row_arroyo['client_conversation_id']), _id_key(row_arroyo['server_message_id']))
+        for index_chat in chat_rows.get(key, ()):
+            if row_arroyo.get("extra_media") in (True,):     # NaN on every other row
+                # a further photo or video of the same message: a row of its own, which the reports
+                # fold into the message as another attachment — labelled by the same rule as the
+                # message's first file
+                more_files.append(dict(
+                    chats_df.loc[index_chat].to_dict(), message_content=content,
+                    content_type=(chats_df.loc[index_chat, 'content_type']
+                                  if row_arroyo["content_type"] in (3, 5)
+                                  else 'local_message_reference')))
+                continue
+            chats_df.loc[index_chat, 'message_content'] = content
+            if row_arroyo["content_type"] not in [3, 5]:
+                chats_df.loc[index_chat, 'content_type'] = 'local_message_reference'
 
     #Ändrar external_key i message_content till cache_key för att kunna ersätta med fil
-    test = cache_df.to_dict(orient='list')
-    for index, row in chats_df.iterrows():
-        dict_index = 0
-        for i in test['EXTERNAL_KEY']:
-            if row["message_content"] == i:
-                chats_df.loc[index, 'message_content'] = test['CACHE_KEY'][dict_index]
-                chats_df.loc[index, 'content_type'] = 'Unknown .1020'
-            dict_index += 1
+    # A message whose content is a claim's EXTERNAL_KEY takes that claim's CACHE_KEY. When several
+    # claims share the key (two accounts on the phone, say), this account's claim is taken, then the
+    # first in cache_controller.db's order — it used to be whichever came last.
+    users = cache_df["USER_ID"].tolist() if "USER_ID" in cache_df.columns else [""] * len(cache_df)
+    by_key = {}
+    for ek, ck, user in zip(cache_df['EXTERNAL_KEY'], cache_df['CACHE_KEY'], users):
+        if _id_key(ek) is not None:
+            by_key.setdefault(ek, []).append((ck, str(user or "")))
+    several = 0
+    for index, content in zip(chats_df.index, chats_df["message_content"].tolist()):
+        claims = by_key.get(_id_key(content)) if _id_key(content) is not None else None
+        if not claims:
+            continue
+        if len({ck for ck, _user in claims}) > 1:
+            several += 1
+            mine = [ck for ck, user in claims if uuid and user == uuid]
+            chosen = (mine or [ck for ck, _user in claims])[0]
+        else:
+            chosen = claims[0][0]
+        chats_df.loc[index, 'message_content'] = chosen
+        chats_df.loc[index, 'content_type'] = 'Unknown .1020'
+    if several:
+        logger.info(f"{several} message(s) name a cached file claimed more than once: this account's "
+                    f"claim is shown, else the first in cache_controller.db")
 
     #cache_df_v2 = pd.DataFrame(columns=['CACHE_KEY', 'TYPE', 'client_conversation_id', 'server_message_id'])
     tmp_dict = {'CACHE_KEY': [], 'TYPE': [], 'client_conversation_id': [],
@@ -1640,6 +1720,12 @@ def mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df):
     cache_df_v2 = pd.concat(frames, ignore_index=True, axis=0)
     chats_df['server_message_id'] = chats_df.server_message_id.astype(str)
     merge_df = chats_df.merge(cache_df_v2, on=["client_conversation_id", 'server_message_id'], how="left")
+    if more_files:
+        # The further photos and videos of a message join after the claims do: a claim keyed by the
+        # message's conversation and number would otherwise replace each of their files with its own.
+        extra = pd.DataFrame(more_files)
+        extra['server_message_id'] = extra['server_message_id'].astype(str)
+        merge_df = pd.concat([merge_df, extra], ignore_index=True)
     merged_cache_keys = merge_df['CACHE_KEY'].tolist()
     # logger.info(type(merged_cache_keys))
     # logger.info(cache_df_v2['CACHE_KEY'])
@@ -1833,6 +1919,8 @@ def getSCPersistentMedia():
             
             # tmp_dict = {'CACHE_KEY': file, 'TYPE': file_split[0], 'client_conversation_id': file_split[1],
                         # 'server_message_id': file_split[2], 'SERVER_MESSAGE_ID_PART': file_split[3]}
+    # built once, from the whole list — it was rebuilt after every file
+    if files:
         persistent_df = pd.DataFrame.from_dict(tmp_dict)
 
     return persistent_df
@@ -1881,7 +1969,8 @@ def _index_stages(partial, report_dir, args):
     stages = {}
     for label, build in builders:
         try:
-            stage = build()
+            with progress.stage(f"{label} — index"):
+                stage = build()
         except Exception as Error:
             logger.error(f"{label} report failed while indexing: {Error}")
             continue
@@ -1896,19 +1985,29 @@ def _render_partial(partial, report_dir, args, stages):
                          conversations_report, memories_media_report)
 
     closure, prov = partial.closure, partial.prov
+    # Media retrieved from Snapchat's servers for a Memory this extract carries has to be stated on
+    # every page of it, so the provenance learns it before the first page is written.
+    stage = stages.get("Memories media")
+    if stage is not None:
+        from scripts import cloud_memories
+        cloud = cloud_memories.provenance({row_id[4:]: m for row_id, m in stage.sel.keep(closure)})
+        if cloud:
+            prov["cloud"] = cloud
     conv_index = {}
     stage = stages.get("Conversations")
     if stage is not None:
         try:
-            _report, conv_index = conversations_report.render(stage, closure=closure, prov=prov)
+            with progress.stage("Conversations — render"):
+                _report, conv_index = conversations_report.render(stage, closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"Conversations report failed: {Error}")
 
     stage = stages.get("Contacts")
     if stage is not None:
         try:
-            contacts_report.render(stage, args["ct"]["outdir"], conv_index=conv_index,
-                                   closure=closure, prov=prov)
+            with progress.stage("Contacts — render"):
+                contacts_report.render(stage, args["ct"]["outdir"], conv_index=conv_index,
+                                       closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"Contacts report failed: {Error}")
 
@@ -1919,7 +2018,8 @@ def _render_partial(partial, report_dir, args, stages):
         if stage is None:
             continue
         try:
-            module.render(stage, closure=closure, prov=prov)
+            with progress.stage(f"{label} — render"):
+                module.render(stage, closure=closure, prov=prov)
         except Exception as Error:
             logger.error(f"{label} report failed: {Error}")
 
@@ -1927,7 +2027,8 @@ def _render_partial(partial, report_dir, args, stages):
 
 
 def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir=None,
-         tile_server="", zip_path="", hash_zip=False, partial=None, legacy_reports=False):
+         tile_server="", zip_path="", hash_zip=False, partial=None, legacy_reports=False,
+         cloud=None):
     global snapchatFolder
     global groupPlist
     global outputDir
@@ -2061,6 +2162,11 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
             "cache_controller": cacheController[0] if cacheController else "",
             "contentmanager": contentmanager,
             "primary_docobjects": primaryDoc[0] if primaryDoc else "",
+            "pref_docobjects": next(iter(
+                glob.glob(snapchatFolder + f"/Documents/user_scoped/{user_scoped_id}/userPreferences/"
+                          "pref.docobjects")
+                or glob.glob(snapchatFolder + "/Documents/user_scoped/*/userPreferences/"
+                             "pref.docobjects")), ""),
             "user_plist": str(userPlist) if userPlist and os.path.exists(userPlist) else "",
             "client_encryption": client_enc[0] if client_enc else "",
             "group_plist": groupPlist,
@@ -2083,7 +2189,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # them into its pages and the examiner's selection file can carry a copy. A later partial run
     # checks that copy against the extraction it is given, and refuses to reuse anything a different
     # build produced. See scripts/source_fingerprint.py.
-    sources = source_fingerprint.collect(source_artifacts, zip_path=zip_path, hash_zip=hash_zip)
+    with progress.stage("Hashing the sources" + (" and the ZIP" if hash_zip else "")):
+        sources = source_fingerprint.collect(source_artifacts, zip_path=zip_path, hash_zip=hash_zip)
     source_fingerprint.write_sources(report_dir, sources)
     n_found = sum(1 for r in sources["artifacts"].values() if r.get("present"))
     logger.info(f"Sources: {n_found} of {len(sources['artifacts'])} artifact(s) present, digest "
@@ -2158,13 +2265,31 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # in memory, so this only cleans up after a run made by a previous version.
     if os.path.exists("test.plist"):
         os.remove("test.plist")
+    chat_stage = progress.begin("Chats (arroyo.db, cache claims, attachments)")
+    progress.step("reading messages")
     chats_df = getChats(arroyo[0])
+    progress.step("naming senders")
     chats_df = fixSenders(chats_df, friends_df, df_snapchatter)
+    progress.step("reading cache claims")
     cache_df = getCache(cacheController[0])
     all_claims_df = cache_df.copy()                            # before mergeCache filters it
     content_df = getContentmanager(contentmanager)
+    # Chat media kept as a bundle (the file named after the CACHE_KEY is a descriptor, the video a
+    # child file) or as byte-range shards is rebuilt into a folder the join searches first, so the
+    # message shows it — as on Android (scripts/chat_media.py). Only bytes that are media are written.
+    progress.step("rebuilding chat media kept in pieces")
+    folders = [f for f in (SCContentFolder if isinstance(SCContentFolder, list)
+                           else [SCContentFolder]) if f]
+    rebuilt = os.path.join(outputDir, "_rebuilt")
+    if chat_media.materialize_chat_media(cache_df, snapchatFolder, rebuilt,
+                                         chat_media.message_blobs(arroyo[0])):
+        SCContentFolder = [rebuilt.replace("\\", "/") + "/"] + folders
     cache_df = mergeCache(cache_df, content_df)
+    SCContentFolder = folders                       # the copies are in cacheFiles/ now
+    shutil.rmtree(rebuilt, ignore_errors=True)
+    progress.step("matching messages to cache claims")
     cache_arroyo_df = getCacheArroyo(arroyo[0], cache_df)
+    progress.step("media saved in chat")
     persistent_df = getSCPersistentMedia()
     global persistent_cache_keys
     # Matched against *all* claims, not the merged frame: mergeCache keeps only claims whose
@@ -2172,6 +2297,7 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # saved video needs — a chat video is a bundle, and the file named after its CACHE_KEY is the
     # small CHILDREN descriptor (the video itself is a child file).
     persistent_cache_keys = mapPersistentMediaToCacheKeys(all_claims_df, persistent_df)
+    progress.step("merging chats with cache files")
     final_df = mergeCacheChats(cache_df, chats_df, persistent_df, cache_arroyo_df)
     final_df = final_df.drop_duplicates()
     final_df = final_df.sort_values(by=['Client Conversation ID', 'Server Message ID'])
@@ -2308,6 +2434,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
                                           SCContentFolder[0] if SCContentFolder else "",
                                           out_dir=report_dir + "/LocalMemories_legacy")
 
+    progress.end(chat_stage)
+
     # The arguments both paths use, built once. A partial run calls each report's index() and then its
     # render(); a full run calls main(), which is the two in sequence. Assembling the arguments in one
     # place is what stops the two paths drifting on some argument nobody thought to pass twice.
@@ -2316,15 +2444,18 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         "conv": dict(msg_df=msg_df, friends_df=friends_df, group_df=group_df,
                      outdir=report_dir + "/Conversations", cachefiles_dir=cachefiles_dir,
                      arroyo=arroyo[0] if arroyo else None, tz=tz, owner_user_id=uuid,
-                     owner_username=current_username, cache_key_for=cacheControllerKey,
+                     owner_username=current_username, cache_key_for=chat_media.chat_cache_key,
                      report_dir=report_dir, primary=primary_doc, identifiers=identifiers),
         "ct": dict(friends_df=friends_df, outdir=report_dir + "/Contacts", owner_user_id=uuid,
                    owner_username=current_username, friends_source=friends_source, tz=tz,
                    report_dir=report_dir, primary=primary_doc, identifiers=identifiers,
                    account=getAccount(userPlist)),
+        # The run folder holds CloudDownloads/ — earlier retrievals from Snapchat's servers, shown in
+        # full and partial reports alike. A retrieval itself (`cloud`) is never part of a partial run.
         "mem": dict(app_or_root=snapchatFolder, keychain=keychain_file,
                     outdir=report_dir + "/Memories", padding=padding, tz=tz, src_root=src_root,
-                    tile_server=tile_server),
+                    tile_server=tile_server, cloud=cloud if partial is None else None,
+                    run_folder=os.path.dirname(os.path.abspath(report_dir))),
         "cm": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheMedia", tz=tz,
                    src_root=src_root, report_dir=report_dir),
         "cc": dict(app_or_root=snapchatFolder, outdir=report_dir + "/CacheController", tz=tz,
@@ -2371,19 +2502,22 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
 
     try:
         from scripts import conversations_report
-        _report, conv_index = conversations_report.main(**args["conv"])
+        with progress.stage("Conversations"):
+            _report, conv_index = conversations_report.main(**args["conv"])
     except Exception as Error:
         logger.error(f"Conversations report failed: {Error}")
 
     # Contacts report: one table of every contact, linked to that contact's conversation page.
     try:
         from scripts import contacts_report
-        contacts_report.main(conv_index=conv_index, **args["ct"])
+        with progress.stage("Contacts"):
+            contacts_report.main(conv_index=conv_index, **args["ct"])
     except Exception as Error:
         logger.error(f"Contacts report failed: {Error}")
 
     #final_df.to_excel("test.xlsx")
-    legacy_memories_report()
+    with progress.stage("Legacy Memories"):
+        legacy_memories_report()
     if not legacy_wanted:
         # The parser stages chat attachments in that folder whether or not the legacy report is
         # wanted, and the Conversations report hard-links what it needs out of it — so the bytes
@@ -2398,7 +2532,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
         from scripts import memories_media_report
         # Application is the extracted ".../ExtractedData/Application" folder; its parent is the
         # archive root, so source paths in the report show as "/Application/<UUID>/Documents/...".
-        memories_media_report.main(**args["mem"])
+        with progress.stage("Memories"):
+            memories_media_report.main(**args["mem"])
     except Exception as Error:
         logger.error(f"Memories media report failed: {Error}")
 
@@ -2408,7 +2543,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # the links between the two are two-way.
     try:
         from scripts import cache_media_report
-        cache_media_report.main(**args["cm"])
+        with progress.stage("Library/Caches"):
+            cache_media_report.main(**args["cm"])
     except Exception as Error:
         logger.error(f"Cached media report failed: {Error}")
 
@@ -2417,7 +2553,8 @@ def main(Application, AppGroup, keychain, padding="both", tz="local", report_dir
     # those so it can read the manifests they wrote.
     try:
         from scripts import cache_controller_report
-        cache_controller_report.main(**args["cc"])
+        with progress.stage("cache_controller"):
+            cache_controller_report.main(**args["cc"])
     except Exception as Error:
         logger.error(f"cache_controller report failed: {Error}")
     #return user_scoped_id
