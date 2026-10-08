@@ -460,6 +460,18 @@ Memory. Under the sources, *≡ the same bytes, linked by content* names the cac
 the bytes connects to this Memory: byte-identical to its media as recovered from the device
 (`cloud_memories.find_identical`; rule 5 of [cross_report_linking.md](cross_report_linking.md)).
 
+Every cache file in the row is named by its `CACHE_KEY` — the file the media was recovered from as much
+as the ones linked by content — and every one has its paths in the last column, the content-linked
+ones under a *≡ linked by content* lead (`annotate_identical_sources`). The recovered file was once
+labelled only *🗄 cache entry* and its content-linked twin by its key, with no paths of its own: a row
+holding two files on disk read as one file, and the one it seemed to be was the twin. A twin's bytes
+equal the media **after decryption**, so on disk it carries the hash the row shows, and the recovered
+file — encrypted — does not.
+
+A video's *Dimensions* are not read from the file: they are the Memory row's `ZWIDTH×ZHEIGHT`, and say
+so (*(scdb-27)* and a "?"). The cache can hold the video at another size than the row records; a
+poster generated from the video has the size of its frames.
+
 Below the table, *Library/Caches — files linked to this Memory* lists every row that report links here
 and how — a pack decrypted with this Memory's key, a file keyed by its CDN URL, or one byte-identical
 to its media. That report renders after this one, so the list comes from its

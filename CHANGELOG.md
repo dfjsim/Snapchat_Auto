@@ -14,6 +14,15 @@ reader find it; the format findings behind them live in [docs/](docs/). Open wor
   CDN URL or the *No database time* note took the whole width. The value column now gives way and
   the source column keeps at least 18em; a note spans both columns. The other expandable index
   reports draw two-column grids or tables and were not affected.
+- **A Memory's media row holding two files on disk read as one file.** The file the media was
+  recovered from was labelled *🗄 cache entry*, and a cache file byte-identical to it (*≡ the same
+  bytes, linked by content*) by its key, with no paths — so the one key on screen was the twin's.
+  Both are now named by their `CACHE_KEY`, and the twin's paths and device record are listed under the
+  recovered file's (`memories_media_report.annotate_identical_sources`). The "?" says the twin equals
+  the media after decryption, and that the match proves the content, not why the app cached it.
+- **A video's Dimensions were the database's, unlabelled.** The Media files table showed the Memory
+  row's `ZWIDTH×ZHEIGHT` for a video as if read from the file. It is now marked *(scdb-27)* with a
+  "?": the cached video can be another size than the row records.
 
 ## [1.9.0-beta.3] — 2026-10-07
 

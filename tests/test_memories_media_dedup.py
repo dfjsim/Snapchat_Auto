@@ -457,3 +457,46 @@ def test_the_same_bytes_found_elsewhere_on_the_device_are_named():
 
     assert "the same bytes, linked by content" in out and "ck-" + "9" * 32 in out
     assert "8" * 32 not in out                       # a server-copy match is the servers block's
+
+
+def test_the_recovered_file_and_its_twin_are_both_named_by_key_with_their_paths():
+    """A row holding two files on disk read as one: the recovered file was only "cache entry", the
+    content-linked twin was named by its key and had no paths — so the one key on screen was the
+    twin's, and the paths beside it were the other file's."""
+    twin = "9" * 32
+    one = _with_file("SNAP-1", in_cc=True, src=["/x/SCContent/" + CACHE_KEY],
+                     identical_cached=[{"cache_key": twin, "what": "device",
+                                        "src": ["/x/SCContent/" + twin]}])
+    out = _group_detail([one])
+
+    assert f"🗄 {CACHE_KEY}</a>" in out and "🗄 cache entry" not in out
+    assert "≡ linked by content" in out
+    assert out.index("/x/SCContent/" + CACHE_KEY) < out.index("/x/SCContent/" + twin)
+
+
+def test_the_twin_gets_its_paths_and_device_record_from_the_cache_index(tmp_path):
+    twin = "9" * 32
+    (tmp_path / twin).write_bytes(b"x")
+    part = str(tmp_path / (OTHER_KEY + "_0-1"))
+    mems = {"SNAP-1": _with_file("SNAP-1", identical_cached=[
+        {"cache_key": twin, "what": "device"}, {"cache_key": OTHER_KEY, "what": "device"},
+        {"cache_key": "8" * 32, "what": "decrypted"}])}
+
+    memories_report.annotate_identical_sources(
+        mems, {twin: [str(tmp_path / twin)]}, {OTHER_KEY: [(0, part)]}, None, {})
+
+    hits = mems["SNAP-1"]["media_files"][0]["identical_cached"]
+    assert hits[0]["src"] == [str(tmp_path / twin)] and len(hits[0]["src_fs"]) == 1
+    assert hits[1]["src"] == [part]                           # rebuilt from its parts: each part
+    assert "src" not in hits[2]                               # a server copy has no path on the device
+
+
+def test_a_videos_dimensions_say_they_are_the_databases():
+    """PIL cannot read a video, so the size shown is ZGALLERYSNAP's — and the cached video can be
+    another size than the row records."""
+    video = _group_detail([_with_file("SNAP-1", snap_dim="720×1280")])
+    image = _group_detail([_with_file("SNAP-1", dim="1088×1920", snap_dim="720×1280")])
+
+    assert "720×1280 <span class='muted'>(scdb-27)</span>" in video
+    assert memories_report.SNAP_DIM_BASIS[:40] in video
+    assert "<td>1088×1920</td>" in image and "<span class='muted'>(scdb-27)</span>" not in image

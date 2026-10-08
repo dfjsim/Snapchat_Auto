@@ -1351,6 +1351,18 @@ def _part_coverage(ordered):
     return {"gaps": gaps, "short": short, "bytes": total}
 
 
+def _sccontent_files(cache_key, full, parts):
+    """``([full paths], [(offset, part path)])`` on disk for a cache key — the parts in offset order,
+    one per start offset — without reading any of them."""
+    ordered, seen_off = [], set()
+    for off, p in sorted(parts.get(cache_key.lower(), [])):
+        if off in seen_off:                                # e.g. a PREFETCH and a _0-1 both at 0
+            continue
+        seen_off.add(off)
+        ordered.append((off, p))
+    return full.get(cache_key, []), ordered
+
+
 def _resolve_sccontent(cache_key, full, parts):
     """Resolve a cache key to (ciphertext, [full paths], [ordered part paths], coverage) or 4×None.
 
@@ -1359,13 +1371,7 @@ def _resolve_sccontent(cache_key, full, parts):
     ``coverage`` is ``_part_coverage`` for a file rebuilt from shards, else None — a whole file has
     no shard layout to be missing anything.
     """
-    fulls = full.get(cache_key, [])
-    ordered, seen_off = [], set()
-    for off, p in sorted(parts.get(cache_key.lower(), [])):
-        if off in seen_off:                                # e.g. a PREFETCH and a _0-1 both at 0
-            continue
-        seen_off.add(off)
-        ordered.append((off, p))
+    fulls, ordered = _sccontent_files(cache_key, full, parts)
     paths = [p for _, p in ordered]
     if fulls:
         return open(fulls[0], "rb").read(), fulls, paths, None
@@ -2692,29 +2698,55 @@ def annotate_file_times(memories, tz, mtimes, src_root=None, manifest=None, fs=N
     for m in memories.values():
         for f in m.get("media_files") or []:
             f["file_times"] = report_ui.file_time_rows(f.get("meta"), epochfmt)
-            stamps, records = [], []
-            for path in f.get("src") or []:
-                key = manifest_key(path)
-                shown_path = device_path(path, src_root, manifest)
-                # the device's whole record where the archive has one (see device_fs); the plain
-                # mtime otherwise, for an extraction folder an older build produced
-                record = (fs or {}).get(key)
-                if record and record.get("mtime") is not None:
-                    stamp_text = device_fs.format_ns(record["mtime"], epochfmt,
-                                                     record.get("precision", "s"))
-                else:
-                    stamp = mtimes.get(key) if mtimes else None
-                    stamp_text = epochfmt(stamp) if stamp is not None else ""
-                    if stamp is not None and not record:
-                        record = {"source": "zip-ut", "precision": "s", "mtime": stamp * device_fs.NS}
-                stamps.append((shown_path, stamp_text))
-                records.append((shown_path, record))
+            stamps, records = _device_records(f.get("src") or [], epochfmt, mtimes, src_root,
+                                              manifest, fs)
             f["src_mtimes"] = stamps
             f["src_fs"] = records
             # the whole file's record summarised once (its parts bounded), for the timestamp list;
             # and the run's formatter, for the per-path lines the Media files table draws
             f["device_summary"] = device_fs.summarize([rec for _p, rec in records], epochfmt)
             f["_epochfmt"] = epochfmt
+
+
+def _device_records(paths, epochfmt, mtimes, src_root, manifest, fs):
+    """``([(shown path, mtime text)], [(shown path, device record)])`` for cache files on disk."""
+    stamps, records = [], []
+    for path in paths:
+        key = manifest_key(path)
+        shown_path = device_path(path, src_root, manifest)
+        # the device's whole record where the archive has one (see device_fs); the plain
+        # mtime otherwise, for an extraction folder an older build produced
+        record = (fs or {}).get(key)
+        if record and record.get("mtime") is not None:
+            stamp_text = device_fs.format_ns(record["mtime"], epochfmt,
+                                             record.get("precision", "s"))
+        else:
+            stamp = mtimes.get(key) if mtimes else None
+            stamp_text = epochfmt(stamp) if stamp is not None else ""
+            if stamp is not None and not record:
+                record = {"source": "zip-ut", "precision": "s", "mtime": stamp * device_fs.NS}
+        stamps.append((shown_path, stamp_text))
+        records.append((shown_path, record))
+    return stamps, records
+
+
+def annotate_identical_sources(memories, scfull, scparts, tz, mtimes, src_root=None, manifest=None,
+                               fs=None):
+    """Give every cache file proven identical to a Memory's media (``identical_cached``, the
+    device's copy) its paths on disk and the device's record of each, as `annotate_file_times`
+    gives the files the media was recovered from — so the Media files table lists that file's paths
+    too, instead of only its key."""
+    epochfmt, _label = make_epoch_formatter(tz)
+    for m in memories.values():
+        for f in m.get("media_files") or []:
+            for hit in f.get("identical_cached") or ():
+                if hit.get("what") != "device" or "src" in hit:
+                    continue
+                fulls, ordered = _sccontent_files(hit["cache_key"], scfull, scparts)
+                hit["src"] = fulls + [p for _, p in ordered]
+                hit["src_fs"] = _device_records(hit["src"], epochfmt, mtimes, src_root, manifest,
+                                                fs)[1]
+                hit["_epochfmt"] = epochfmt
 
 
 def _memory_times(m):
@@ -3502,13 +3534,22 @@ SHARED_MEDIA_BASIS = (
 
 
 IDENTICAL_ON_DEVICE_BASIS = (
-    "Proven by content: these cache files are byte-identical (SHA-256) to this media as this run "
-    "recovered it, and no identifier on the device connects them to this Memory — the cache reports "
-    "link them to it on the bytes alone. Typically the snap editor's working copy of a snap that was "
-    "then saved to Memories. The comparison is made against every SCContent file, whole or rebuilt "
-    "from its byte-range parts; the Library/Caches report makes the same comparison with its own "
-    "files. A file some Memory's media was recovered from is not compared: its identifiers link it "
-    "already.")
+    "Proven by content: each of these is another cache file, byte-identical (SHA-256) to this media "
+    "as this run recovered it — after decryption, when the file above is stored encrypted — so it "
+    "has on disk the hash the Hashes column shows. No identifier on the device connects it to this "
+    "Memory: the cache reports link it on the bytes alone. Typically the snap editor's working copy "
+    "of a snap that was then saved to Memories; the match proves the content, not why the app cached "
+    "the file, which its own claims in the cache_controller report say. Its paths are in the last "
+    "column, below those of the file above. The comparison is made against every SCContent file, "
+    "whole or rebuilt from its byte-range parts; the Library/Caches report makes the same comparison "
+    "with its own files. A file some Memory's media was recovered from is not compared: its "
+    "identifiers link it already.")
+
+SNAP_DIM_BASIS = (
+    "Not read from this file: ZGALLERYSNAP.ZWIDTH × ZHEIGHT, the size the Memory's database row "
+    "records, shown because a video's frame size is not read here. The two need not agree — the "
+    "cache can hold the video at another size than the row records. A poster generated from this "
+    "video has the size of its frames.")
 
 PACK_IN_CACHEMEDIA_BASIS = (
     "caching-media packs are NOT indexed by cache_controller.db, so the cache_controller report "
@@ -3764,10 +3805,13 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
     def source_html(f):
         cell = html.escape(f["source"]) + _info(f.get("how")) + _partial_badge(f)
         if f.get("in_cc") and f.get("cache_key"):
+            # named by its key, as the files linked by content below are: the one label that tells
+            # this file from those, and the name its path in the last column ends with
             cell += " " + report_ui.xref(
                 f"<a class='cclink' target='scauto_cache' "
                 f"href=\"{cc_prefix}CacheController/CacheController_report.html#ck-"
-                f"{html.escape(f['cache_key'])}\">🗄 cache entry</a>",
+                f"{html.escape(f['cache_key'])}\" title=\"this cache entry in the cache_controller "
+                f"report\">🗄 {html.escape(f['cache_key'])}</a>",
                 [("cc", f"ck-{f['cache_key']}")], closure=closure)
         elif f.get("source") == "caching-media" and f.get("item"):
             # cache_controller.db does not index these, so the only report that inventories the
@@ -3815,21 +3859,25 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
             blocks.append(f"<span class='hl'>MD5</span>{tag} {md5}<br>"
                           f"<span class='hl'>SHA-256</span>{tag} {sha256}")
         hashes = "<div class='hgap'></div>".join(blocks)
-        dim = f.get("dim") or f.get("snap_dim") or ""
+        if f.get("dim") or not f.get("snap_dim"):
+            dim = html.escape(f.get("dim") or "")
+        else:                                              # the database's figure, not the file's
+            dim = (f"{html.escape(f['snap_dim'])} <span class='muted'>(scdb-27)</span>"
+                   + _info(SNAP_DIM_BASIS))
         source_cell = source_html(f)
         if others:
             source_cell += "".join(f"<div class='alsosrc'>and {source_html(o)}</div>" for o in others)
             srcs += "".join(f"<div class='alsosrc'>{_render_src_paths(o, src_root, manifest)}</div>"
                             for o in others)
         # cache files with these same bytes that nothing but the bytes connects to this Memory
-        same = []
+        same = {}
         for mm in members:
             for o in mm["media_files"]:
                 if _media_key(o) != _media_key(f):
                     continue
                 for hit in o.get("identical_cached") or ():
-                    if hit.get("what") == "device" and hit["cache_key"] not in same:
-                        same.append(hit["cache_key"])
+                    if hit.get("what") == "device":
+                        same.setdefault(hit["cache_key"], hit)
         if same:
             source_cell += (
                 "<div class='alsosrc'>≡ the same bytes, linked by content"
@@ -3839,10 +3887,16 @@ def _render_group_detail(members, keychain_available, snap_tcols, entry_tcols,
                         f"CacheController_report.html#ck-{html.escape(key)}\">🗄 "
                         f"{html.escape(key)}</a>", [("cc", f"ck-{key}")], closure=closure)
                     for key in same) + "</div>")
+            # and their paths, under the paths of the file the media was recovered from: a file on
+            # disk of its own, which the key alone left the examiner to look up in another report
+            srcs += "".join(
+                f"<div class='alsosrc'><span class='muted'>≡ linked by content</span><br>"
+                f"{_render_src_paths(hit, src_root, manifest)}</div>"
+                for hit in same.values() if hit.get("src"))
         frows.append(
             f"<tr{' class=partialrow' if f.get('complete') is False else ''}>"
             f"<td>{role_cell}</td><td>{source_cell}</td>"
-            f"<td>{f['ext']}</td><td>{html.escape(dim)}</td>"
+            f"<td>{f['ext']}</td><td>{dim}</td>"
             f"<td>{f['bytes']//1024} KB</td>"
             f"<td><a href=\"{media_prefix}{html.escape(f['path'])}\" target=\"_blank\">open</a></td>"
             f"<td class='hash'>{hashes}</td>"
@@ -4978,9 +5032,10 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
             f["path"] = "media/" + f["out"]
     # What each file says about itself and what the device's filesystem said about its cache files,
     # in the run's timezone — the two timestamp sources this report shows beside the database's.
-    annotate_file_times(all_memories, tz, load_device_mtimes(src_root, app_or_root, app),
-                        src_root=src_root, manifest=manifest,
-                        fs=load_fs_records(src_root, app_or_root, app))
+    device_mtimes = load_device_mtimes(src_root, app_or_root, app)
+    fs_records = load_fs_records(src_root, app_or_root, app)
+    annotate_file_times(all_memories, tz, device_mtimes, src_root=src_root, manifest=manifest,
+                        fs=fs_records)
 
     # Snapchat's servers (scripts/cloud_memories.py): whether a copy there could add anything, a
     # retrieval when the examiner asked for one, and what earlier retrievals into this run folder hold.
@@ -4999,6 +5054,8 @@ def index(app_or_root, keychain="", outdir=None, padding="both", tz="local", src
     identical = cloud_memories.find_identical(
         all_memories, scfull, scparts, lambda key: _resolve_sccontent(key, scfull, scparts),
         size_of=lambda key: _sccontent_size(key, scfull, scparts))
+    annotate_identical_sources(all_memories, scfull, scparts, tz, device_mtimes, src_root=src_root,
+                               manifest=manifest, fs=fs_records)
     if identical:
         by_what = {}
         for recs in identical.values():
