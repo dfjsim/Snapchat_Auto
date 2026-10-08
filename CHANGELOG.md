@@ -6,6 +6,15 @@ inside the next one. Entries name the module or function that carries a change w
 reader find it; the format findings behind them live in [docs/](docs/). Open work is in
 [TODO.md](TODO.md).
 
+## [Unreleased]
+
+### Fixed
+- **A Memory's expanded row could squeeze the source column to one character per line.** The
+  timestamp and *CDN URLs, AES key / IV…* grids sized their value column to its longest value, so one
+  CDN URL or the *No database time* note took the whole width. The value column now gives way and
+  the source column keeps at least 18em; a note spans both columns. The other expandable index
+  reports draw two-column grids or tables and were not affected.
+
 ## [1.8.0-beta.4] — 2026-10-01
 
 ### Fixed

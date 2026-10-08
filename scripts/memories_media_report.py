@@ -2749,15 +2749,15 @@ def _index_detail(members, key, this_sid, group=(), lead_sid=""):
                        f"<div class='v'>{html.escape(value)}</div>"
                        f"<div class='s' title='{html.escape(source)}'>{html.escape(source)}</div>"
                        for label, value, source in times)
+        # a note has no source: `.note` spans the value and source columns (see `.tsgrid` in the CSS)
         if not grid:
-            grid = ("<div class='k'>Timestamps</div><div class='v muted'>none — no ZGALLERYSNAP row "
-                    "survives for this Memory, its media carries no dated header, and the archive "
-                    "recorded no filesystem time, so it has no time of its own to filter on</div>"
-                    "<div class='s'></div>")
+            grid = ("<div class='k'>Timestamps</div><div class='v muted note'>none — no ZGALLERYSNAP "
+                    "row survives for this Memory, its media carries no dated header, and the archive "
+                    "recorded no filesystem time, so it has no time of its own to filter on</div>")
         elif not (m.get("times") or {}).get("ZCREATETIMEUTC") and not m.get("create_utc"):
-            grid = ("<div class='k muted'>No database time</div><div class='v muted'>no ZGALLERYSNAP "
-                    "row survives for this Memory — the times below are the media file's own and the "
-                    "device filesystem's</div><div class='s'></div>") + grid
+            grid = ("<div class='k muted'>No database time</div><div class='v muted note'>no "
+                    "ZGALLERYSNAP row survives for this Memory — the times below are the media file's "
+                    "own and the device filesystem's</div>") + grid
         grid = (f"<div class='tshd'>Timestamps{report_ui.info_icon(TIME_SOURCES_HINT)}</div>"
                 f"<div class='grid tsgrid'>{grid}</div>{_index_more(m)}")
         # The same box, id and keys as this Memory's own row and its detail sub-page: one selection,
@@ -4123,10 +4123,15 @@ def generate_report(memories, outdir, keychain_available, userids=None, tz_label
  .thisrow{background:#e7ecff;color:#25348a;border:1px solid #b9c3f0;border-radius:9px;
    font-size:9.5px;font-weight:700;letter-spacing:.03em;padding:0 6px;text-transform:uppercase}
  .memfold .selrow{font-size:11px;color:#444;display:inline-flex;align-items:center;gap:4px}
- .tsgrid{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);gap:1px 12px;
-   margin-top:5px;font-size:11.5px;max-width:980px}
+ /* label / value / source. The value column grows to what it holds but never past the room left,
+    and the source column always keeps 18em: with a `max-content` value column one long value — a
+    CDN URL, a note — took the whole width and left the sources one character per line. A note in
+    place of a value has no source, so it spans both columns instead of widening every row's value. */
+ .tsgrid{display:grid;grid-template-columns:max-content minmax(0,auto) minmax(18em,1fr);
+   gap:1px 12px;margin-top:5px;font-size:11.5px;max-width:1200px}
  .tsgrid .k{color:#666} .tsgrid .v{color:#1b1b1f;font-family:ui-monospace,Consolas,monospace;
    overflow-wrap:anywhere}
+ .tsgrid .v.note{grid-column:2/-1}
  /* where the value was read from — the database column, the file's own header, the archive */
  .tsgrid .s{color:#8a8aa0;font-size:10.5px;font-family:ui-monospace,Consolas,monospace;
    overflow-wrap:anywhere;align-self:center}
